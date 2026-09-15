@@ -1,0 +1,206 @@
+package llm
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/samperrin/pons"
+	"github.com/samperrin/pons/protocol"
+)
+
+// fakeClient is a scripted provider for testing the brain logic without HTTP.
+type fakeClient struct {
+	responses     []Turn          // assistant turns to return, in order
+	seen          [][]Turn        // what each call received
+	capturedTools []pons.ToolSpec // tools from the last call
+}
+
+func (f *fakeClient) Complete(ctx context.Context, system string, turns []Turn, tools []pons.ToolSpec) (Turn, error) {
+	f.seen = append(f.seen, turns)
+	f.capturedTools = tools
+	i := len(f.seen) - 1
+	if i >= len(f.responses) {
+		return Turn{}, context.DeadlineExceeded
+	}
+	return f.responses[i], nil
+}
+
+func newBrain(t *testing.T, c Client) *Brain {
+	t.Helper()
+	b := &Brain{cfg: Config{Model: "test"}, client: c, core: pons.New()}
+	return b
+}
+
+func TestBrainMapsToolUseToActions(t *testing.T) {
+	fake := &fakeClient{responses: []Turn{
+		{Role: "assistant", Blocks: []Block{
+			Text{Value: "Let me look around."},
+			ToolUse{ID: "call_1", Name: "bash", Input: map[string]any{"command": "ls", "timeout": float64(10)}},
+		}},
+		{Role: "assistant", Blocks: []Block{Text{Value: "All done."}}},
+	}}
+	b := newBrain(t, fake)
+	ctx := context.Background()
+	obs := protocol.Observation{Turn: 1, Message: "g", Workspace: "/w"}
+
+	actions, err := b.NextActions(ctx, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(actions) != 1 || actions[0].Kind != "bash" || actions[0].ID != "call_1" {
+		t.Fatalf("actions: %+v", actions)
+	}
+	if actions[0].Args["command"] != "ls" || actions[0].Args["timeout"] != "10" {
+		t.Fatalf("args not stringified: %+v", actions[0].Args)
+	}
+
+	// Result flows back as a tool_result block on the next call.
+	if _, err := b.Interpret(ctx, obs, protocol.ToolResult{ActionID: "call_1", OK: true, Output: "hi\n"}); err != nil {
+		t.Fatal(err)
+	}
+	actions, err = b.NextActions(ctx, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(actions) != 1 || actions[0].Kind != protocol.ActFinish || actions[0].Args["reason"] != "All done." {
+		t.Fatalf("expected finish, got: %+v", actions)
+	}
+
+	// Second call must contain: goal, assistant tool_use, tool_result.
+	got := fake.seen[1]
+	if len(got) != 3 {
+		t.Fatalf("expected 3 turns, got %d", len(got))
+	}
+	var sawResult bool
+	for _, blk := range got[2].Blocks {
+		if r, ok := blk.(Result); ok && r.ToolUseID == "call_1" && r.Content == "hi\n" && !r.IsError {
+			sawResult = true
+		}
+	}
+	if !sawResult {
+		t.Fatalf("tool_result not forwarded: %+v", got[2].Blocks)
+	}
+}
+
+func TestFailedToolIsErrorResult(t *testing.T) {
+	fake := &fakeClient{responses: []Turn{
+		{Role: "assistant", Blocks: []Block{ToolUse{ID: "c1", Name: "nope", Input: map[string]any{}}}},
+		{Role: "assistant", Blocks: []Block{Text{Value: "giving up"}}},
+	}}
+	b := newBrain(t, fake)
+	ctx := context.Background()
+	obs := protocol.Observation{Turn: 1}
+
+	if _, err := b.NextActions(ctx, obs); err != nil {
+		t.Fatal(err)
+	}
+	b.Interpret(ctx, obs, protocol.ToolResult{ActionID: "c1", OK: false, Error: "no plugin provides"})
+	b.NextActions(ctx, obs)
+
+	for _, blk := range fake.seen[1][2].Blocks {
+		if r, ok := blk.(Result); ok && r.IsError {
+			return // expected
+		}
+	}
+	t.Fatal("expected IsError on failed tool result")
+}
+
+func TestEmptyResponseIsSurfacedNotSwallowed(t *testing.T) {
+	fake := &fakeClient{responses: []Turn{
+		{Role: "assistant", Blocks: []Block{}}, // degenerate: nothing at all
+	}}
+	b := &Brain{cfg: Config{}, client: fake, core: pons.New()}
+	_, err := b.NextActions(context.Background(), protocol.Observation{Turn: 1, Message: "test"})
+	if err == nil || !strings.Contains(err.Error(), "empty response") {
+		t.Fatalf("empty response should error, got: %v", err)
+	}
+}
+
+func TestCompactionCollapsesMiddleTurns(t *testing.T) {
+	fake := &fakeClient{responses: []Turn{
+		{Role: "assistant", Blocks: []Block{ToolUse{ID: "c1", Name: "ping", Input: map[string]any{}}}},
+		{Role: "assistant", Blocks: []Block{ToolUse{ID: "c2", Name: "ping", Input: map[string]any{}}}},
+		{Role: "assistant", Blocks: []Block{Text{Value: "SUMMARY: two pings ran; state is fine."}}},
+		{Role: "assistant", Blocks: []Block{Text{Value: "all done"}}},
+	}}
+	b := &Brain{cfg: Config{CompactChars: 10, CompactKeep: 2}, client: fake, core: pons.New()}
+
+	ctx := context.Background()
+	obs := protocol.Observation{Turn: 1, Message: "test goal"}
+	// Turn 1: tool call (no compaction — turns ≤ keep+1).
+	if _, err := b.NextActions(ctx, obs); err != nil {
+		t.Fatal(err)
+	}
+	b.Interpret(ctx, obs, protocol.ToolResult{ActionID: "c1", OK: true, Output: "FIRST-PONG " + strings.Repeat("mid ", 30)})
+	// Turn 2: still ≤ keep+1 → compaction no-op; second tool call.
+	if _, err := b.NextActions(ctx, obs); err != nil {
+		t.Fatal(err)
+	}
+	b.Interpret(ctx, obs, protocol.ToolResult{ActionID: "c2", OK: true, Output: "SECOND-PONG " + strings.Repeat("tail ", 30)})
+	// Turn 3: now there is a real middle (2 tool turns) — the summarizer
+	// call (seen[2]) fires, then the real Complete (seen[3]) gets the
+	// collapsed context.
+	if _, err := b.NextActions(ctx, obs); err != nil {
+		t.Fatal(err)
+	}
+
+	// seen[2] is the summarizer request: it carries the collapsed middle
+	// and no tools.
+	if len(fake.seen) != 4 {
+		t.Fatalf("expected 4 client calls (2 turns, 1 summarizer, 1 final), got %d", len(fake.seen))
+	}
+	sumReq := fake.seen[2]
+	if len(sumReq) != 1 || sumReq[0].Role != "user" {
+		t.Fatalf("summarizer input shape: %+v", sumReq)
+	}
+	middleRendered := false
+	for _, blk := range sumReq[0].Blocks {
+		if txt, ok := blk.(Text); ok && strings.Contains(txt.Value, "FIRST-PONG") {
+			middleRendered = true
+		}
+	}
+	if !middleRendered {
+		t.Fatalf("summarizer did not receive the middle turns: %+v", sumReq[0])
+	}
+
+	// The post-compaction context: goal + summary, middle gone.
+	last := fake.seen[len(fake.seen)-1]
+	var sawMessage, sawSummary, sawStale bool
+	for _, t2 := range last {
+		for _, blk := range t2.Blocks {
+			if txt, ok := blk.(Text); ok {
+				if strings.Contains(txt.Value, "test goal") {
+					sawMessage = true
+				}
+				if strings.Contains(txt.Value, "SUMMARY: two pings") {
+					sawSummary = true
+				}
+			}
+			if r, ok := blk.(Result); ok && strings.Contains(r.Content, "FIRST-PONG") {
+				sawStale = true
+			}
+		}
+	}
+	if !sawMessage || !sawSummary {
+		t.Fatalf("compacted context missing message or summary: %+v", last)
+	}
+	if sawStale {
+		t.Fatalf("collapsed middle result leaked into context: %+v", last)
+	}
+	if len(b.turns) > 5 { // goal + summary + tail(2) + new assistant turn
+		t.Fatalf("turns did not collapse: %d", len(b.turns))
+	}
+}
+
+func TestToolSpecsReachTheModel(t *testing.T) {
+	fake := &fakeClient{responses: []Turn{{Role: "assistant", Blocks: []Block{Text{Value: "done"}}}}}
+	b := newBrain(t, fake)
+	b.core.AddTool("bash", pons.ToolDef{Description: "run a command", Params: []pons.ToolParam{
+		{Name: "command", Type: "string", Required: true},
+	}})
+	b.NextActions(context.Background(), protocol.Observation{Turn: 1})
+	if len(fake.capturedTools) != 1 || fake.capturedTools[0].Kind != "bash" {
+		t.Fatalf("tools not passed to client: %+v", fake.capturedTools)
+	}
+}
