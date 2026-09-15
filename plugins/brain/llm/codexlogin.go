@@ -2,7 +2,7 @@
 // Codex CLI performs, owned by pons.
 //
 //  1. a local HTTP server on 127.0.0.1:1455 waits for the callback
-//  2. the browser opens auth.openai.com/authorize (PKCE S256)
+//  2. the browser opens auth.openai.com/oauth/authorize (PKCE S256)
 //  3. the callback delivers the authorization code
 //  4. the code is exchanged for access/id/refresh tokens
 //  5. credentials are stored at ~/.pons/auth.json (0600) — pons owns it
@@ -93,8 +93,12 @@ func waitForCallback(ctx context.Context, state string) (code string, err error)
 		if msg == "" && code == "" {
 			msg = "callback missing code"
 		}
-		w.Header().Set("content-type", "text/html; charset=utf-8")
-		fmt.Fprint(w, "<html><body><h3>Authenticated - return to the terminal.</h3></body></html>")
+		if msg != "" {
+			http.Error(w, "Authentication failed: "+msg, http.StatusBadRequest)
+		} else {
+			w.Header().Set("content-type", "text/html; charset=utf-8")
+			fmt.Fprint(w, "<html><body><h3>Authenticated - return to the terminal.</h3></body></html>")
+		}
 		select {
 		case done <- result{code: code, msg: msg}:
 		default:

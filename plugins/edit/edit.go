@@ -6,7 +6,7 @@
 //   - each SEARCH text must match a UNIQUE region of the file (exact match
 //     first, then a whitespace/unicode-normalized fallback, like pi's
 //     fuzzyFindText)
-//   - on success the result carries a standard unified diff (ToolResult.Diff,
+//   - on success the result carries a standard unified diff (EditResult.Diff,
 //     like pi's details.patch) for review and SDK consumption
 //
 // Patch format (marker-based, robust for LLM emission):
@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/samperrin/pons"
 	"github.com/samperrin/pons/internal/jail"
@@ -57,6 +58,9 @@ func Patch(path, patch string) protocol.Action {
 // Edit is the edit_file tool plugin.
 type Edit struct {
 	root string // resolved jail root
+	// The operation is a read-modify-write. Serialize edits so concurrent
+	// actions cannot lose one another's changes (ADR-0006).
+	mu sync.Mutex
 }
 
 // Config tunes the plugin.
@@ -113,11 +117,39 @@ func mustJSON(v any) json.RawMessage {
 	return b
 }
 
+func writeAtomic(path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".pons-edit-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	return nil
+}
+
 type block struct{ search, replace string }
 
 func (p *Edit) apply(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
-	path := a.Args["path"]
-	if err := jail.Check(p.root, path); err != nil {
+	path, err := jail.ResolvePath(p.root, a.Args["path"])
+	if err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 	}
 	blocks, err := parsePatch(a.Args["patch"])
@@ -128,10 +160,18 @@ func (p *Edit) apply(ctx context.Context, a protocol.Action) (protocol.ToolResul
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: "patch contains no SEARCH/REPLACE blocks"}, nil
 	}
 
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false,
 			Error: fmt.Sprintf("could not edit file: %s. %v.", path, err)}, nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return protocol.ToolResult{ActionID: a.ID, OK: false,
+			Error: fmt.Sprintf("could not stat file: %s. %v.", path, err)}, nil
 	}
 
 	// Normalize CRLF/BOM for matching; restore on write (pi does the same).
@@ -156,7 +196,7 @@ func (p *Edit) apply(ctx context.Context, a protocol.Action) (protocol.ToolResul
 
 	if current != original {
 		out := bom + strings.ReplaceAll(current, "\n", ending)
-		if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
+		if err := writeAtomic(path, []byte(out), info.Mode().Perm()); err != nil {
 			return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 		}
 	}

@@ -138,7 +138,9 @@ func New(cfg Config) (*Brain, error) {
 		if baseURL == "" {
 			baseURL = "https://api.anthropic.com"
 		}
-		client = newAnthropicClient(key, baseURL, b.maxTokens())
+		ac := newAnthropicClient(key, baseURL, b.maxTokens())
+		ac.model = model
+		client = ac
 		b.model = model
 	case "codex":
 		// ChatGPT-subscription auth from pons's own auth file (~/.pons/auth.json,
@@ -197,7 +199,9 @@ func New(cfg Config) (*Brain, error) {
 		if baseURL == "" {
 			baseURL = "https://api.openai.com/v1"
 		}
-		client = newOpenAIClient(key, baseURL, b.maxTokens())
+		oc := newOpenAIClient(key, baseURL, b.maxTokens())
+		oc.model = model
+		client = oc
 		b.model = model
 	default:
 		return nil, fmt.Errorf("llm: unknown provider %q (want \"anthropic\", \"openai\", \"codex\", or \"openai-responses\")", provider)
@@ -228,12 +232,15 @@ func (b *Brain) NextActions(ctx context.Context, obs protocol.Observation) ([]pr
 		}
 		b.turns = append(b.turns, Turn{Role: "user", Blocks: blocks})
 		b.pending = nil
-	} else if len(b.turns) == 0 {
+	}
+	if len(b.turns) == 0 {
 		// First turn: the goal as the opening user message.
 		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: userPrompt(obs)}}})
 	} else if obs.Message != "" && obs.Message != b.seenMessage {
 		// A new instruction arrived (interactive follow-up, resumed run
-		// with a fresh goal): append it with a fresh <env> block.
+		// with a fresh goal): append it with a fresh <env> block. This is
+		// intentionally independent of pending results: an instruction
+		// arriving after an exhausted run must not be discarded.
 		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: userPrompt(obs)}}})
 	}
 	b.seenMessage = obs.Message
@@ -349,8 +356,19 @@ func (b *Brain) compact(ctx context.Context) error {
 	if n <= keep+1 {
 		return nil // only the goal + tail: nothing to summarize
 	}
-	middle := b.turns[1 : n-keep]
-	tail := b.turns[n-keep:]
+	start := n - keep
+	// A tool-use turn and its result turn are one indivisible provider
+	// exchange. Keeping a result without its preceding assistant tool call
+	// makes both Anthropic and OpenAI reject the next request. Expand the
+	// retained tail when the nominal boundary lands on a result turn.
+	if start > 1 && turnHasResult(b.turns[start]) {
+		start--
+	}
+	if start <= 1 {
+		return nil
+	}
+	middle := b.turns[1:start]
+	tail := b.turns[start:]
 
 	sumTurn, err := b.client.Complete(ctx, summarizeSystem,
 		[]Turn{{Role: "user", Blocks: []Block{Text{Value: renderTurns(middle)}}}}, nil)
@@ -376,6 +394,15 @@ func (b *Brain) compact(ctx context.Context) error {
 const summarizeSystem = "Summarize this portion of an agent session transcript. " +
 	"Preserve: the goal, decisions made, file paths, commands run and their outcomes, " +
 	"errors and how they were resolved, and the current state of work. Be terse but complete."
+
+func turnHasResult(t Turn) bool {
+	for _, blk := range t.Blocks {
+		if _, ok := blk.(Result); ok {
+			return true
+		}
+	}
+	return false
+}
 
 // renderTurns flattens turns into bounded text for the summarizer.
 func renderTurns(turns []Turn) string {

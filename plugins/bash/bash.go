@@ -97,7 +97,7 @@ func (p *Bash) run(ctx context.Context, a protocol.Action) (protocol.ToolResult,
 	}
 	out, err := cmd.CombinedOutput()
 
-	text, extras := truncat(string(out), p.maxLines(), p.maxBytes())
+	text, extras := truncateOutput(string(out), p.maxLines(), p.maxBytes())
 	res := protocol.ToolResult{ActionID: a.ID, OK: true, Kind: string(KindBash), Output: text, ExitCode: 0}
 	if extras != nil {
 		res.Payload, _ = json.Marshal(extras)
@@ -147,11 +147,10 @@ func (p *Bash) maxBytes() int {
 	return 50 * 1024
 }
 
-// truncat keeps the LAST maxLines lines and last maxBytes bytes of output.
-// The model-facing note stays in Output; machine-readable facts land in
-// Details (truncated, full_output — pi's truncation/fullOutputPath).
-// ExecExtras are the structured facts of a command run; consumers decode
-// via AsExecResult. The model-facing text stays in Output.
+// truncateOutput keeps the LAST maxLines lines and last maxBytes bytes of
+// output. The model-facing note stays in Output; machine-readable facts land
+// in the typed Payload (truncation and full-output path). ExecExtras are the
+// structured facts of a command run; consumers decode via AsExecResult.
 type ExecExtras struct {
 	Truncated    bool   `json:"truncated,omitempty"`
 	DroppedLines int    `json:"dropped_lines,omitempty"`
@@ -170,17 +169,20 @@ func AsExecResult(tr protocol.ToolResult) (ExecExtras, bool) {
 	return r, true
 }
 
-func truncat(s string, maxLines, maxBytes int) (string, *ExecExtras) {
-	totalLines := strings.Count(s, "\n")
-	if s != "" && !strings.HasSuffix(s, "\n") {
-		totalLines++
-	}
+func truncateOutput(s string, maxLines, maxBytes int) (string, *ExecExtras) {
 	result, dropped, truncated := s, 0, false
 
-	if totalLines > maxLines {
-		lines := strings.Split(s, "\n")
+	lines := strings.Split(s, "\n")
+	trailingNewline := s != "" && strings.HasSuffix(s, "\n")
+	if trailingNewline {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) > maxLines {
 		dropped = len(lines) - maxLines
 		result = strings.Join(lines[dropped:], "\n")
+		if trailingNewline {
+			result += "\n"
+		}
 		truncated = true
 	}
 	if len(result) > maxBytes {

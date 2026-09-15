@@ -2,6 +2,7 @@ package fs
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -46,5 +47,27 @@ func TestReadWriteList(t *testing.T) {
 	res, _ = p.listDir(ctx, List(root))
 	if res.OK == false || !strings.Contains(res.Output, "sub/") {
 		t.Fatalf("list: %+v", res)
+	}
+}
+
+func TestRelativePathsUseWorkspaceRoot(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "relative.txt"), []byte("from root"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := newFS(t, root)
+	res, err := p.readFile(context.Background(), Read("relative.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK || res.Output != "from root" {
+		t.Fatalf("relative read: %+v", res)
+	}
+	res, err = p.writeFile(context.Background(), Write("new/relative.txt", "written"))
+	if err != nil || !res.OK {
+		t.Fatalf("relative write: %+v err=%v", res, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, "new", "relative.txt")); err != nil || string(got) != "written" {
+		t.Fatalf("relative write landed outside workspace: %q err=%v", got, err)
 	}
 }

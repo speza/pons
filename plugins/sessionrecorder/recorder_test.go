@@ -13,6 +13,35 @@ import (
 	"github.com/samperrin/pons/sessions"
 )
 
+type appendFailStore struct {
+	sessions.Store
+	failAt int
+	calls  int
+}
+
+func (s *appendFailStore) Append(ctx context.Context, sessionID, parentID string, e sessions.Entry) (sessions.Entry, error) {
+	s.calls++
+	if s.calls == s.failAt {
+		return sessions.Entry{}, fmt.Errorf("injected append failure")
+	}
+	return s.Store.Append(ctx, sessionID, parentID, e)
+}
+
+func TestRecorderPropagatesStoreErrors(t *testing.T) {
+	store, err := sessionsjsonl.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := New(&appendFailStore{Store: store, failAt: 3}) // result entry
+	core := pons.New()
+	if err := core.Use(rec, scripted.New()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.Run(context.Background(), "goal"); err == nil || !strings.Contains(err.Error(), "append results") {
+		t.Fatalf("store error was swallowed: %v", err)
+	}
+}
+
 // Interactive/continued runs must record every new instruction as a user
 // entry so the tree mirrors the brain's context.
 func TestRecorderRecordsDistinctInstructions(t *testing.T) {

@@ -49,9 +49,15 @@ type ToolPort interface {
 // ToolHandler executes one action kind. Tool plugins provide these.
 type ToolHandler func(ctx context.Context, a protocol.Action) (protocol.ToolResult, error)
 
-// TurnHook observes one completed turn (plan + results). Persistence and
-// audit plugins use this.
+// TurnHook observes one completed turn (plan + results). Observational hooks
+// cannot fail the run; use TurnErrorHook for persistence that must be checked.
 type TurnHook func(obs protocol.Observation, turn protocol.TurnLog)
+
+// TurnErrorHook observes one completed turn and can fail the run. Persistence
+// hooks should use this form so a durable-write failure is not silently lost.
+type TurnErrorHook func(obs protocol.Observation, turn protocol.TurnLog) error
+
+type turnHook func(obs protocol.Observation, turn protocol.TurnLog) error
 
 // Plugin adds capabilities to a Core. Purely additive by contract:
 // Setup only registers; it must not change existing registrations.
@@ -61,8 +67,9 @@ type Plugin interface {
 
 // Core is the minimal harness. Zero capabilities until plugins are applied.
 type Core struct {
-	// Brain is the control layer. Set by a brain plugin.
-	Brain ControlPort
+	// brain is the control layer. It is installed only through SetBrain so
+	// duplicate brain registration cannot bypass the additive contract.
+	brain ControlPort
 
 	// Workspace / MaxTurns / Log tune the loop.
 	Workspace string
@@ -72,7 +79,7 @@ type Core struct {
 	handlers map[protocol.ActionKind]ToolHandler
 	specs    map[protocol.ActionKind]ToolSpec
 	wraps    []func(ToolPort) ToolPort
-	onTurns  []TurnHook
+	onTurns  []turnHook
 	onEvents []func(Event)
 }
 
@@ -123,6 +130,9 @@ type ToolDef struct {
 // error, so plugin conflicts fail loudly at composition time instead of
 // silently last-wins.
 func (c *Core) AddTool(kind protocol.ActionKind, def ToolDef) error {
+	if def.Handler == nil {
+		return fmt.Errorf("pons: action kind %q has a nil handler", kind)
+	}
 	if _, exists := c.handlers[kind]; exists {
 		return fmt.Errorf("pons: action kind %q already registered (plugin conflict)", kind)
 	}
@@ -151,17 +161,30 @@ func (c *Core) WrapTool(w func(ToolPort) ToolPort) {
 // SetBrain installs the brain. Refusing a second brain keeps composition
 // explicit — a confused agent is worse than a failed startup.
 func (c *Core) SetBrain(b ControlPort) error {
-	if c.Brain != nil {
+	if c.brain != nil {
 		return errors.New("pons: brain already set")
 	}
-	c.Brain = b
+	if b == nil {
+		return errors.New("pons: cannot install a nil brain")
+	}
+	c.brain = b
 	return nil
 }
 
-// OnTurn appends a persistence hook: it observes every completed turn with
-// the full observation (persistence and audit plugins use this).
+// OnTurn appends an observational hook for every completed turn. Errors from
+// this form are intentionally not possible; checked persistence should use
+// OnTurnError.
 func (c *Core) OnTurn(h TurnHook) {
-	c.onTurns = append(c.onTurns, h)
+	c.onTurns = append(c.onTurns, func(obs protocol.Observation, turn protocol.TurnLog) error {
+		h(obs, turn)
+		return nil
+	})
+}
+
+// OnTurnError appends a persistence/audit hook whose error is propagated from
+// Run. Hooks run in registration order with ordinary OnTurn observers.
+func (c *Core) OnTurnError(h TurnErrorHook) {
+	c.onTurns = append(c.onTurns, turnHook(h))
 }
 
 // EventType names one stage of the agent loop (pi-style names).
@@ -217,9 +240,10 @@ type RunResult struct {
 // Run executes one full task: plan → act → reflect → repeat, until the
 // brain finishes (text-only / finish action) or MaxTurns is exhausted.
 func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
-	if c.Brain == nil {
+	if c.brain == nil {
 		return RunResult{}, errors.New("pons: no brain plugin installed")
 	}
+	brain := c.brain
 	port := c.buildToolPort()
 
 	obs := protocol.Observation{Message: message, Workspace: c.Workspace}
@@ -234,7 +258,7 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 		obs.Turn, obs.Now = turn, time.Now()
 		c.emit(Event{Type: EventTurnStart, Turn: turn})
 
-		actions, err := c.Brain.NextActions(ctx, obs)
+		actions, err := brain.NextActions(ctx, obs)
 		if err != nil {
 			return result, fmt.Errorf("brain plan (turn %d): %w", turn, err)
 		}
@@ -274,9 +298,12 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 			wg.Add(1)
 			go func(i int, a protocol.Action) {
 				defer wg.Done()
-				tr, err := port.Execute(ctx, a)
+				tr, err := executeTool(port, ctx, a)
 				if err != nil { // handler crash ≠ observation; contain it
 					tr = protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}
+				}
+				if tr.ActionID == "" {
+					tr.ActionID = a.ID
 				}
 				results[i] = tr
 			}(i, a)
@@ -289,11 +316,13 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 		}
 
 		turnLog := protocol.TurnLog{Turn: turn, Actions: actions, Results: results}
+		result.Turns, result.History = turn, append(result.History, turnLog)
 		for _, h := range c.onTurns {
-			h(obs, turnLog)
+			if err := h(obs, turnLog); err != nil {
+				return result, fmt.Errorf("turn hook (turn %d): %w", turn, err)
+			}
 		}
 		c.emit(Event{Type: EventTurnEnd, Turn: turn, Actions: actions, Results: results})
-		result.Turns, result.History = turn, append(result.History, turnLog)
 
 		if finished {
 			result.Answer = answer
@@ -301,18 +330,24 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 			return result, nil
 		}
 
+		var stopReason string
+		stopped := false
 		for _, tr := range results {
-			interp, err := c.Brain.Interpret(ctx, obs, tr)
+			interp, err := brain.Interpret(ctx, obs, tr)
 			if err != nil {
 				return result, fmt.Errorf("brain interpret (turn %d): %w", turn, err)
 			}
-			if !interp.Continue {
-				c.logf("[turn %d] brain stopped: %s", turn, interp.StopReason)
-				c.emit(Event{Type: EventStopped, Turn: turn, Text: interp.StopReason})
-				return result, nil
+			if !interp.Continue && !stopped {
+				stopped = true
+				stopReason = interp.StopReason
 			}
 		}
 		obs.History = append(obs.History, turnLog)
+		if stopped {
+			c.logf("[turn %d] brain stopped: %s", turn, stopReason)
+			c.emit(Event{Type: EventStopped, Turn: turn, Text: stopReason})
+			return result, nil
+		}
 	}
 	result.Exhausted = true
 	c.emit(Event{Type: EventExhausted, Turn: maxTurns, Text: fmt.Sprintf("exhausted %d turns", maxTurns)})
@@ -348,6 +383,15 @@ type dispatchFunc func(ctx context.Context, a protocol.Action) (protocol.ToolRes
 
 func (f dispatchFunc) Execute(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
 	return f(ctx, a)
+}
+
+func executeTool(port ToolPort, ctx context.Context, a protocol.Action) (tr protocol.ToolResult, err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			err = fmt.Errorf("tool panic: %v", v)
+		}
+	}()
+	return port.Execute(ctx, a)
 }
 
 // Finish is the core-reserved action constructor.

@@ -36,7 +36,7 @@ func TestTailTruncationWithFullOutput(t *testing.T) {
 	if !strings.Contains(res.Output, "earlier lines truncated") {
 		t.Fatalf("missing truncation note:\n%s", res.Output)
 	}
-	if !strings.Contains(res.Output, "line10") || strings.Contains(res.Output, "line1\n") {
+	if !strings.Contains(res.Output, "line10") || !strings.Contains(res.Output, "line6\n") || strings.Contains(res.Output, "line5\n") {
 		t.Fatalf("tail should keep the LAST lines:\n%s", res.Output)
 	}
 	if !strings.Contains(res.Output, "full output: ") {

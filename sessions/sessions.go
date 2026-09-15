@@ -6,9 +6,9 @@
 // *fundamental* question — what a session IS — while leaving two other
 // questions open by design:
 //
-//   - HOW it is stored: any engine may implement Store (SQLite with FTS5 is
-//     the shipped one in plugins/sessionsqlite; an append-only JSONL backend
-//     à la pi/Claude Code would implement the same contract).
+//   - HOW it is stored: any engine may implement Store. The shipped engine is
+//     the append-only JSONL backend in plugins/sessionsjsonl; another engine
+//     can implement the same contract without changing this package.
 //   - WHERE it lives — a policy of the composing binary, not of a plugin.
 //
 // The model, engine-independent by construction:

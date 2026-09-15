@@ -9,14 +9,12 @@
 package llm
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/openai/openai-go"
@@ -49,7 +47,7 @@ func (c *responsesClient) Complete(ctx context.Context, system string, turns []T
 	turn, err := c.tryComplete(ctx, system, turns, tools)
 	if err != nil && c.auth != nil && isUnauthorized(err) {
 		if rerr := c.auth.refresh(ctx); rerr != nil {
-			return Turn{}, fmt.Errorf("codex: HTTP 401 and token refresh failed (%v) — run /login in pi", rerr)
+			return Turn{}, fmt.Errorf("codex: HTTP 401 and token refresh failed (%v) — run pons -provider codex --login", rerr)
 		}
 		return c.tryComplete(ctx, system, turns, tools)
 	}
@@ -63,7 +61,7 @@ func isUnauthorized(err error) bool {
 
 func (c *responsesClient) tryComplete(ctx context.Context, system string, turns []Turn, tools []pons.ToolSpec) (Turn, error) {
 	opts := []option.RequestOption{
-		option.WithMaxRetries(2),
+		option.WithMaxRetries(0),
 		option.WithHTTPClient(defaultHTTPClient()),
 		option.WithBaseURL(c.baseURL),
 	}
@@ -112,21 +110,15 @@ func (c *responsesClient) tryComplete(ctx context.Context, system string, turns 
 	}
 
 	// Capture the API's raw error payload: without it, provider 400s are
-	// undiagnosable ("Bad Request" with no detail). Also dump the request
-	// body for debugging (remove before merging — actually keep behind flag).
+	// undiagnosable ("Bad Request" with no detail).
 	var errBody string
 	capture := func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
-		if os.Getenv("PONS_DEBUG_REQUEST") != "" {
-			b, _ := io.ReadAll(req.Body)
-			req.Body = io.NopCloser(bytes.NewReader(b))
-			fmt.Printf("[pons-codex] request: %s\n", b)
-		}
 		resp, err := next(req)
 		if err == nil && resp.StatusCode >= 400 {
 			b, rerr := io.ReadAll(resp.Body)
 			if rerr == nil {
 				errBody = strings.TrimSpace(string(b))
-				resp.Body = io.NopCloser(bytes.NewReader(b))
+				resp.Body = io.NopCloser(strings.NewReader(string(b)))
 			}
 		}
 		return resp, err
@@ -176,20 +168,6 @@ func (c *responsesClient) tryComplete(ctx context.Context, system string, turns 
 		return Turn{}, fmt.Errorf("codex: stream ended without any output items")
 	}
 	return responseToTurn(items), nil
-}
-
-// wrapWithBody surfaces the API's raw error payload — without it, provider
-// 400s are undiagnosable ("Bad Request" with no detail).
-func wrapWithBody(err error) error {
-	var apiErr *openai.Error
-	if !errors.As(err, &apiErr) {
-		return err
-	}
-	body := strings.TrimSpace(apiErr.RawJSON())
-	if body == "" {
-		return err
-	}
-	return fmt.Errorf("%w: %s", err, truncateMsg(body, 512))
 }
 
 func responseToTurn(output []responses.ResponseOutputItemUnion) Turn {

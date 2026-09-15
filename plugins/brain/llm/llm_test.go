@@ -83,6 +83,39 @@ func TestBrainMapsToolUseToActions(t *testing.T) {
 	}
 }
 
+func TestPendingResultsDoNotDropFollowUp(t *testing.T) {
+	fake := &fakeClient{responses: []Turn{
+		{Role: "assistant", Blocks: []Block{ToolUse{ID: "c1", Name: "ping", Input: map[string]any{}}}},
+		{Role: "assistant", Blocks: []Block{Text{Value: "done"}}},
+	}}
+	b := newBrain(t, fake)
+	ctx := context.Background()
+	if _, err := b.NextActions(ctx, protocol.Observation{Turn: 1, Message: "first", Workspace: "/w"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Interpret(ctx, protocol.Observation{}, protocol.ToolResult{ActionID: "c1", OK: true, Output: "pong"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.NextActions(ctx, protocol.Observation{Turn: 1, Message: "follow-up", Workspace: "/w"}); err != nil {
+		t.Fatal(err)
+	}
+	seen := fake.seen[1]
+	var gotResult, gotFollowUp bool
+	for _, turn := range seen {
+		for _, blk := range turn.Blocks {
+			switch v := blk.(type) {
+			case Result:
+				gotResult = v.ToolUseID == "c1"
+			case Text:
+				gotFollowUp = gotFollowUp || strings.Contains(v.Value, "follow-up")
+			}
+		}
+	}
+	if !gotResult || !gotFollowUp {
+		t.Fatalf("follow-up context lost pending result or message: %+v", seen)
+	}
+}
+
 func TestFailedToolIsErrorResult(t *testing.T) {
 	fake := &fakeClient{responses: []Turn{
 		{Role: "assistant", Blocks: []Block{ToolUse{ID: "c1", Name: "nope", Input: map[string]any{}}}},
@@ -114,6 +147,45 @@ func TestEmptyResponseIsSurfacedNotSwallowed(t *testing.T) {
 	_, err := b.NextActions(context.Background(), protocol.Observation{Turn: 1, Message: "test"})
 	if err == nil || !strings.Contains(err.Error(), "empty response") {
 		t.Fatalf("empty response should error, got: %v", err)
+	}
+}
+
+func TestCompactionKeepsToolExchangeTogether(t *testing.T) {
+	fake := &fakeClient{responses: []Turn{
+		{Role: "assistant", Blocks: []Block{ToolUse{ID: "c1", Name: "ping", Input: map[string]any{}}}},
+		{Role: "assistant", Blocks: []Block{ToolUse{ID: "c2", Name: "ping", Input: map[string]any{}}}},
+		{Role: "assistant", Blocks: []Block{Text{Value: "summary"}}},
+		{Role: "assistant", Blocks: []Block{Text{Value: "done"}}},
+	}}
+	b := &Brain{cfg: Config{CompactChars: 1, CompactKeep: 1}, client: fake, core: pons.New()}
+	ctx := context.Background()
+	obs := protocol.Observation{Turn: 1, Message: "goal"}
+	if _, err := b.NextActions(ctx, obs); err != nil {
+		t.Fatal(err)
+	}
+	b.Interpret(ctx, obs, protocol.ToolResult{ActionID: "c1", OK: true, Output: "one"})
+	if _, err := b.NextActions(ctx, obs); err != nil {
+		t.Fatal(err)
+	}
+	b.Interpret(ctx, obs, protocol.ToolResult{ActionID: "c2", OK: true, Output: "two"})
+	if _, err := b.NextActions(ctx, obs); err != nil {
+		t.Fatal(err)
+	}
+
+	last := fake.seen[len(fake.seen)-1]
+	var sawC2, sawC2Result bool
+	for _, turn := range last {
+		for _, blk := range turn.Blocks {
+			switch v := blk.(type) {
+			case ToolUse:
+				sawC2 = sawC2 || v.ID == "c2"
+			case Result:
+				sawC2Result = sawC2Result || v.ToolUseID == "c2"
+			}
+		}
+	}
+	if !sawC2 || !sawC2Result {
+		t.Fatalf("compaction split the retained tool exchange: %+v", last)
 	}
 }
 
@@ -196,9 +268,13 @@ func TestCompactionCollapsesMiddleTurns(t *testing.T) {
 func TestToolSpecsReachTheModel(t *testing.T) {
 	fake := &fakeClient{responses: []Turn{{Role: "assistant", Blocks: []Block{Text{Value: "done"}}}}}
 	b := newBrain(t, fake)
-	b.core.AddTool("bash", pons.ToolDef{Description: "run a command", Params: []pons.ToolParam{
-		{Name: "command", Type: "string", Required: true},
-	}})
+	if err := b.core.AddTool("bash", pons.ToolDef{
+		Handler:     func(context.Context, protocol.Action) (protocol.ToolResult, error) { return protocol.ToolResult{}, nil },
+		Description: "run a command",
+		Params:      []pons.ToolParam{{Name: "command", Type: "string", Required: true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	b.NextActions(context.Background(), protocol.Observation{Turn: 1})
 	if len(fake.capturedTools) != 1 || fake.capturedTools[0].Kind != "bash" {
 		t.Fatalf("tools not passed to client: %+v", fake.capturedTools)

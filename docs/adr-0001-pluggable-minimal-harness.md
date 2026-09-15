@@ -59,14 +59,15 @@ handle, an LLM client) — no reflection, no dynamic loading, no service
 locator. Composition happens in `main()`:
 
 ```go
+store, err := sessionsjsonl.New(sessionDir)
+if err != nil { return err }
+defer store.Close()
+
 core := pons.New()
 core.Use(
-    fs.New(fs.Config{Root: ws}),          // read_file, write_file, list_dir
-    edit.New(edit.Config{Root: ws}),      // edit_file (SEARCH/REPLACE patches)
-    bash.New(bash.Config{Root: ws}),      // unrestricted bash (or shell.New for allowlisted)
-    sessionsjsonl.New(sessionDir),        // transcript engine
-    sessionrecorder.New(store),           // persistence + transcript path
-    brainscripted.New(steps...),          // the brain (LLM driver later)
+    fsPlugin, editPlugin, bashPlugin,   // capabilities registered by plugins
+    sessionrecorder.New(store),         // persistence + transcript path
+    brainscripted.New(steps...),        // the brain (LLM driver later)
 )
 core.Run(ctx)
 ```
@@ -75,10 +76,10 @@ Registration points, all additive:
 
 | Hook | Used by |
 |---|---|
-| `AddTool(kind, handler)` | tool plugins (fs, shell, session search) |
-| `Brain = …` (via Setup) | brain plugins |
+| `AddTool(kind, handler)` | tool plugins (fs, edit, shell, bash) |
+| `SetBrain(…)` (via Setup) | brain plugins |
 | `WrapTool(func(ToolPort) ToolPort)` | middleware: approval, audit, rate limits |
-| `OnTurn(hook)` | persistence/audit plugins |
+| `OnTurn(hook)` / `OnTurnError(hook)` | audit / checked persistence plugins |
 
 ### 3. Brain/hands separation is structural, not conventional
 
@@ -114,37 +115,27 @@ result, err := core.Run(ctx, goal)   // plan → act → reflect → repeat
   **result**, not an error (pi-style graceful stop).
 - `OnEvent(func(pons.Event))` — the loop's event stream (`agent_start`,
   `turn_start`, `action_start`, `action_end`, `turn_end`, `finish`,
-  `stopped`, `exhausted`), the seam for future UIs. `OnTurn` remains the
-  persistence hook (full observation + turn log).
+  `stopped`, `exhausted`), the seam for future UIs. `OnTurn` observes a
+  completed turn; `OnTurnError` is the checked persistence hook (full
+  observation + turn log).
 - Truncated provider responses (`max_tokens` / `incomplete`) are surfaced as
   errors, never silently treated as complete plans.
 
-### 6. Sessions and search are plugins (see ADR-0002)
+### 6. Sessions are plugins (see ADR-0005)
 
-The (now-retired) SQLite engine implemented tree-shaped, append-only session storage — the model survives in `sessions/`:
+The transcript model is the engine-independent contract in `sessions/`:
 
 - entries are immutable, addressed by `(session_id, id)`, linked by `parent_id`;
 - one mutable **leaf pointer** per session; the live conversation is the path
   root → leaf; branching moves the pointer and abandoned branches stay
   queryable;
-- ~~full-text search exposed as a hands action (`search_session`)~~ — superseded
-  when the transcript became plain JSONL (ADR-0005): the file itself is
-  greppable, so the dedicated tools were removed;
-- `ExportJSONL` writes the path as pi-shaped NDJSON — the greppable escape
-  hatch for ad-hoc unix tooling and for interop.
+- `sessionsjsonl` is the shipped append-only NDJSON engine;
+- `WriteJSONL` writes the path as pi-shaped NDJSON, while the live agent
+  inspects the transcript through ordinary `bash`/`grep` over `$PONS_SESSION_FILE`.
 
-Rationale, stated precisely (empirically checked): grep over a SQLite file is
-*unreliable at best* — long records spill across B-tree/overflow pages whose
-header bytes split text runs (in our test, a strings/grep pipeline recovered
-only 16 of 64 planted markers), grep's line semantics choke on
-multi-kilobyte records, and live WAL content may not be in the main file at
-all. What grep keeps is regex — the NDJSON export exists for exactly that.
-Grep over the export is trivial, with one caveat: it covers the current
-branch only. The agent gets structured scoping (branch and kind filters)
-that grep cannot do, through the same tool boundary as every other
-capability — and the session database deliberately lives outside the
-workspace jail, so the brain has no direct file access to grep in the first
-place.
+There are no dedicated session search/read actions. `Store.Search` remains in
+the contract for storage consumers and future engines; the composition decides
+where the transcript lives, and the session recorder publishes its path.
 
 ## Consequences
 
@@ -156,8 +147,8 @@ place.
   this agent do" is `main()`.
 - Hands can later move to a subprocess/container without redesign: the
   contract is already JSON types over a port.
-- Session trees get real queries (path, branching, FTS, scoping) instead of
-  file-grep gymnastics.
+- Session trees get real queries (path, branching, and scoping) in the store
+  contract while the shipped transcript remains grep-able NDJSON.
 
 **Negative / accepted risks**
 
@@ -167,14 +158,14 @@ place.
   passes). Real isolation must come from the OS/container boundary around the
   hands process — deliberately out of scope for the core, same conclusion pi
   documents.
-- SQLite is one more dependency (pure-Go driver, no cgo) and is opaque to
-  naive text tools — mitigated by the search tools and JSONL export.
+- JSONL search is a linear scan and the transcript files are private; a
+  future indexed engine can implement the same `sessions.Store` contract.
 
 ## Decision log
 
 | ADR | Decision | Status |
 |---|---|---|
-| [ADR-0002](adr-0002-tree-sessions-sqlite.md) | Tree sessions in SQLite; search through the hands layer | Accepted |
+| [ADR-0002](adr-0002-tree-sessions-sqlite.md) | Earlier SQLite tree-session design | Retired |
 | [ADR-0003](adr-0003-tool-result-contract.md) | ToolResult: status / canonical observation / typed payloads | Accepted |
 | [ADR-0004](adr-0004-sandboxed-hands-boundary.md) | Hands as a sandbox boundary; protocol as deployment seam | Design accepted; transport pending |
 | [ADR-0005](adr-0005-transcript-model-vs-engine.md) | Transcript model = contract; default engine = JSONL (SQLite retired) | Accepted |
@@ -184,7 +175,8 @@ place.
 
 - Streaming partial tool results over the port (designed in; not wired).
 - Streaming LLM responses (the brain completes per turn; deltas are a UI concern).
-- LLM-provider retries/cost tracking (the loop's auto-retry layer).
+- Automatic LLM-provider retries/cost tracking; transient provider errors
+  surface to the caller.
 - Remote/subprocess hands transport (same protocol, next ADR).
 - Compaction/branch summaries as first-class entries (schema leaves room:
   `KindNote`).

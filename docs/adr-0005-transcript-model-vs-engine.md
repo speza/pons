@@ -34,38 +34,30 @@ same pattern as `protocol/` for the brain↔hands seam:
 - `WriteJSONL` — the pi-shaped NDJSON interchange serializer lives in the
   contract, not the engine: interchange is engine-independent by definition.
 
-**The engine is a plugin implementation**, not the model. `sessionsqlite`
-(SQLite + FTS5, WAL, recursive-CTE tree walks) is the shipped implementation
-and now asserts `sessions.Store` compile-time. A future
-`plugins/sessionsjsonl` (append-only NDJSON + sidecar index, or no index) or
-a pi-format reader would implement the same contract.
+**The engine is a plugin implementation**, not the model. The shipped
+implementation is `plugins/sessionsjsonl`: append-only NDJSON with a
+stdlib-only scan. A future indexed or database-backed plugin would implement
+the same contract without changing the model.
 
 **The location is composition policy** (see ADR-0002's composition note):
-`~/.pons/sessions/<hash>.db` is a `pons` binary convention, not a plugin
-or model rule.
+`~/.pons/sessions/<munged-project-path>/` is a `pons` binary convention, not a
+plugin or model rule.
 
-**Shipped default engine: JSONL** (amended after benchmarking; SQLite remains
-an alternate plugin). The measured trade — 1,000 realistic entries:
+**Shipped default engine: JSONL**. The measured trade — 1,000 realistic entries:
 
-| Operation | SQLite (FTS5, modernc) | JSONL (naive scan) | JSONL advantage |
+| Operation | Earlier SQLite prototype | JSONL (naive scan) | JSONL advantage |
 |---|---|---|---|
 | append ×1000 | 319ms | 23ms | **14×** |
 | search ×50 | 310ms | 43ms | **7×** — a naive full scan beats indexed FTS |
 | path-to-leaf ×20 | 61ms (CTE) | 15ms (load-all) | **4×** |
 | dependency tree | modernc.org: 259MB module cache, multi-MB binary | stdlib only | distribution |
-| status | **removed** (was alternate) | shipped default | |
-| grep/tail the transcript | no (ADR-0002's finding) | native | the headline property |
+| status | **removed** | shipped default | |
+| grep/tail the transcript | no | native | the headline property |
 
-The reason a *naive scan* beats a *full-text index*: our no-cgo constraint
-forces the pure-Go SQLite driver, which is slow enough that linear scans win
-at agent-session scale (hundreds–thousands of entries, per-session files).
-The SQLite implementation has since been **removed entirely** (along with
-the `modernc.org/sqlite` dependency tree — 259MB module cache, multi-MB
-binary): it had no consumer (both binaries compose the JSONL engine; the
-agent-facing tools are engine-agnostic), and our two worst session bugs
-were SQL bugs. If indexed queries at scale are ever a real need, the
-`sessions.Store` contract makes a SQLite plugin a straight re-add —
-ADR-0002 records its design. The JSONL engine's `Search` is scan-based
+A naive scan is sufficient here because agent sessions are small per-session
+files (hundreds to thousands of entries). The store contract keeps an indexed
+or database-backed engine replaceable if that scale assumption stops holding;
+no SQLite engine is shipped today. The JSONL engine's `Search` is scan-based
 over per-session files, which covers the contract at transcript scale.
 
 The JSONL engine's file format is self-describing NDJSON
@@ -86,15 +78,15 @@ JSONL backend is a plausible afternoon, not a redesign.
 **Negative / accepted risks**
 
 - JSONL search is a linear scan — fine at session scale (per-session files
-  bound it); re-select SQLite for indexed queries at scale.
-- One writer per session file; concurrent writers to the *same* session are
-  unsupported (matches the loop's sequential design).
+  bound it); add an indexed Store implementation if that assumption changes.
+- A Store instance serializes access to its session files; separate Store
+  instances sharing the same directory are not coordinated.
 - `Search`'s shape (substring + scope, no regex) is frozen into the contract;
   regex needs remain on the export path by design.
 
 ## References
 
-- `sessions/sessions.go` (contract), `plugins/sessionsqlite/` (engine)
+- `sessions/sessions.go` (contract), `plugins/sessionsjsonl/` (engine)
 - pi `session-format.md`, Claude Code transcripts (the JSONL lineage)
 - ADR-0002 (storage engine details, composition note)
 
@@ -134,8 +126,8 @@ verbatim. Two consequences follow from the layering:
   turn, so `$PONS_SESSION_FILE` remains the complete, greppable record the
   agent reaches through bash; that is precisely the fallback the
   post-compaction context points at (the summary message says so).
-- The engine is irrelevant to compaction — both the JSONL and SQLite stores
-  keep the full tree; compaction only rewrites what the *brain* replays.
+- The engine is irrelevant to compaction — the Store keeps the full tree;
+  compaction only rewrites what the *brain* replays.
 
 Live-verified: with `--compact-chars 4000`, a 6-turn codex session compacted
 twice mid-run and still completed correctly, while the JSONL file retained

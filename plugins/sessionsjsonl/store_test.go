@@ -159,6 +159,52 @@ func TestExportJSONLIsGreppable(t *testing.T) {
 	}
 }
 
+func TestRejectsUnsafeSessionIDs(t *testing.T) {
+	s := openStore(t)
+	for _, id := range []string{"../escape", "..\\escape", "/tmp/escape", ""} {
+		if _, err := s.GetSession(context.Background(), id); err == nil {
+			t.Fatalf("session id %q should be rejected", id)
+		}
+	}
+}
+
+func TestRejectsDuplicateEntryIDs(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	sess, err := s.CreateSession(ctx, "/tmp/ws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := s.Append(ctx, sess.ID, "", sessions.Entry{ID: "fixed", Kind: sessions.KindUser})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Append(ctx, sess.ID, root.ID, sessions.Entry{ID: root.ID, Kind: sessions.KindNote}); err == nil {
+		t.Fatal("duplicate entry id should be rejected")
+	}
+}
+
+func TestLoadsEntryLargerThanScannerLimit(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	sess, err := s.CreateSession(ctx, "/tmp/ws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := strings.Repeat("x", 16*1024*1024+1)
+	if _, err := s.Append(ctx, sess.ID, "", sessions.Entry{Kind: sessions.KindUser, Text: payload}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := s.GetSession(ctx, sess.ID)
+	if err != nil || loaded.ID != sess.ID {
+		t.Fatalf("large transcript load: %+v err=%v", loaded, err)
+	}
+	path, err := s.PathToLeaf(ctx, sess.ID)
+	if err != nil || len(path) != 1 || len(path[0].Text) != len(payload) {
+		t.Fatalf("large transcript path: len=%d err=%v", len(path), err)
+	}
+}
+
 func TestSessionScoping(t *testing.T) {
 	ctx := context.Background()
 	s := openStore(t)

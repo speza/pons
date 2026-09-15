@@ -6,7 +6,7 @@ commands flow down, sensory observations flow up. The reflex centers live
 there.
 
 That is the whole architecture. pons is a minimal, pluggable agent harness in
-Go: a ~330-line core (the bridge), one dependency-free JSON seam
+Go: a ~400-line core (the bridge), one dependency-free JSON seam
 (`protocol/`), and everything else — tools, brains, sessions, policy — is a
 plugin you compose. The reasoning **brain** and the executing **hands** are
 structurally separated; the pons is what connects them:
@@ -87,7 +87,8 @@ result, err := core.Run(ctx, message)   // plan → act → reflect → repeat
   out — a result, not an error).
 - **`OnEvent(func(pons.Event))`** streams the loop live: `agent_start`,
   `turn_start`, `action_start`, `action_end`, `turn_end`, `finish`,
-  `stopped`, `exhausted`. UIs attach here; persistence attaches via `OnTurn`.
+  `stopped`, `exhausted`. UIs attach here; audit observers use `OnTurn`,
+  and checked persistence uses `OnTurnError`.
 - **Termination** is the brain's call: a text-only LLM reply or a `finish`
   action ends the run; MaxTurns is the backstop. A truncated provider
   response (`max_tokens`/`incomplete`) is an error, never a silent partial

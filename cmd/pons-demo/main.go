@@ -1,10 +1,9 @@
 // Command pons-demo composes a complete agent entirely from plugins:
 //
-//	core (loop) + fs + shell + sqlite sessions + scripted brain
+//	core (loop) + fs + edit + bash + JSONL sessions + scripted brain
 //
-// The brain even searches its own recorded session through the hands
-// layer (search_session) — the plugin-model answer to "how does the
-// agent grep its session tree".
+// The brain can inspect its own recorded session through bash over
+// $PONS_SESSION_FILE, just like a human can grep the transcript.
 package main
 
 import (

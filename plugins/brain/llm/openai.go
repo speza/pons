@@ -26,7 +26,7 @@ type openaiClient struct {
 
 func newOpenAIClient(key, baseURL string, maxTokens int) *openaiClient {
 	opts := []oopt.RequestOption{
-		oopt.WithMaxRetries(2),
+		oopt.WithMaxRetries(0),
 		oopt.WithHTTPClient(defaultHTTPClient()),
 	}
 	if key != "" {
@@ -72,6 +72,9 @@ func (c *openaiClient) Complete(ctx context.Context, system string, turns []Turn
 	}
 	if len(completion.Choices) == 0 {
 		return Turn{}, fmt.Errorf("openai: empty choices")
+	}
+	if completion.Choices[0].FinishReason == "length" {
+		return Turn{}, fmt.Errorf("openai: response truncated at max_tokens (%d) — raise Config.MaxTokens or the model needs a smaller step", c.maxTokens)
 	}
 
 	out := Turn{Role: "assistant"}

@@ -25,7 +25,7 @@ type anthropicClient struct {
 func newAnthropicClient(key, baseURL string, maxTokens int) *anthropicClient {
 	opts := []aopt.RequestOption{
 		aopt.WithAPIKey(key),
-		aopt.WithMaxRetries(2),
+		aopt.WithMaxRetries(0),
 		aopt.WithHTTPClient(defaultHTTPClient()),
 	}
 	if baseURL != "" {

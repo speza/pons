@@ -139,7 +139,7 @@ func main() {
 	// conversation across lines and the recorder appends each instruction
 	// to the same session tree.
 	interactiveMode := *interactive || (*message == "" && *resume == "")
-	if *resume != "" && instruction == "" {
+	if *resume != "" {
 		ctx := context.Background()
 		id := *resume
 		if id == "latest" {

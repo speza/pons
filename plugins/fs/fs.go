@@ -78,17 +78,18 @@ func (p *FS) Setup(c *pons.Core) error {
 	})
 }
 
-// checkPath is the jail: symlink-resilient containment check (shared
-// implementation in internal/jail).
-func (p *FS) checkPath(path string) error {
-	return jail.Check(p.root, path)
+// resolvePath is the jail: it returns the canonical, root-relative path
+// that the operation must use after the containment check.
+func (p *FS) resolvePath(path string) (string, error) {
+	return jail.ResolvePath(p.root, path)
 }
 
 func (p *FS) readFile(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
-	if err := p.checkPath(a.Args["path"]); err != nil {
+	path, err := p.resolvePath(a.Args["path"])
+	if err != nil {
 		return denied(a, err), nil
 	}
-	b, err := os.ReadFile(a.Args["path"])
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 	}
@@ -96,10 +97,10 @@ func (p *FS) readFile(ctx context.Context, a protocol.Action) (protocol.ToolResu
 }
 
 func (p *FS) writeFile(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
-	if err := p.checkPath(a.Args["path"]); err != nil {
+	path, err := p.resolvePath(a.Args["path"])
+	if err != nil {
 		return denied(a, err), nil
 	}
-	path := a.Args["path"]
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 	}
@@ -110,10 +111,11 @@ func (p *FS) writeFile(ctx context.Context, a protocol.Action) (protocol.ToolRes
 }
 
 func (p *FS) listDir(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
-	if err := p.checkPath(a.Args["path"]); err != nil {
+	path, err := p.resolvePath(a.Args["path"])
+	if err != nil {
 		return denied(a, err), nil
 	}
-	entries, err := os.ReadDir(a.Args["path"])
+	entries, err := os.ReadDir(path)
 	if err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 	}

@@ -107,6 +107,23 @@ func TestJailRejectsEscape(t *testing.T) {
 	}
 }
 
+func TestRelativePathUsesWorkspaceRoot(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "note.txt")
+	if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := newEdit(t, root)
+	res, err := p.apply(context.Background(), Patch("note.txt", "<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE"))
+	if err != nil || !res.OK {
+		t.Fatalf("relative edit: %+v err=%v", res, err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != "new\n" {
+		t.Fatalf("relative edit landed outside workspace: %q err=%v", got, err)
+	}
+}
+
 func TestPluginIsAdditive(t *testing.T) {
 	// Registering the same kind twice must fail loudly (purely-additive rule).
 	root := t.TempDir()

@@ -22,25 +22,42 @@ func Resolve(root string) (string, error) {
 	return resolved, nil
 }
 
+// ResolvePath makes path absolute relative to root when needed, resolves
+// existing symlinks, and verifies containment. The returned path is the
+// canonical path the caller should use for the operation; checking one path
+// and opening a different spelling would reintroduce symlink surprises.
+func ResolvePath(root, path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("jail: empty path")
+	}
+	abs := path
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(root, abs)
+	}
+	abs, err := filepath.Abs(abs)
+	if err != nil {
+		return "", err
+	}
+	real, err := resolveExisting(abs)
+	if err != nil {
+		return "", fmt.Errorf("jail: cannot resolve path: %w", err)
+	}
+	rel, err := filepath.Rel(root, real)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("jail: path %q escapes root %q", path, root)
+	}
+	return real, nil
+}
+
 // Check verifies that path stays within the (already resolved) root.
 // Both sides are resolved through symlinks (e.g. /var → /private/var on
 // macOS), and paths may reference files that do not exist yet (writes).
 func Check(root, path string) error {
-	if path == "" {
-		return fmt.Errorf("jail: empty path")
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return err
-	}
-	real, err := resolveExisting(abs)
-	if err != nil {
-		return fmt.Errorf("jail: cannot resolve path: %w", err)
-	}
-	if !strings.HasPrefix(real, root+string(os.PathSeparator)) && real != root {
-		return fmt.Errorf("jail: path %q escapes root %q", path, root)
-	}
-	return nil
+	_, err := ResolvePath(root, path)
+	return err
 }
 
 // resolveExisting resolves a path through symlinks even when the target or

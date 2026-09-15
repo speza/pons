@@ -89,7 +89,28 @@ func (a *codexAuth) save() error {
 	if err := os.MkdirAll(filepath.Dir(a.authPath), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(a.authPath, b, 0o600)
+	tmp, err := os.CreateTemp(filepath.Dir(a.authPath), ".auth-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, a.authPath)
 }
 
 // current returns credentials that are valid right now, refreshing
@@ -99,7 +120,7 @@ func (a *codexAuth) current(ctx context.Context) (access, accountID string, err 
 		return a.Access, a.AccountID, nil
 	}
 	if a.Refresh == "" {
-		return "", "", fmt.Errorf("codex auth: token expired and no refresh token available (run /login in pi)")
+		return "", "", fmt.Errorf("codex auth: token expired and no refresh token available (run pons -provider codex --login)")
 	}
 	if err := a.refresh(ctx); err != nil {
 		return "", "", err

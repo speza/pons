@@ -161,6 +161,37 @@ func TestOpenAIAdapter(t *testing.T) {
 	}
 }
 
+func TestOpenAITruncatedResponseIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		io.WriteString(w, `{"id":"c1","object":"chat.completion","created":0,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"partial"},"finish_reason":"length"}]}`)
+	}))
+	defer srv.Close()
+
+	c := newOpenAIClient("sk-test", srv.URL+"/v1", 32)
+	_, err := c.Complete(context.Background(), "sys", []Turn{{Role: "user", Blocks: []Block{Text{Value: "go"}}}}, nil)
+	if err == nil || !strings.Contains(err.Error(), "truncated") {
+		t.Fatalf("expected truncation error, got %v", err)
+	}
+}
+
+func TestConfiguredModelsReachAdapters(t *testing.T) {
+	anthropic, err := New(Config{Provider: "anthropic", APIKey: "test", Model: "claude-custom"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := anthropic.client.(*anthropicClient).model; got != "claude-custom" {
+		t.Fatalf("anthropic model = %q", got)
+	}
+	openai, err := New(Config{Provider: "openai", APIKey: "test", Model: "gpt-custom"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := openai.client.(*openaiClient).model; got != "gpt-custom" {
+		t.Fatalf("openai model = %q", got)
+	}
+}
+
 // TestResponsesAdapter pins the Codex/Responses streaming wire: SSE in,
 // function_call + reasoning replay out, store:false + encrypted_content include.
 func TestResponsesAdapter(t *testing.T) {
