@@ -8,6 +8,7 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"slices"
@@ -80,13 +81,24 @@ func (p *Shell) run(ctx context.Context, a protocol.Action) (protocol.ToolResult
 	}
 	out, err := cmd.CombinedOutput()
 	res := protocol.ToolResult{ActionID: a.ID, OK: err == nil, Output: truncate(string(out), p.cfg.MaxOutput)}
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
+	switch {
+	case err == nil:
+		// success
+	case ctx.Err() != nil:
+		res.OK = false
+		res.Error = "canceled"
+	case cctx.Err() != nil:
+		res.OK = false
+		res.Error = fmt.Sprintf("command timed out after %s", timeout)
+	default:
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
 			// Non-zero exit is an observation for the brain, not a crash.
 			res.OK = true
 			res.ExitCode = ee.ExitCode()
-			res.Error = fmt.Sprintf("exit %d", ee.ExitCode())
+			res.Error = fmt.Sprintf("exit %d", res.ExitCode)
 		} else {
+			res.OK = false
 			res.Error = err.Error()
 		}
 	}
