@@ -627,7 +627,7 @@ func (h *Host) readLoop(stdout io.Reader) {
 			if h.isClosing() {
 				return
 			}
-			if errors.Is(err, io.EOF) {
+			if errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
 				h.fail(errors.New("external: plugin stdout closed"))
 			} else {
 				h.fail(fmt.Errorf("external: read protocol frame: %w", err))
