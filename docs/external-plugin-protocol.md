@@ -1,29 +1,22 @@
 # Pons external plugin protocol
 
-**Status:** Draft
+**Status:** Accepted
 **Protocol:** `pons.plugin.runtime/1`
-**Related:** ADR-0007
+**Related:** ADR-0004, ADR-0007
 
-This document specifies the common runtime used by independently built pons
-plugins and the normative `tool_provider/v1` capability. Other capability
-names are reserved only as design direction; they gain wire contracts in later
-specifications.
+This document is the normative specification for the external tool-provider
+runtime shipped in `plugins/external`. Runtime protocol 1 defines exactly one
+capability: `tool_provider/v1`.
 
 ## 1. Roles and topology
 
-A **runtime host** is either the pons control process or a hands runtime. It
-launches a **plugin process** and adapts the plugin's advertised capabilities
-to pons interfaces.
+A **host** is the pons process, or an embedding process using the external
+adapter. It launches one **plugin process** and adapts that process's
+advertised tools to `pons.ToolPort`.
 
-```text
-control host                         hands host / sandbox
-  brain provider                       tool provider
-  session store                        execution policy
-  event sink
-```
-
-One process connection has exactly one host and one plugin. A plugin may
-advertise multiple capabilities valid in that host's placement.
+The plugin process is a hands-side tool provider. It receives no `Core`, brain,
+conversation history, or provider credentials unless the host explicitly
+supplies them through deployment configuration.
 
 ## 2. Installation manifest
 
@@ -44,18 +37,17 @@ splitting or expansion.
 Required fields:
 
 - `manifest_version`: manifest schema version;
-- `name`: stable, reverse-DNS-style plugin identifier;
+- `name`: lower-case reverse-DNS-style plugin identifier;
 - `entrypoint`: executable or interpreter path;
-- `runtime_protocol`: requested major runtime protocol.
+- `runtime_protocol`: requested runtime protocol major version.
 
-Hosts reject unknown manifest fields so typos cannot silently change launch
-policy. Optional launch arguments are literal strings. Secret values do not belong in
-the manifest. The host controls inherited environment, credentials, resource limits, and
-placement. The process working directory is the manifest directory so
-interpreted plugins can find packaged assets. A hands workspace is passed
-explicitly during initialization and must not be inferred from process cwd.
+`args` is optional and contains literal strings. Hosts reject unknown manifest
+fields. The host sets the child working directory to the manifest directory.
+The hands workspace is passed explicitly during initialization and is never
+inferred from the child working directory.
 
-An interpreted TypeScript distribution could instead use:
+An interpreted distribution can use an executable interpreter as the
+entrypoint:
 
 ```json
 {
@@ -67,42 +59,37 @@ An interpreted TypeScript distribution could instead use:
 }
 ```
 
-The default host environment is empty so credentials do not cross into hands.
-An embedding host supplies only a safe runtime path, for example
-`HostConfig{Path: "/usr/local/bin:/usr/bin:/bin"}`; the CLI equivalent is
-`pons --plugin plugin.json --plugin-path /usr/local/bin:/usr/bin:/bin`.
-This supplies `PATH` without inheriting the rest of the host environment.
-
-Hosts must not automatically execute a project-local manifest merely because
-it exists.
+The default child environment is empty. A host may explicitly add variables or
+replace `PATH` with a safe runtime path. Credentials are not inherited by
+default. Hosts must not execute a project-local manifest merely because it
+exists.
 
 ## 3. Framing
 
-- Transport is stdin/stdout.
+- Transport is the child's stdin and stdout.
 - Encoding is UTF-8 JSON-RPC 2.0.
-- Each physical line is exactly one complete JSON-RPC message (NDJSON).
-- JSON messages must not contain literal unescaped newlines.
-- Stdout is protocol-only. Human and structured logs go to stderr.
-- Request and response messages may be interleaved.
-- Responses may arrive in an order different from requests.
-- The host imposes configurable maximum frame and stderr sizes.
+- Each physical line is exactly one complete JSON-RPC message.
+- JSON strings contain escaped, not literal, newlines.
+- Stdout is protocol-only; logs go to stderr.
+- Requests and responses may be interleaved.
+- Responses may arrive in a different order from requests.
+- The host applies maximum frame and stderr sizes.
 
-A protocol implementation must continuously read while calls are in flight so
-that a full pipe cannot deadlock the peer.
+The plugin must keep reading while calls are in flight so a full pipe cannot
+deadlock the host.
 
 ## 4. Lifecycle
 
 ```text
 host starts process
-host -> initialize
-host <- metadata and capabilities
-host activates supported capabilities
-host <-> capability calls and notifications
-host -> shutdown
+host -> plugin/initialize
+host <- plugin metadata and tool catalog
+host <-> health, cancellation, and tool calls
+host -> plugin/shutdown
 plugin exits
 ```
 
-No capability call may be sent before successful initialization. There is one
+No capability call is sent before successful initialization. There is one
 initialization exchange per process lifetime.
 
 ### 4.1 Initialize
@@ -169,27 +156,36 @@ Response:
 ```
 
 The manifest name and handshake name must match. The host rejects duplicate
-capability declarations, unsupported versions, capabilities invalid for the
-configured placement, and duplicate tool/action kinds. Capability
-configuration is capability-specific.
+capabilities, unsupported versions, invalid placement, multiple tool-provider
+declarations, duplicate tool kinds, and invalid tool schemas. The handshake
+catalog is authoritative for the tools registered in the core.
 
-The initialization request contains no secrets by default. Credentials are
-provided only through explicit deployment policy, such as scoped environment
-variables or a host-side broker.
+Initialization contains no secrets by default. Explicit deployment policy is
+required for any credential, such as a scoped environment variable or a
+host-side broker.
 
 ### 4.2 Readiness
 
-A successful initialize response means the plugin is ready. Plugins must
-complete required startup work before responding. There is no separate ready
-notification in version 1.
+A successful initialize response means the plugin is ready. Startup work must
+finish before the response. Runtime protocol 1 has no separate ready
+notification.
 
 ### 4.3 Health and cancellation
 
-A host may call `plugin/health` after initialization. A healthy tool provider
-responds with a successful result such as `{"status":"ok"}`; health is an
-optional diagnostic call and does not add a capability.
+After initialization the host may send:
 
-The host may send the JSON-RPC notification convention used by LSP:
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "health-1",
+  "method": "plugin/health"
+}
+```
+
+A healthy tool provider returns a successful result such as
+`{"status":"ok"}`. Health is a diagnostic method and is not a capability.
+
+The host cancels work with the JSON-RPC notification convention used by LSP:
 
 ```json
 {
@@ -199,69 +195,73 @@ The host may send the JSON-RPC notification convention used by LSP:
 }
 ```
 
-A plugin should promptly cancel the associated work. The host still owns the
-deadline and may kill an unresponsive process. A response racing with
-cancellation is valid; the host accepts at most one terminal outcome.
+The plugin cancels the associated handler. The host still owns the deadline
+and may terminate an unresponsive process. A response racing with
+cancellation is valid; the host accepts only one terminal outcome for a call.
 
 ### 4.4 Shutdown
 
-The host requests `plugin/shutdown`, waits for its response, closes stdin, and
-allows a bounded grace period for process exit. After the grace period it
-terminates the process. Unexpected EOF or process exit fails all pending calls.
-Plugins cannot be reattached in runtime protocol 1.
+The host sends `plugin/shutdown`, waits for its response, closes stdin, and
+allows a bounded grace period for process exit. It terminates the process when
+the grace period expires. Unexpected EOF or process exit fails pending calls.
+The host does not reattach to a process in runtime protocol 1.
 
 ## 5. Request and error semantics
 
-JSON-RPC `error` means the request could not be processed as a protocol call:
-unknown method, invalid parameters, incompatible state, or internal plugin
+A request and response use JSON-RPC 2.0 envelopes. Request IDs are non-empty
+strings and identify one in-flight request. A response contains exactly one of
+`result` or `error`.
+
+A JSON-RPC `error` means the request could not be processed as a protocol call:
+unknown method, invalid parameters, invalid lifecycle state, or a plugin
 failure before a domain result existed.
 
-Expected domain failures remain successful RPC responses. For example, a tool
-that runs a command exiting 1 returns a `ToolResult`; it does not return a
-JSON-RPC error. This preserves the existing distinction between observations
-and harness failures.
+Expected domain failures are successful RPC results. A command that exits 1,
+for example, returns a `protocol.ToolResult`; it is not a JSON-RPC error.
 
-The host validates correlation fields and does not trust a plugin-supplied
-action ID, capability identity, or result kind to route a response.
+The host validates response envelopes and correlation IDs. For tool calls it
+overwrites `action_id` and `kind` in the returned `ToolResult` from the action
+it routed. Plugin output cannot redirect a response or forge its payload
+namespace.
 
-Unknown JSON object fields should be ignored unless a capability specification
-marks the object closed. This permits additive minor evolution. Major
-incompatible changes use a new integer capability or runtime version.
+Unknown object fields are ignored unless the object is explicitly closed by
+this specification or its capability schema. Major incompatible changes use a
+new protocol or capability version.
 
 ## 6. Concurrency
 
-Every request has a unique string ID. A plugin advertises `max_concurrency`
-per stateful capability:
+Every request has a unique string ID. A provider advertises
+`max_concurrency` in its tool-provider configuration:
 
-- absent or `1`: host serializes calls to that capability;
-- greater than `1`: host may issue that many concurrent calls;
-- `0`: concurrency is unbounded, subject to host limits.
+- omitted or `1`: the host serializes calls;
+- greater than `1`: the host may issue that many concurrent calls; and
+- explicit `0`: calls are unbounded by the provider, subject to host limits.
 
-The host may independently apply a lower limit. Calls to different
-capabilities may overlap unless their specifications say otherwise.
+The host may apply a lower limit. Calls to different capabilities are not
+relevant in runtime protocol 1 because only one capability is defined.
 
-## 7. Capability contracts
+## 7. Tool provider
 
-### 7.1 Tool provider (normative)
+Capability identifier: `tool_provider`, version `1`. Placement: `hands`.
 
-Capability identifier: `tool_provider`, version `1`.
+The capability configuration contains `tools`. Every tool has a non-empty
+`kind`, a description, and an `input_schema`. The schema root is an object.
+Version 1 supports these JSON Schema keywords:
 
-Placement: hands.
+- `type`, `properties`, `required`, and `description`;
+- `enum`;
+- `items`; and
+- `additionalProperties:false`.
 
-Initialization configuration contains model-facing tool descriptions. Every
-tool has a non-empty action `kind`, a `description`, and an `input_schema`.
-The schema root must be an object. Version 1 supports the interoperable JSON
-Schema subset used by model tool APIs: `type`, `properties`, `required`,
-`description`, `enum`, `items`, nested objects, and
-`additionalProperties:false`. Unsupported keywords cause composition to fail
-rather than being silently discarded.
+The host rejects unsupported keywords. Nested object and array schemas use the
+same subset.
 
-Action arguments are a JSON object carried without string coercion. At the Go
-wire boundary they are `json.RawMessage`; a producing or consuming plugin
-decodes them into its own typed structure. Consequently booleans, numbers,
-arrays, and nested objects retain their JSON types.
+Action arguments are a JSON object and retain their JSON types. At the Go wire
+boundary they are `json.RawMessage`; providers decode them into their own
+input types. Missing or null arguments are normalized to `{}` by the Go host,
+while a provider-facing execution request uses an object.
 
-Execution method:
+Execution request:
 
 ```json
 {
@@ -281,80 +281,52 @@ Execution method:
 }
 ```
 
-The response result is a `protocol.ToolResult`. The hands host enforces the
-deadline and overwrites both `action_id` and `kind` from the invoked Action;
-plugin output cannot redirect correlation or forge payload namespacing. Plugin
-death, timeout, or malformed output becomes an unsuccessful ToolResult so the
-brain can observe the unavailable capability when safe.
-
-### 7.2 Anticipated capabilities (non-normative)
-
-A later specification is expected to define `brain_provider` from the existing
-`ControlPort`, including tool-catalog configuration, planning, interpretation,
-and fatal failure semantics. Session stores, event sinks, durable turn
-recorders, and execution policy are possible capability types, but runtime
-protocol 1 assigns them no methods or payloads. Implementations must not claim
-those capability names until their contracts are accepted.
+The result is a `protocol.ToolResult`. A command-level failure is represented
+inside that result. A plugin panic, process failure, timeout, malformed result,
+or oversized result is converted to an unsuccessful `ToolResult` when the
+host can safely continue; a broken protocol connection also fails pending
+calls and is not reused.
 
 ## 8. Discovery and routing
 
-The runtime responsible for a placement loads configured manifests. A remote
-hands runtime aggregates tool descriptions from its local providers and sends
-the catalog to the controller as part of the hands transport handshake. The
-controller registers proxy handlers that forward Actions to that hands
-runtime; it never launches the remote hands plugin locally.
+The host loads only manifests explicitly supplied by the application. It
+starts each child, validates its initialization catalog, and registers one
+proxy handler per tool with `Core.AddTool`. Action-kind conflicts fail
+composition; selection is never last-wins.
 
-```text
-Core
-  -> remote tool proxy
-    -> hands transport
-      -> hands registry
-        -> external plugin RPC
-```
-
-Action kind conflicts fail composition. Selection is never last-wins.
-Plugin name, version, executable identity, capability version, and action kind
-should be included in audit metadata.
+The host keeps plugin name, version, capability version, executable, and action
+kind available in tool metadata for presentation and audit. The core routes an
+action to the proxy, and the proxy routes it to the child provider.
 
 ## 9. Security requirements
 
 - Treat manifests and executables as code, not data.
 - Require explicit activation or prior approval.
-- Do not invoke entrypoints through a shell.
-- Do not trust plugin schemas, logs, results, or payload sizes.
-- Put hands plugins inside the same OS sandbox as the hands runtime.
-- Do not mistake a subprocess boundary for a permissions boundary.
-- Keep credentials out of hands by default; use scoped credentials or brokers.
-- Apply deadlines and size limits in the host.
-- A plugin cannot request or elevate its placement.
+- Execute entrypoints directly, never through a shell.
+- Treat plugin schemas, logs, results, and payloads as untrusted.
+- Apply deadlines, frame/result limits, stderr limits, pending-call limits, and
+  process termination in the host.
+- Keep credentials out of the child by default; use scoped credentials or a
+  broker when necessary.
+- Put an untrusted child inside the same OS sandbox as the hands deployment;
+  do not mistake a subprocess for a permissions boundary.
+- Do not allow a plugin to elevate its placement.
 
-## 10. SDK and conformance requirements
+## 10. Implementations and tests
 
-The protocol repository should provide fixture-driven tests that can launch any
-plugin executable and verify:
+The Go host and SDK implement runtime protocol 1 and are covered by
+hermetic tests in `plugins/external`. The dependency-free TypeScript SDK is
+smoke-tested when Bun is available. The examples in
+`examples/external-echo` and `examples/external-echo-ts` are explicit plugin
+providers, not implicit registrations.
 
-- initialization and version rejection;
-- stdout framing and stderr logging;
-- out-of-order concurrent responses;
-- cancellation and shutdown;
-- malformed and oversized output handling;
-- capability schema validation;
-- process death with pending requests.
+The tests cover manifest and schema validation, clean environments, typed
+arguments, discovery, correlation normalization, concurrent calls,
+cancellation, shutdown, process death, malformed frames, oversized frames,
+and protocol write failures. Both SDKs keep application logs off stdout.
 
-The Go SDK is covered by the hermetic host black-box tests in
-`plugins/external`; the dependency-free TypeScript SDK in
-`plugins/external/sdk/typescript` is exercised by
-`examples/external-echo-ts` (including initialize, typed execution, and
-shutdown). A shared fixture runner for both languages remains a follow-up.
-Both SDKs expose cancellation to handlers and must not print application logs
-to stdout.
+## 11. Capability scope
 
-## 11. Open follow-ups
-
-1. Define the controller-to-hands discovery handshake in the ADR-0004
-   transport specification.
-2. Decide manifest checksum/signature fields and user approval storage.
-3. Define restart policy for stateless versus stateful capabilities.
-4. Publish machine-readable schemas for runtime and `tool_provider/v1`
-   messages.
-5. Specify `brain_provider` separately after exercising the tool runtime.
+Runtime protocol 1 defines no external brain, session-store, event-sink, or
+execution-policy capability. Such names are unsupported by this protocol and
+cannot be activated through the tool-provider adapter.

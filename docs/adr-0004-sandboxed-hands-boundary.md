@@ -1,83 +1,89 @@
-# ADR-0004: Hands are a sandbox boundary — the protocol is the deployment seam
+# ADR-0004: Hands are the execution boundary; isolation is deployment policy
 
-**Status:** Accepted (design); transport implementation tracked as follow-up
+**Status:** Accepted
 **Date:** 2026-09-15
-**Related:** ADR-0001 (brain/hands ports), ADR-0003 (ToolResult wire shape)
+**Related:** ADR-0001, ADR-0003, ADR-0007
 
 ## Context
 
-Built-in hands run in-process with the user's privileges. Pi's `security.md`
-is explicit about why a *policy* layer is not a security boundary: an
-in-process policy check shares the trust domain it gates, and real isolation
-must come from an OS, container, or VM boundary. Pi achieves that today by
-running the whole agent in a container, or by routing tool execution into a
-micro-VM via a tool-overriding extension (Gondolin).
+Built-in tools execute in the pons process and therefore have the privileges
+of that process. An allowlist, path check, or other in-process policy is useful
+for limiting ordinary calls, but it is not an operating-system security
+boundary: code running in the same process can use whatever host access the
+process has.
 
-The brain/hands split (`ControlPort` / `ToolPort`) makes the execution
-boundary architectural in `pons`: the hands layer can move out of process
-without touching the brain, the loop, or the protocol.
+The brain/hands split already gives pons a deployment seam. The brain talks in
+`protocol.Action` values, and hands return `protocol.ToolResult` values. The
+same seam supports built-in handlers and the persistent external tool
+providers defined by ADR-0007.
 
 ## Decision
 
-**The hands layer is deployable out-of-process** — subprocess first, then
-container/VM — with `protocol.Action` / `protocol.ToolResult` as the wire
-over framed JSON (NDJSON, pi-RPC-style) on stdio/unix-socket/vsock. The
-brain and harness are unchanged by where hands live.
+### 1. `ToolPort` is the execution boundary
 
-Posture rules for the sandboxed configuration:
+The core never gives a brain a tool implementation or a direct I/O handle.
+All capability execution goes through `ToolPort.Execute`. Built-in tools are
+in-process implementations of that port. External tool providers are child
+processes adapted to the same port by `plugins/external`.
 
-1. **The observation channel is the sandbox's only egress.** Information
-   leaves the VM exclusively as `ToolResult` values; the control plane may
-   inspect, truncate, redact, or deny them. Therefore: *secrets never enter
-   the sandbox* (credentials stay host-side or proxy-side — pi's Docker
-   Sandboxes sentinel-credential pattern), because anything inside can exit
-   as an observation.
-2. **Observations are untrusted.** Workspace content flows to the brain as
-   observation text; prompt injection via that channel is expected and is
-   treated as an input-hygiene problem, not something the sandbox prevents.
-   The sandbox guarantees the *effects* boundary (OS-enforced), not input
-   safety.
-3. **Deadlines are owned by the control plane.** A remote hands process
-   cannot be trusted to report its own hang; per-action timeouts move to the
-   harness/transport, not the tool.
-4. **Size discipline.** Large outputs should be truncated/referenced by the
-   producing side (artifact path in the payload), because observations are
-   the serialization cost of every crossing.
-5. **Hands death is an observation.** A crashed or killed hands process
-   surfaces as `ToolResult{OK:false}`, never as a control-plane crash.
+The core does not implement a whole-hands socket, remote runtime, container,
+or VM. Those are deployment choices outside the current pons runtime.
+
+### 2. Isolation is supplied by deployment, not by tool policy
+
+pons does not claim that a subprocess, path jail, or command allowlist is a
+security boundary. When a task requires protection from the hands code, the
+caller runs the hands side under an OS sandbox, container, or VM and grants it
+only the intended workspace and capabilities.
+
+The external host applies a clean child environment by default, accepts an
+explicit workspace, and owns protocol-level timeouts, frame/result limits, and
+process termination. These controls reduce accidental exposure and contain
+failures; they do not replace OS isolation. Credentials are passed only by
+explicit composition or a host-side broker.
+
+### 3. Results and input are treated as untrusted data
+
+`ToolResult` is the supported data path from hands back to the brain. In a
+sandboxed deployment, the operator configures the sandbox's network and file
+egress accordingly; pons itself cannot enforce that operating-system policy.
+
+Workspace content in an observation is untrusted input and may contain prompt
+injection. Sandboxing limits effects, not the meaning the brain assigns to
+returned text. Brains and UIs must treat observations as data rather than
+trusted instructions.
+
+### 4. Failure belongs at the hands boundary
+
+The control plane owns action deadlines and decides how to handle a dead,
+killed, malformed, or oversized hands provider. Where execution can continue,
+these failures become `ToolResult{OK:false}` observations. A tool's non-zero
+command exit remains a domain result according to ADR-0003.
 
 ## Alternatives considered
 
-- **Whole-agent-in-container as the default** (pi's Plain Docker pattern) —
-  simple, but provider credentials enter the sandbox and the split is
-  all-or-nothing. Kept as an *option*, not the design.
-- **Policy-only sandbox (in-process checks as the security story)** —
-  explicitly rejected: a partial in-process sandbox is easy to mistake for a
-  security boundary while depending on the host shell, filesystem, and
-  package managers (pi's own `security.md` argument, which we adopt).
-- **Policy in the brain** (the model self-reports risk) — rejected: the
-  brain's `Danger` self-assessment is advisory; enforcement lives at
-  execution, where it can't be bypassed by prompt injection.
+- **Policy-only sandboxing:** rejected as a security story because in-process
+  checks share the trust domain they are supposed to constrain.
+- **Putting policy in the brain:** rejected because `Danger` is an advisory
+  model output and cannot enforce execution policy.
+- **Whole-agent container as the pons default:** rejected because it couples
+  provider credentials and control logic to the sandbox. A caller may still
+  choose that deployment when it is appropriate.
 
 ## Consequences
 
-**Positive:** the local/in-process case is a degenerate deployment of the
-same design (in-memory dispatch); sandbox strength scales from "subprocess
-with jail" to "micro-VM" without core changes; the audit trail records
-exactly what crossed the boundary.
-
-**Negative / accepted risks**
-
-- Latency and serialization cost on every crossing — motivates size
-  discipline and eventually streaming partial results.
-- A follow-up **transport ADR** is required before implementation: framing,
-  lifecycle (per-task vs per-session VM), health/reconnect, and payload
-  kind registries across the wire.
-- Policy plugins (allowlists) remain useful for *convenience and audit* but
-  are explicitly not the security mechanism.
+- The local in-process configuration remains simple and uses the same
+  execution contract as external hands.
+- External child processes provide a crash and resource-control boundary, but
+  not a permissions boundary by themselves.
+- Security-sensitive deployments must configure the OS/container/VM boundary
+  explicitly.
+- The protocol and tool result contract remain unchanged when deployment
+  changes.
 
 ## References
 
-- pi `security.md` ("no built-in sandbox, on purpose"), `containerization.md`
-  (Gondolin: tool execution routed into a micro-VM)
-- `harness` ports: `pons.ControlPort`, `pons.ToolPort`; `protocol/` (the wire)
+- `core.go` — `ControlPort`, `ToolPort`, and dispatch
+- `plugins/external` — persistent external hands adapter
+- `docs/external-plugin-protocol.md` — external tool-provider protocol
+- `protocol/` — action and result contracts

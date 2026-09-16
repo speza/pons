@@ -44,9 +44,9 @@ Key invariants:
 3. **The harness trusts neither.** Whatever the model declares (including its
    advisory `Danger` self-assessment), enforcement happens at the execution
    boundary — inside the producing tool plugin, or middleware over the port.
-4. **`protocol/` is the seam.** Pure, dependency-free JSON types; swappable
-   transport. The same `Action`/`ToolResult` wire types work in-process today
-   and across a socket for sandboxed/remote hands later (ADR-0004).
+4. **`protocol/` is the seam.** Pure, dependency-free JSON types; the same
+   `Action`/`ToolResult` contract serves in-process hands and the external
+   hands-side runtime (ADR-0004 and ADR-0007).
 
 ## Packages
 
@@ -117,8 +117,8 @@ Plain NDJSON files, one per session, no engine required to read them:
 - Greppable, `tail -f`-able while the agent runs, `jq`-able, diffable
 - `--resume` continues one by id (or `latest`); the file is never rewritten —
   branching appends, abandoned branches stay queryable
-- `sessions.Store.Search` remains contract-level for future compaction/
-  resume tooling; the live agent just uses bash
+- `sessions.Store.Search` remains a storage-level operation; the live agent
+  inspects the published transcript with bash
 
 ## Development checks
 
@@ -206,12 +206,12 @@ The reasoning behind the big choices is recorded as ADRs in [`docs/`](docs/):
 | ADR | Decision | Status |
 |---|---|---|
 | [ADR-0001](docs/adr-0001-pluggable-minimal-harness.md) | Minimal pluggable harness, brain/hands separation | Accepted |
-| [ADR-0002](docs/adr-0002-tree-sessions-sqlite.md) | Tree sessions in SQLite (retired engine) | Retired as engine; model lives in ADR-0005 |
+| [ADR-0002](docs/adr-0002-tree-sessions-sqlite.md) | Session trees use append-only JSONL; SQLite is not selected | Accepted |
 | [ADR-0003](docs/adr-0003-tool-result-contract.md) | ToolResult: status envelope / canonical observation / typed plugin payloads | Accepted |
-| [ADR-0004](docs/adr-0004-sandboxed-hands-boundary.md) | Hands as a sandbox boundary; protocol as the deployment seam | Design accepted; transport pending |
-| [ADR-0005](docs/adr-0005-transcript-model-vs-engine.md) | Transcript model = contract; **default engine = JSONL** | Accepted |
+| [ADR-0004](docs/adr-0004-sandboxed-hands-boundary.md) | Hands are the execution boundary; isolation is deployment policy | Accepted |
+| [ADR-0005](docs/adr-0005-transcript-model-vs-engine.md) | Transcript model is a contract; engine and location are composition choices | Accepted |
 | [ADR-0006](docs/adr-0006-concurrent-tool-execution.md) | Tool execution concurrent within a turn; record in call order | Accepted |
-| [ADR-0007](docs/adr-0007-language-neutral-plugin-runtime.md) | Language-neutral persistent external hands plugins | Accepted; tool-provider v1 implemented |
+| [ADR-0007](docs/adr-0007-language-neutral-plugin-runtime.md) | Language-neutral persistent external tool plugins | Accepted |
 
 ## Dependencies
 
@@ -222,6 +222,6 @@ layer is stdlib-only, and `pons` builds as a single static binary.
 ## Next
 
 - Streaming observations: text deltas and partial tool output on `OnEvent`
-- Sandboxed-hands transport: NDJSON-framed `ToolPort` over a socket (ADR-0004)
+- Deployment isolation for hands: configure the OS, container, or VM boundary described by ADR-0004
 - Branch summaries + agent-driven branching
 - `go install`-able releases (the module is `github.com/samperrin/pons`)

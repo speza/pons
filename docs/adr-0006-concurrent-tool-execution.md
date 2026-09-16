@@ -1,49 +1,51 @@
-# ADR-0006: Within-turn tool execution is concurrent; the record is call-ordered
+# ADR-0006: Tool calls within a turn execute concurrently and record in call order
 
 **Status:** Accepted
 **Date:** 2026-09-15
-**Related:** ADR-0001 (loop), ADR-0003 (ToolResult)
+**Related:** ADR-0001, ADR-0003
 
 ## Context
 
-When the model emits several independent tool calls in one turn, executing
-them sequentially wastes latency (each waits for the previous). But
-execution order and *recorded* order are different concerns: the audit
-trail, session tree, and brain context must stay deterministic or the
-transcript becomes unreliable.
+A brain may return several independent tool calls in one plan. Running them
+sequentially makes each call wait for the preceding call even when the tools
+are independent. Completion order is nondeterministic, but the audit trail and
+next brain context must remain deterministic.
 
 ## Decision
 
-1. **Concurrent execution**: all non-finish actions of a turn run
-   concurrently (goroutine per call). Everything before a `finish` action
-   executes; `finish` stops the turn as before.
-2. **Call-order record**: results are indexed by call position — never by
-   completion order. The `TurnLog`, session tree, brain context, and
-   `action_end` events replay in call order after the last call completes;
-   only wall-clock timing is nondeterministic.
-3. **Safety rules that follow**:
-   - tool handlers and `WrapTool` middleware must be goroutine-safe;
-   - multi-step mutations of the same file are the producing plugin's
-     responsibility to serialize (the edit tool is a read-modify-write);
-   - the recorder runs after the turn completes — persistence stays
-     sequential by construction.
+1. The core finds the first `finish` action in a plan. Actions before it run
+   concurrently, with one goroutine per action. The finish action and any
+   actions after it are loop control and do not execute.
+2. Results are stored by the actions' original indexes, never by completion
+   time. After all running calls complete, the core emits `action_end` events,
+   writes the `TurnLog`, runs turn hooks, and gives results to the brain in
+   call order.
+3. Tool handlers and `WrapTool` middleware are responsible for being safe
+   under concurrent calls. A plugin that performs a multi-step mutation of
+   shared state must serialize that mutation; the edit plugin serializes its
+   read-modify-write operation.
+4. Turn recording is performed after the concurrent calls have joined, so the
+   session recorder writes one deterministic turn at a time.
 
 ## Alternatives considered
 
-- **Sequential** (the original design) — deterministic for free, but slow
-  when the model plans independent calls; rejected now that the audit
-  order is preserved by indexing instead of execution order.
-- **Completion-ordered recording** — rejected: turns the audit trail and
-  session tree nondeterministic, breaking replay/resume.
+- **Sequential execution:** rejected because it adds avoidable latency for
+  independent calls.
+- **Completion-ordered recording:** rejected because it makes audit history,
+  session trees, and resumed brain context nondeterministic.
 
 ## Consequences
 
-Latency tracks the slowest call in a turn, not the sum. The deterministic
-test locks both properties at once: the first tool blocks on a signal only
-the second tool can send (sequential execution would deadlock), and the
-recorded results must still come back in call order.
+- Turn latency is approximately the slowest running call rather than the sum
+  of all call durations.
+- The transcript and provider context preserve plan order even when tools
+  finish in a different order.
+- A tool must not assume that another tool call in the same plan has already
+  completed unless the plugin or application provides synchronization.
+- A finish action records in the plan but has no corresponding tool result.
 
 ## References
 
-- `core.go` (`Run` — the concurrent dispatch), `core_test.go`
-  (`TestConcurrentExecutionOrderedResults`)
+- `core.go` — concurrent dispatch and ordered result collection
+- `core_test.go` — `TestConcurrentExecutionOrderedResults`
+- `plugins/edit/edit.go` — serialized read-modify-write

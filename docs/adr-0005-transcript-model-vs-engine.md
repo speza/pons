@@ -1,134 +1,85 @@
-# ADR-0005: The transcript model is a contract; the engine and location are not
+# ADR-0005: The transcript model is a contract; engine and location are composition choices
 
-**Status:** Accepted — amended 2026-09-15: default engine is JSONL (see amended decision)
+**Status:** Accepted
 **Date:** 2026-09-15
-**Supersedes (in part):** ADR-0002 — which bundled three decisions into one
-plugin. Related: ADR-0001 (plugin philosophy), ADR-0003 (ToolResult wire shape).
+**Related:** ADR-0001, ADR-0002, ADR-0003
 
 ## Context
 
-How transcripts/conversations are stored is a fundamental decision. The
-reference points disagree by design: pi and Claude Code use append-only
-**JSONL** (greppable with unix tools, tail-able while running); OpenAI Codex
-uses **SQLite**. ADR-0002 chose SQLite and — critically — placed the *data
-model* (the entry tree, kinds, leaf pointer, search semantics) inside the
-`sessionsqlite` plugin. That bundled three separable decisions:
+A transcript has two separate concerns. The data model defines what a
+conversation and its branches mean. The storage engine and filesystem
+location define how a composing application keeps that model.
 
-1. **What a transcript IS** — the data model.
-2. **HOW it is stored** — the engine.
-3. **WHERE it lives** — the location (already moved to the composing binary).
-
-Only (1) is fundamental. If (2) and (3) are separate, the model can't be
-held hostage by the engine.
+pons uses the same separation for sessions that it uses for the brain/hands
+protocol. The session contract must not require a particular storage engine,
+provider, or CLI directory; JSONL is the selected implementation rather than
+the model itself.
 
 ## Decision
 
-**The transcript data model is a standalone contract package** (`sessions/`),
-same pattern as `protocol/` for the brain↔hands seam:
+### 1. `sessions/` is the engine-independent transcript contract
 
-- Pure, JSON-serializable types: `Entry` (immutable node: id, parentId, kind,
-  text, payload), `Session`, entry kinds.
-- The `Store` interface: `Append` (child + leaf move), `PathToLeaf`,
-  `Children`, `Branch`, `GetEntry`, `Leaf`, `Search`, session create/get,
-  `Close`. Implementations must preserve the tree semantics.
-- `WriteJSONL` — the pi-shaped NDJSON interchange serializer lives in the
-  contract, not the engine: interchange is engine-independent by definition.
+The package contains pure, JSON-serializable types:
 
-**The engine is a plugin implementation**, not the model. The shipped
-implementation is `plugins/sessionsjsonl`: append-only NDJSON with a
-stdlib-only scan. A future indexed or database-backed plugin would implement
-the same contract without changing the model.
+- `Entry`, an immutable node with an id, parent id, kind, text, and payload;
+- `Session`, a tree with one mutable leaf pointer; and
+- `Store`, the operations for creating sessions, appending entries, walking
+  the active path, branching, reading children, searching, and closing.
 
-**The location is composition policy** (see ADR-0002's composition note):
-`~/.pons/sessions/<munged-project-path>/` is a `pons` binary convention, not a
-plugin or model rule.
+The active conversation is the path from the root to the leaf. Branching moves
+the leaf to an existing entry; it does not delete abandoned descendants.
+Implementations must preserve these semantics.
 
-**Shipped default engine: JSONL**. The measured trade — 1,000 realistic entries:
+`WriteJSONL` serializes entries as engine-independent NDJSON. It belongs in the
+contract package because export is defined in terms of the model rather than a
+particular storage engine.
 
-| Operation | Earlier SQLite prototype | JSONL (naive scan) | JSONL advantage |
-|---|---|---|---|
-| append ×1000 | 319ms | 23ms | **14×** |
-| search ×50 | 310ms | 43ms | **7×** — a naive full scan beats indexed FTS |
-| path-to-leaf ×20 | 61ms (CTE) | 15ms (load-all) | **4×** |
-| dependency tree | modernc.org: 259MB module cache, multi-MB binary | stdlib only | distribution |
-| status | **removed** | shipped default | |
-| grep/tail the transcript | no | native | the headline property |
+### 2. JSONL is the shipped storage engine
 
-A naive scan is sufficient here because agent sessions are small per-session
-files (hundreds to thousands of entries). The store contract keeps an indexed
-or database-backed engine replaceable if that scale assumption stops holding;
-no SQLite engine is shipped today. The JSONL engine's `Search` is scan-based
-over per-session files, which covers the contract at transcript scale.
+`plugins/sessionsjsonl` is the default and only shipped `sessions.Store`
+engine. It uses one append-only, self-describing NDJSON file per session. A
+file contains a session record, entry records, and optional leaf records. The
+last leaf-relevant record wins, and a truncated trailing line is ignored on
+load.
 
-The JSONL engine's file format is self-describing NDJSON
-(`{"type":"session"|"entry"|"leaf", …}`) — the file IS the transcript:
-grep-able with unix tools, `tail -f`-able while the agent runs, and
-crash-tolerant (a truncated trailing line is skipped on load). Leaf
-semantics: the last leaf-relevant record wins (an earlier branch marker
-must not override entries appended after it — caught by the
-non-leaf-ancestor scoped-search test).
+The engine performs substring search by scanning the session file. It limits
+search to the active root-to-leaf path unless the caller requests all
+branches. Files and their directory use private permissions. SQLite is not a
+runtime dependency and is not part of the current composition.
+
+### 3. Location belongs to the composing application
+
+The store receives its directory from its caller. The CLI selects a durable
+per-project directory under `~/.pons/sessions/` and allows `--session-dir` to
+override it. The session contract and engine do not require that location.
+
+### 4. Recording, resume, and compaction use different layers
+
+`sessionrecorder` records completed turns into any `sessions.Store` and
+publishes the configured transcript path as `PONS_SESSION_FILE`. It does not
+add session search or read actions; the live agent can inspect the file with
+bash and standard text tools.
+
+Resume hydrates the active path into the LLM brain. Context compaction is also
+a brain operation: it rewrites only the brain's in-memory provider context.
+The transcript remains complete and unchanged, so it remains the source for
+inspection and resume.
 
 ## Consequences
 
-**Positive:** the fundamental decision (the model) is now a dependency-free
-contract with documented semantics; engines are swappable without touching
-brains, tools, or the loop; the interface is small enough (~9 methods) that a
-JSONL backend is a plausible afternoon, not a redesign.
-
-**Negative / accepted risks**
-
-- JSONL search is a linear scan — fine at session scale (per-session files
-  bound it); add an indexed Store implementation if that assumption changes.
-- A Store instance serializes access to its session files; separate Store
-  instances sharing the same directory are not coordinated.
-- `Search`'s shape (substring + scope, no regex) is frozen into the contract;
-  regex needs remain on the export path by design.
+- The model, engine, and location can be reasoned about independently.
+- JSONL is directly inspectable with `grep`, `tail`, `jq`, and other standard
+  tools while the agent is running.
+- The default implementation stays dependency-free and scans only one
+  session file for search.
+- A `Store` instance serializes its own access; separate instances sharing a
+  directory are not coordinated.
+- Search is intentionally substring-based. Regex use belongs to transcript
+  export or ordinary file tools rather than the store contract.
 
 ## References
 
-- `sessions/sessions.go` (contract), `plugins/sessionsjsonl/` (engine)
-- pi `session-format.md`, Claude Code transcripts (the JSONL lineage)
-- ADR-0002 (storage engine details, composition note)
-
-
-## Amendment (same day): the agent-facing session tools are gone — bash is the interface
-
-Once the transcript became a plain NDJSON file, `search_session` /
-`read_session` were solutions to a problem that no longer existed. They
-existed to compensate for SQLite's opacity (ADR-0002's rationale); with
-JSONL the compensation layer was legacy.
-
-**Decision:** the session capability set is now minimal — one plugin
-(`sessionrecorder`) that *records* turns into any `sessions.Store` and
-publishes the transcript path as `PONS_SESSION_FILE` (the pi `PI_*` env-var
-pattern). There are no session search/read tools:
-
-- the live brain has its own conversation in context — session search only
-  matters after compaction/resume, where grep over the file is the tool;
-- bash is strictly more expressive than the removed tools (regex, context
-  lines, jq);
-- the LLM's system prompt states the contract; the shell inherits the env
-  var, so the agent introspects its own history with plain unix tools.
-
-This also retires ADR-0002's "search through the hands layer" rationale: it
-was a property of the SQLite engine, not of sessions themselves. The
-`sessions.Store.Search` method stays in the contract (it powers
-compaction/resume tooling), but the live agent surface no longer carries it.
-
-### Amendment (same day): context compaction is a brain-side operation
-
-Compaction lives in the LLM brain (`llm.Config.CompactChars`/`CompactKeep`):
-when the estimated conversation exceeds the budget, older turns are
-summarized by the model into one user message and the recent tail is kept
-verbatim. Two consequences follow from the layering:
-
-- **The transcript file is never modified by compaction** — it keeps every
-  turn, so `$PONS_SESSION_FILE` remains the complete, greppable record the
-  agent reaches through bash; that is precisely the fallback the
-  post-compaction context points at (the summary message says so).
-- The engine is irrelevant to compaction — the Store keeps the full tree;
-  compaction only rewrites what the *brain* replays.
-
-Live-verified: with `--compact-chars 4000`, a 6-turn codex session compacted
-twice mid-run and still completed correctly, while the JSONL file retained
-every raw entry.
+- `sessions/sessions.go` — transcript model and `Store`
+- `plugins/sessionsjsonl/` — JSONL engine
+- `plugins/sessionrecorder/` — recording and transcript publication
+- `docs/adr-0002-tree-sessions-sqlite.md` — concrete tree/storage choice

@@ -1,74 +1,83 @@
-# ADR-0003: ToolResult contract — status, canonical observation, typed payloads
+# ADR-0003: ToolResult has a status envelope, canonical observation, and typed payload
 
 **Status:** Accepted
 **Date:** 2026-09-15
-**Supersedes:** the flat `ToolResult` shape used until this date (`Stdout`,
-`Stderr`, `Diff`, `Details map[string]string`).
+**Supersedes:** the earlier flat `ToolResult` shape (`Stdout`, `Stderr`,
+`Diff`, and `Details map[string]string`)
+**Related:** ADR-0001, ADR-0007
 
 ## Context
 
-`ToolResult` serves three audiences with different needs:
+A tool result serves three audiences:
 
-1. **The model** (via every LLM provider's tool-result wire format) — needs
-   one consistent text rendering of what happened.
-2. **The loop** — needs a control-flow signal distinguishing "harness-level
-   failure" from "failed command as data" (a non-zero `exit 1` is an
-   observation, not a crash).
-3. **UIs / audit** — need tool-specific *structured* facts (the edit diff,
-   truncation info, full-output paths) that the model doesn't need.
+1. the brain, which needs a consistent text observation;
+2. the loop, which needs to distinguish a hands or harness failure from a
+   command failure represented as data; and
+3. UIs and audit consumers, which need tool-specific structured facts such as
+   an edit diff or output-truncation metadata.
 
-The initial shape conflated these: shell-flavored field names (`Stdout` even
-for file reads), a tool-specific field (`Diff`) in the shared protocol, and
-an untyped escape hatch (`Details map[string]string`). Rendering to
-model-facing text was improvised per brain adapter — so provider responses
-were only accidentally consistent.
+A shell-specific result shape and an untyped details map do not provide those
+audiences with a stable contract. Provider adapters also should not invent
+slightly different renderings of the same tool result.
 
 ## Decision
 
-`ToolResult` is a **three-layer type**:
+`protocol.ToolResult` has three layers.
 
-1. **Status envelope** — `ActionID`, `OK`, `Error`, `ExitCode`.
-   - `OK=false` means harness-level failure (denied, crashed, unknown kind).
-     A failed *command* is `OK=true` + `ExitCode` — an observation.
-2. **Canonical observation** — `Output` is the model-facing text, *rendered
-   by the tool plugin that produced it*; `Observation()` (protocol method)
-   appends the failure note and is **the** function brains feed to providers.
-   One result → identical text → every provider. Per-adapter string glue is
-   forbidden.
-3. **Structured payload** — `Kind` (the producing action kind; results are
-   namespaced by the action that made them) + `Payload json.RawMessage`,
-   decoded through **plugin-owned typed accessors** (`edit.AsEditResult`,
-   `bash.AsExecResult`). The core never interprets payloads.
+### 1. Status envelope
 
-Dropped: `Stderr` (nothing set it; exec plugins merge streams by choice),
-`Diff` (now `EditResult.Diff`), `Details` map (unstructured escape hatch).
+The universal fields are `ActionID`, `OK`, `Error`, and `ExitCode`.
+
+`OK` reports whether the hands side produced a usable result for the harness.
+A tool may represent a domain failure as data: for example, a command that
+exits non-zero can return `OK: true`, an `ExitCode`, and an error description.
+Denials, unavailable tools, panics, malformed results, and other harness-level
+failures return `OK: false`.
+
+### 2. Canonical observation
+
+`Output` is text rendered by the tool that produced the result.
+`ToolResult.Observation()` is the only model-facing rendering: it returns the
+output and appends the error note when one is present. Brains pass this value
+to their provider adapters. Provider adapters translate the same observation
+into their provider-specific wire format; they do not re-render tool output.
+
+### 3. Plugin-owned structured payload
+
+`Kind` identifies the action kind that produced the result and `Payload` is
+opaque `json.RawMessage`. The core never decodes or assigns meaning to a
+payload beyond preserving its action-kind namespace. Consumers opt in through
+accessors owned by the producing plugin, such as `edit.AsEditResult` and
+`bash.AsExecResult`.
+
+The core fills an omitted kind from the dispatched action. The external hands
+adapter also overwrites the action identity and kind from the invoked action,
+so an untrusted provider cannot redirect correlation or payload namespacing.
+
+The shared protocol therefore contains no shell-only fields, edit-specific
+fields, or open-ended string map.
 
 ## Alternatives considered
 
-- **Open `Details` map** — one universal type with plugin-named keys. Works,
-  but "structured, but with a name": untyped keys/values, no discoverability,
-  and results stop being records. Rejected after review.
-- **Closed union of payload types in core protocol** — rejected: violates
-  plugin-owned vocabulary; adding a tool plugin could not require a core
-  protocol change.
-- **Per-tool result types without a shared envelope** — rejected: the loop,
-  session recorder, and audit hooks need a uniform type.
+- **A universal `Details` map:** rejected because untyped keys and values hide
+  the result schema and turn records into conventions.
+- **A closed union of payload types in `protocol/`:** rejected because every
+  new tool would require a core protocol change.
+- **Per-tool results without an envelope:** rejected because the loop,
+  recorder, and audit hooks require uniform status and correlation fields.
 
 ## Consequences
 
-**Positive:** provider consistency is structural (one rendering function);
-payloads are typed at their edges via plugin accessors; the envelope stays
-small and JSON-serializable for the future out-of-process hands.
-
-**Negative / accepted risks**
-
-- `Payload json.RawMessage` is opaque to the core — deliberate; consumers
-  opt in by knowing the plugin.
-- Contract now states: *tools render observations; providers translate them;
-  nothing in between improvises string formats.*
+- Every provider receives the same canonical observation text.
+- Structured facts remain available to UIs and audit code without coupling the
+  core to tool vocabulary.
+- The protocol remains JSON-serializable across the external hands boundary.
+- Consumers that need a payload must know which plugin owns its schema; the
+  core deliberately cannot interpret opaque payloads.
 
 ## References
 
-- `protocol/protocol.go` (`ToolResult`, `Observation()`)
-- `plugins/edit` (`EditResult` + `AsEditResult`), `plugins/bash` (`ExecExtras` + `AsExecResult`)
-- pi: `ToolResultMessage.content` vs `details` (the two-audience split this mirrors)
+- `protocol/protocol.go` — `ToolResult` and `Observation()`
+- `plugins/edit` — `EditResult`
+- `plugins/bash` — `ExecExtras`
+- `plugins/external` — external result normalization
