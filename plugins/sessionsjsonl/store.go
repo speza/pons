@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -374,8 +375,7 @@ func (s *Store) Search(ctx context.Context, sessionID, query, kind string, allBr
 	}
 
 	var hits []sessions.Entry
-	for i := len(d.entries) - 1; i >= 0; i-- { // newest first
-		e := d.entries[i]
+	for _, e := range slices.Backward(d.entries) { // newest first
 		if kind != "" && e.Kind != sessions.Kind(kind) {
 			continue
 		}

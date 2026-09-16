@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -89,12 +90,7 @@ func (p *Shell) run(ctx context.Context, a protocol.Action) (protocol.ToolResult
 }
 
 func (p *Shell) allowed(first string) bool {
-	for _, ok := range p.cfg.Allow {
-		if ok == first {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(p.cfg.Allow, first)
 }
 
 func truncate(s string, n int) string {

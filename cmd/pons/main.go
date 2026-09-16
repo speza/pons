@@ -104,7 +104,7 @@ func main() {
 	// Sessions cluster per project, named after the project: the absolute
 	// path with "/" → "-", so the directory is self-describing
 	// (Claude Code's scheme) and collision-free by construction.
-	sessionPath := *sessionDir
+	var sessionPath string
 	if sessionDir == nil || *sessionDir == "" {
 		abs, err := filepath.Abs(".")
 		if err != nil {
@@ -115,6 +115,8 @@ func main() {
 			panic(err)
 		}
 		sessionPath = filepath.Join(home, ".pons", "sessions", strings.ReplaceAll(abs, "/", "-"))
+	} else {
+		sessionPath = *sessionDir
 	}
 	store, err := sessionsjsonl.New(sessionPath)
 	if err != nil {

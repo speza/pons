@@ -1,0 +1,21 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - govet
+    - modernize
+    - staticcheck
+  settings:
+    modernize:
+      # Changing omitempty to omitzero changes the JSON wire shape; review
+      # those fields deliberately rather than enforcing an automatic rewrite.
+      disable:
+        - omitzero
+  exclusions:
+    rules:
+      # edit intentionally preserves pi-style, sentence-like error messages.
+      - linters:
+          - staticcheck
+        text: "ST1005"
+        path: "^plugins/edit/"

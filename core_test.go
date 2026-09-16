@@ -168,7 +168,6 @@ func TestAllResultsAreInterpretedBeforeStopping(t *testing.T) {
 	brain := &interpretRecordingBrain{}
 	setBrain(t, c, brain)
 	for _, kind := range []protocol.ActionKind{"a", "b"} {
-		kind := kind
 		if err := c.AddTool(kind, ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
 			return protocol.ToolResult{OK: true, ActionID: string(kind)}, nil
 		}}); err != nil {

@@ -177,8 +177,8 @@ func (p *Edit) apply(ctx context.Context, a protocol.Action) (protocol.ToolResul
 	// Normalize CRLF/BOM for matching; restore on write (pi does the same).
 	bom := ""
 	content := string(raw)
-	if strings.HasPrefix(content, bomUTF8) {
-		bom, content = bomUTF8, strings.TrimPrefix(content, bomUTF8)
+	if after, ok := strings.CutPrefix(content, bomUTF8); ok {
+		bom, content = bomUTF8, after
 	}
 	ending := "\n"
 	if strings.Contains(content, "\r\n") {
@@ -239,7 +239,7 @@ func parsePatch(patch string) ([]block, error) {
 		return nil
 	}
 
-	for _, line := range strings.Split(patch, "\n") {
+	for line := range strings.SplitSeq(patch, "\n") {
 		t := strings.TrimRight(line, " \t")
 		switch {
 		case t == searchMarker:

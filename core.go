@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -373,8 +374,8 @@ func (c *Core) buildToolPort() ToolPort {
 		}
 		return tr, err
 	})
-	for i := len(c.wraps) - 1; i >= 0; i-- {
-		port = c.wraps[i](port)
+	for _, wrap := range slices.Backward(c.wraps) {
+		port = wrap(port)
 	}
 	return port
 }

@@ -119,6 +119,22 @@ Plain NDJSON files, one per session, no engine required to read them:
 - `sessions.Store.Search` remains contract-level for future compaction/
   resume tooling; the live agent just uses bash
 
+## Development checks
+
+```sh
+make check       # gofmt check, tests, vet, and golangci-lint
+make test-race   # race-enabled test suite
+
+# optional local commit hooks
+pre-commit install
+pre-commit run --all-files
+```
+
+CI runs the same checks on pushes and pull requests. The lint configuration
+keeps `modernize` enabled, including diagnostics such as `slicescontains`;
+wire-format-sensitive and intentionally sentence-like error messages are
+excluded explicitly in [`.golangci.yml`](.golangci.yml).
+
 ## Running
 
 ```sh

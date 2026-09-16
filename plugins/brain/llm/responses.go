@@ -75,8 +75,6 @@ func (c *responsesClient) tryComplete(ctx context.Context, system string, turns 
 	if accountID != "" {
 		opts = append(opts, option.WithHeader("chatgpt-account-id", accountID))
 	}
-	client := openai.NewClient(opts...)
-
 	params := responses.ResponseNewParams{
 		Model:             shared.ResponsesModel(c.model),
 		Instructions:      param.NewOpt(system),
@@ -124,33 +122,34 @@ func (c *responsesClient) tryComplete(ctx context.Context, system string, turns 
 		return resp, err
 	}
 	opts = append(opts, option.WithMiddleware(capture))
+	client := openai.NewClient(opts...)
 
 	stream := client.Responses.NewStreaming(ctx, params)
 	var items []responses.ResponseOutputItemUnion
 	var completed *responses.ResponseCompletedEvent
 	for stream.Next() {
 		ev := stream.Current()
-		switch {
+		switch ev.Type {
 		// The ChatGPT-subscription backend sends an empty output[] on
 		// response.completed — the real items arrive via output_item.done
 		// (Codex CLI accumulates them the same way).
-		case ev.Type == "response.output_item.done":
+		case "response.output_item.done":
 			done := ev.AsResponseOutputItemDone()
 			items = append(items, done.Item)
-		case ev.Type == "response.completed":
+		case "response.completed":
 			done := ev.AsResponseCompleted()
 			completed = &done
 			if len(done.Response.Output) > 0 {
 				items = done.Response.Output
 			}
-		case ev.Type == "response.failed":
+		case "response.failed":
 			f := ev.AsResponseFailed()
 			msg := "stream failed"
 			if f.Response.Error.Message != "" {
 				msg = f.Response.Error.Message
 			}
 			return Turn{}, fmt.Errorf("codex: %s", msg)
-		case ev.Type == "error":
+		case "error":
 			return Turn{}, fmt.Errorf("codex: %s", ev.AsError().Message)
 		}
 	}

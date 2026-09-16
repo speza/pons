@@ -308,7 +308,7 @@ data: {"type":"response.completed","response":{"id":"r","object":"response","out
 	defer srv.Close()
 
 	authFile := filepath.Join(t.TempDir(), "auth.json")
-	os.WriteFile(authFile, []byte(fmt.Sprintf(`{"access":"old-token","accountId":"acct","refresh":"refresh-token","expires":%d}`, time.Now().Add(time.Hour).UnixMilli())), 0o600)
+	os.WriteFile(authFile, fmt.Appendf(nil, `{"access":"old-token","accountId":"acct","refresh":"refresh-token","expires":%d}`, time.Now().Add(time.Hour).UnixMilli()), 0o600)
 	auth, err := loadCodexAuth(authFile)
 	if err != nil {
 		t.Fatal(err)
