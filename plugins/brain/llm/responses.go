@@ -94,7 +94,7 @@ func (c *responsesClient) tryComplete(ctx context.Context, system string, turns 
 				Name:        string(spec.Kind),
 				Description: param.NewOpt(spec.Description),
 				Strict:      param.NewOpt(false),
-				Parameters:  jsonSchema(spec.Params),
+				Parameters:  jsonSchema(spec),
 				Type:        "function",
 			},
 		})
@@ -175,10 +175,7 @@ func responseToTurn(output []responses.ResponseOutputItemUnion) Turn {
 		switch item.Type {
 		case "function_call":
 			fc := item.AsFunctionCall()
-			var input map[string]any
-			if fc.Arguments != "" {
-				_ = json.Unmarshal([]byte(fc.Arguments), &input)
-			}
+			input := decodeToolInput([]byte(fc.Arguments))
 			out.Blocks = append(out.Blocks, ToolUse{ID: fc.CallID, Name: fc.Name, Input: input})
 		case "message":
 			m := item.AsMessage()

@@ -33,11 +33,11 @@ const maxTimeoutSeconds = 600
 
 // Run is the action constructor. timeoutSecs = 0 means no per-call timeout.
 func Run(command string, timeoutSecs int) protocol.Action {
-	args := map[string]string{"command": command}
+	args := map[string]any{"command": command}
 	if timeoutSecs > 0 {
-		args["timeout"] = strconv.Itoa(timeoutSecs)
+		args["timeout"] = timeoutSecs
 	}
-	return protocol.Action{Kind: KindBash, Args: args}
+	return protocol.Action{Kind: KindBash, Args: protocol.MustArgsJSON(args)}
 }
 
 // Bash is the unrestricted command-execution plugin.
@@ -67,15 +67,30 @@ func (p *Bash) Setup(c *pons.Core) error {
 }
 
 func (p *Bash) run(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
-	command := a.Args["command"]
+	command, err := protocol.StringArg(a.Args, "command")
+	if err != nil {
+		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: "invalid arguments: " + err.Error()}, nil
+	}
 	if command == "" {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: "empty command"}, nil
 	}
 
 	timeout := p.cfg.Timeout
-	if t := a.Args["timeout"]; t != "" {
-		n, err := strconv.Atoi(t)
-		if err != nil || n <= 0 {
+	if raw, err := protocol.ObjectArgs(a.Args); err != nil {
+		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: "invalid arguments: " + err.Error()}, nil
+	} else if value, ok := raw["timeout"]; ok && string(value) != "null" {
+		var n int
+		if err := json.Unmarshal(value, &n); err != nil {
+			var legacy string
+			if err := json.Unmarshal(value, &legacy); err != nil {
+				return protocol.ToolResult{ActionID: a.ID, OK: false, Error: "invalid timeout: must be a positive number of seconds"}, nil
+			}
+			n, err = strconv.Atoi(legacy)
+			if err != nil {
+				return protocol.ToolResult{ActionID: a.ID, OK: false, Error: "invalid timeout: must be a positive number of seconds"}, nil
+			}
+		}
+		if n <= 0 {
 			return protocol.ToolResult{ActionID: a.ID, OK: false, Error: "invalid timeout: must be a positive number of seconds"}, nil
 		}
 		if n > maxTimeoutSeconds {

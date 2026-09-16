@@ -8,7 +8,9 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -20,11 +22,100 @@ type ActionKind string
 const ActFinish ActionKind = "finish"
 
 // Action is the unit of instruction from brain to hands.
+//
+// Args is an opaque JSON object.  It deliberately remains untyped at this
+// boundary: the plugin which owns Kind owns the schema and decoding.  Keeping
+// the original bytes (rather than converting through map[string]any) also
+// preserves integers, nulls, arrays, nested objects, and the exact JSON
+// vocabulary across a process boundary.
 type Action struct {
-	ID     string            `json:"id"`
-	Kind   ActionKind        `json:"kind"`
-	Args   map[string]string `json:"args"`
-	Danger Danger            `json:"danger,omitempty"`
+	ID     string          `json:"id"`
+	Kind   ActionKind      `json:"kind"`
+	Args   json.RawMessage `json:"args"`
+	Danger Danger          `json:"danger,omitempty"`
+}
+
+// ArgsJSON encodes an action argument object.  Callers which can handle
+// construction errors should use this form; the wire carries the resulting
+// JSON object unchanged.
+func ArgsJSON(v any) (json.RawMessage, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("encode action args: %w", err)
+	}
+	if bytes.Equal(bytes.TrimSpace(b), []byte("null")) {
+		return json.RawMessage(`{}`), nil
+	}
+	return b, nil
+}
+
+// MustArgsJSON is the explicit convenience form for package-level action
+// constructors whose arguments are statically encodable. It panics on a
+// programmer error instead of silently creating an invalid/nil action.
+func MustArgsJSON(v any) json.RawMessage {
+	b, err := ArgsJSON(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// DecodeArgs decodes an action's object into a plugin-owned type.  A missing
+// Args value is treated as an empty object for compatibility with old action
+// constructors which omitted optional arguments.
+func (a Action) DecodeArgs(dst any) error {
+	return DecodeArgs(a.Args, dst)
+}
+
+// DecodeArgs decodes raw action arguments into dst.  It rejects non-object JSON
+// because tool_provider/v1 actions have object arguments.
+func DecodeArgs(raw json.RawMessage, dst any) error {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		raw = json.RawMessage(`{}`)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return err
+	}
+	if object == nil {
+		return fmt.Errorf("action args must be a JSON object")
+	}
+	return json.Unmarshal(raw, dst)
+}
+
+// ObjectArgs returns a copy of the members in raw.  Values remain raw JSON so
+// callers can choose their own typed decoding without string coercion.
+func ObjectArgs(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return map[string]json.RawMessage{}, nil
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return nil, err
+	}
+	if object == nil {
+		return nil, fmt.Errorf("action args must be a JSON object")
+	}
+	return object, nil
+}
+
+// StringArg is a small compatibility helper for tools whose argument is a
+// required or optional string.  Missing keys return an empty string; a value
+// of another JSON type is an error instead of being silently stringified.
+func StringArg(raw json.RawMessage, key string) (string, error) {
+	object, err := ObjectArgs(raw)
+	if err != nil {
+		return "", err
+	}
+	value, ok := object[key]
+	if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+		return "", nil
+	}
+	var out string
+	if err := json.Unmarshal(value, &out); err != nil {
+		return "", fmt.Errorf("argument %q must be a string: %w", key, err)
+	}
+	return out, nil
 }
 
 // Danger is the brain's advisory self-assessment. The harness does not

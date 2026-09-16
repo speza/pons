@@ -54,7 +54,7 @@ func (c *openaiClient) Complete(ctx context.Context, system string, turns []Turn
 			Function: shared.FunctionDefinitionParam{
 				Name:        string(spec.Kind),
 				Description: param.NewOpt(spec.Description),
-				Parameters:  jsonSchema(spec.Params),
+				Parameters:  jsonSchema(spec),
 			},
 		})
 	}
@@ -83,10 +83,7 @@ func (c *openaiClient) Complete(ctx context.Context, system string, turns []Turn
 		out.Blocks = append(out.Blocks, Text{Value: msg.Content})
 	}
 	for _, tc := range msg.ToolCalls {
-		var input map[string]any
-		if tc.Function.Arguments != "" {
-			_ = json.Unmarshal([]byte(tc.Function.Arguments), &input)
-		}
+		input := decodeToolInput([]byte(tc.Function.Arguments))
 		out.Blocks = append(out.Blocks, ToolUse{ID: tc.ID, Name: tc.Function.Name, Input: input})
 	}
 	return out, nil

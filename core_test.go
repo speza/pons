@@ -111,14 +111,15 @@ func TestStopOnFailedResult(t *testing.T) {
 func TestOnTurnAndWraps(t *testing.T) {
 	c := New()
 	brain := &fakeBrain{turns: [][]protocol.Action{
-		{{Kind: "ping", Args: map[string]string{"x": "1"}}},
+		{{Kind: "ping", Args: protocol.MustArgsJSON(map[string]string{"x": "1"})}},
 		{Finish("done")},
 	}}
 	setBrain(t, c, brain)
 
 	var seen []string
 	c.AddTool("ping", ToolDef{Handler: func(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
-		return protocol.ToolResult{ActionID: a.ID, OK: true, Output: "pong:" + a.Args["x"]}, nil
+		x, _ := protocol.StringArg(a.Args, "x")
+		return protocol.ToolResult{ActionID: a.ID, OK: true, Output: "pong:" + x}, nil
 	}})
 	c.WrapTool(func(next ToolPort) ToolPort {
 		return wrapFunc(func(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
@@ -223,7 +224,7 @@ func (f wrapFunc) Execute(ctx context.Context, a protocol.Action) (protocol.Tool
 func TestRunResultAndEvents(t *testing.T) {
 	c := New()
 	setBrain(t, c, &continueBrain{fakeBrain{turns: [][]protocol.Action{
-		{{Kind: "ping", Args: map[string]string{"x": "1"}}},
+		{{Kind: "ping", Args: protocol.MustArgsJSON(map[string]string{"x": "1"})}},
 		{Finish("the answer")},
 	}}})
 	c.AddTool("ping", ToolDef{Handler: func(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {

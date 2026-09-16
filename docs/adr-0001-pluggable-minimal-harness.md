@@ -1,6 +1,6 @@
 # ADR-0001: pons — a minimal, plugin-extensible agent harness with hard brain/hands separation
 
-**Status:** Accepted
+**Status:** Accepted; compile-time-only plugin loading superseded by ADR-0007
 **Date:** 2025-09-14
 **Context:** Building a lightweight coding-agent harness in Go, informed by pi's
 architecture (see `README` discussion). Supersedes the first-pass monolithic
@@ -152,8 +152,9 @@ where the transcript lives, and the session recorder publishes its path.
 
 **Negative / accepted risks**
 
-- Compile-time plugin composition only (Go's `plugin` package is fragile) —
-  acceptable: extensions are code, loaded by import.
+- Compile-time plugin composition was initially the only loading model. This
+  limitation was later superseded by ADR-0007's language-neutral external
+  plugin runtime; trusted in-process Go composition remains supported.
 - A first-token shell allowlist is policy, not security (e.g. `ls; rm -rf /`
   passes). Real isolation must come from the OS/container boundary around the
   hands process — deliberately out of scope for the core, same conclusion pi

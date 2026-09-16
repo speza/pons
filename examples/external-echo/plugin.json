@@ -1,0 +1,6 @@
+{
+  "manifest_version": 1,
+  "name": "example.echo",
+  "entrypoint": "./pons-plugin-echo",
+  "runtime_protocol": 1
+}

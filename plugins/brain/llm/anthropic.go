@@ -5,7 +5,6 @@ package llm
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -46,7 +45,7 @@ func (c *anthropicClient) Complete(ctx context.Context, system string, turns []T
 			OfTool: &anthropic.ToolParam{
 				Name:        string(spec.Kind),
 				Description: param.NewOpt(spec.Description),
-				InputSchema: jsonSchemaAnthropic(spec.Params),
+				InputSchema: jsonSchemaAnthropic(spec),
 			},
 		})
 	}
@@ -86,29 +85,37 @@ func (c *anthropicClient) Complete(ctx context.Context, system string, turns []T
 		case "text":
 			out.Blocks = append(out.Blocks, Text{Value: block.Text})
 		case "tool_use":
-			var input map[string]any
-			if len(block.Input) > 0 {
-				_ = json.Unmarshal(block.Input, &input)
-			}
+			input := decodeToolInput(block.Input)
 			out.Blocks = append(out.Blocks, ToolUse{ID: block.ID, Name: block.Name, Input: input})
 		}
 	}
 	return out, nil
 }
 
-// jsonSchemaAnthropic renders params as an Anthropic input_schema.
-func jsonSchemaAnthropic(params []pons.ToolParam) anthropic.ToolInputSchemaParam {
-	props := make(map[string]any, len(params))
+// jsonSchemaAnthropic renders a registered tool's input_schema.
+func jsonSchemaAnthropic(spec pons.ToolSpec) anthropic.ToolInputSchemaParam {
+	schema := jsonSchema(spec)
+	props := schema["properties"]
 	var required []string
-	for _, p := range params {
-		props[p.Name] = map[string]any{"type": p.Type, "description": p.Description}
-		if p.Required {
-			required = append(required, p.Name)
+	if values, ok := schema["required"].([]any); ok {
+		for _, value := range values {
+			if name, ok := value.(string); ok {
+				required = append(required, name)
+			}
+		}
+	} else if values, ok := schema["required"].([]string); ok {
+		required = append(required, values...)
+	}
+	extra := make(map[string]any)
+	for key, value := range schema {
+		if key != "type" && key != "properties" && key != "required" {
+			extra[key] = value
 		}
 	}
 	return anthropic.ToolInputSchemaParam{
-		Type:       "object",
-		Properties: props,
-		Required:   required,
+		Type:        "object",
+		Properties:  props,
+		Required:    required,
+		ExtraFields: extra,
 	}
 }

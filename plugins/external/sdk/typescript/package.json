@@ -1,0 +1,5 @@
+{
+  "name": "@pons/external-plugin-sdk",
+  "private": true,
+  "type": "module"
+}

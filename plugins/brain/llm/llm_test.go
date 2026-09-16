@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -10,6 +11,14 @@ import (
 )
 
 // fakeClient is a scripted provider for testing the brain logic without HTTP.
+func TestToolInputPreservesLargeInteger(t *testing.T) {
+	const raw = `{"value":9007199254740993}`
+	input := decodeToolInput([]byte(raw))
+	if got := string(stringify(input)); got != raw {
+		t.Fatalf("tool input lost numeric precision: got %s, want %s", got, raw)
+	}
+}
+
 type fakeClient struct {
 	responses     []Turn          // assistant turns to return, in order
 	seen          [][]Turn        // what each call received
@@ -51,8 +60,12 @@ func TestBrainMapsToolUseToActions(t *testing.T) {
 	if len(actions) != 1 || actions[0].Kind != "bash" || actions[0].ID != "call_1" {
 		t.Fatalf("actions: %+v", actions)
 	}
-	if actions[0].Args["command"] != "ls" || actions[0].Args["timeout"] != "10" {
-		t.Fatalf("args not stringified: %+v", actions[0].Args)
+	var input map[string]any
+	if err := json.Unmarshal(actions[0].Args, &input); err != nil {
+		t.Fatal(err)
+	}
+	if input["command"] != "ls" || input["timeout"] != float64(10) {
+		t.Fatalf("typed args not preserved: %+v", input)
 	}
 
 	// Result flows back as a tool_result block on the next call.
@@ -63,7 +76,8 @@ func TestBrainMapsToolUseToActions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(actions) != 1 || actions[0].Kind != protocol.ActFinish || actions[0].Args["reason"] != "All done." {
+	reason, _ := protocol.StringArg(actions[0].Args, "reason")
+	if len(actions) != 1 || actions[0].Kind != protocol.ActFinish || reason != "All done." {
 		t.Fatalf("expected finish, got: %+v", actions)
 	}
 

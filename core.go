@@ -20,6 +20,7 @@ package pons
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -101,10 +102,9 @@ func (c *Core) Use(ps ...Plugin) error {
 	return nil
 }
 
-// ToolParam describes one argument of an action kind, for brains that
-// generate tool calls (LLM-driven) rather than hard-coded ones. Types are
-// the model-facing contract; handlers still own parsing (the wire stays
-// map[string]string).
+// ToolParam describes one argument of an action kind for the legacy compact
+// schema builder.  New cross-process tools should provide InputSchema instead;
+// handlers still own typed decoding.
 type ToolParam struct {
 	Name        string
 	Type        string // "string", "integer", "boolean"
@@ -117,6 +117,22 @@ type ToolSpec struct {
 	Kind        protocol.ActionKind
 	Description string
 	Params      []ToolParam
+	// InputSchema is a JSON-Schema object for typed tools.  It is kept as raw
+	// JSON so the core does not own a capability vocabulary or schema dialect.
+	InputSchema json.RawMessage
+	Source      ToolSource
+}
+
+// ToolSource identifies the provider behind a registered tool. Built-in tools
+// leave this at its zero value; external adapters populate it for presentation
+// and audit without changing the Action/ToolResult wire contract.
+type ToolSource struct {
+	PluginName        string
+	PluginVersion     string
+	Capability        string
+	CapabilityVersion int
+	Executable        string
+	External          bool
 }
 
 // ToolDef is what a tool plugin registers: the executor plus its schema.
@@ -124,6 +140,8 @@ type ToolDef struct {
 	Handler     ToolHandler
 	Description string
 	Params      []ToolParam
+	InputSchema json.RawMessage
+	Source      ToolSource
 }
 
 // AddTool registers a handler for an action kind. Enforcement of the
@@ -131,6 +149,12 @@ type ToolDef struct {
 // error, so plugin conflicts fail loudly at composition time instead of
 // silently last-wins.
 func (c *Core) AddTool(kind protocol.ActionKind, def ToolDef) error {
+	if kind == "" {
+		return errors.New("pons: action kind must not be empty")
+	}
+	if kind == protocol.ActFinish {
+		return fmt.Errorf("pons: action kind %q is reserved for the core", kind)
+	}
 	if def.Handler == nil {
 		return fmt.Errorf("pons: action kind %q has a nil handler", kind)
 	}
@@ -138,8 +162,15 @@ func (c *Core) AddTool(kind protocol.ActionKind, def ToolDef) error {
 		return fmt.Errorf("pons: action kind %q already registered (plugin conflict)", kind)
 	}
 	c.handlers[kind] = def.Handler
-	c.specs[kind] = ToolSpec{Kind: kind, Description: def.Description, Params: def.Params}
+	c.specs[kind] = ToolSpec{Kind: kind, Description: def.Description, Params: def.Params, InputSchema: append(json.RawMessage(nil), def.InputSchema...), Source: def.Source}
 	return nil
+}
+
+// HasTool reports whether an action kind is already registered. It is useful
+// to preflight a multi-tool plugin before mutating the additive registry.
+func (c *Core) HasTool(kind protocol.ActionKind) bool {
+	_, ok := c.handlers[kind]
+	return ok
 }
 
 // ToolSpecs returns the registered action kinds in stable (sorted) order —
@@ -147,6 +178,7 @@ func (c *Core) AddTool(kind protocol.ActionKind, def ToolDef) error {
 func (c *Core) ToolSpecs() []ToolSpec {
 	out := make([]ToolSpec, 0, len(c.specs))
 	for _, s := range c.specs {
+		s.InputSchema = append(json.RawMessage(nil), s.InputSchema...)
 		out = append(out, s)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Kind < out[j].Kind })
@@ -209,6 +241,7 @@ type Event struct {
 	Text    string               // narration: finish reason, stop reason, errors
 	Action  *protocol.Action     // set on action_start / action_end
 	Result  *protocol.ToolResult // set on action_end
+	Tool    *ToolSpec            // registered tool metadata on action_start / action_end
 	Actions []protocol.Action    // set on turn_end (whole plan)
 	Results []protocol.ToolResult
 }
@@ -285,13 +318,13 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 		}
 		if finishIdx >= 0 {
 			run, finished = actions[:finishIdx], true
-			answer = actions[finishIdx].Args["reason"]
+			answer, _ = protocol.StringArg(actions[finishIdx].Args, "reason")
 			c.logf("[turn %d] brain signalled finish: %s", turn, answer)
 		}
 
 		for i := range run {
 			a := run[i]
-			c.emit(Event{Type: EventActionStart, Turn: turn, Action: &a})
+			c.emit(Event{Type: EventActionStart, Turn: turn, Action: &a, Tool: c.toolSpec(a.Kind)})
 		}
 		results = make([]protocol.ToolResult, len(run))
 		var wg sync.WaitGroup
@@ -312,7 +345,7 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 		wg.Wait()
 		for i := range run {
 			a, tr := run[i], results[i]
-			c.emit(Event{Type: EventActionEnd, Turn: turn, Action: &a, Result: &tr})
+			c.emit(Event{Type: EventActionEnd, Turn: turn, Action: &a, Result: &tr, Tool: c.toolSpec(a.Kind)})
 			c.logf("[turn %d] ← %s ok=%v err=%q", turn, a.Kind, tr.OK, tr.Error)
 		}
 
@@ -353,6 +386,15 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 	result.Exhausted = true
 	c.emit(Event{Type: EventExhausted, Turn: maxTurns, Text: fmt.Sprintf("exhausted %d turns", maxTurns)})
 	return result, nil
+}
+
+func (c *Core) toolSpec(kind protocol.ActionKind) *ToolSpec {
+	spec, ok := c.specs[kind]
+	if !ok {
+		return nil
+	}
+	spec.InputSchema = append(json.RawMessage(nil), spec.InputSchema...)
+	return &spec
 }
 
 // buildToolPort composes the dispatch handler with registered middleware
@@ -397,7 +439,7 @@ func executeTool(port ToolPort, ctx context.Context, a protocol.Action) (tr prot
 
 // Finish is the core-reserved action constructor.
 func Finish(reason string) protocol.Action {
-	return protocol.Action{Kind: protocol.ActFinish, Args: map[string]string{"reason": reason}}
+	return protocol.Action{Kind: protocol.ActFinish, Args: protocol.MustArgsJSON(map[string]string{"reason": reason})}
 }
 
 func (c *Core) logf(format string, args ...any) {

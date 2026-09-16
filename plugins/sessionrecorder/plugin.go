@@ -126,7 +126,11 @@ func (r *Recorder) record(obs protocol.Observation, turn protocol.TurnLog) error
 
 	var sb strings.Builder
 	for _, a := range turn.Actions {
-		fmt.Fprintf(&sb, "%s %v\n", a.Kind, a.Args)
+		args := string(a.Args)
+		if args == "" {
+			args = "{}"
+		}
+		fmt.Fprintf(&sb, "%s %s\n", a.Kind, args)
 	}
 	actionPayload, err := json.Marshal(turn.Actions)
 	if err != nil {

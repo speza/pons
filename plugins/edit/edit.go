@@ -51,7 +51,7 @@ const (
 func Patch(path, patch string) protocol.Action {
 	return protocol.Action{
 		Kind: KindEdit,
-		Args: map[string]string{"path": path, "patch": patch},
+		Args: protocol.MustArgsJSON(map[string]string{"path": path, "patch": patch}),
 	}
 }
 
@@ -148,11 +148,19 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
 type block struct{ search, replace string }
 
 func (p *Edit) apply(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
-	path, err := jail.ResolvePath(p.root, a.Args["path"])
+	pathArg, err := protocol.StringArg(a.Args, "path")
+	if err != nil {
+		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: "invalid arguments: " + err.Error()}, nil
+	}
+	patch, err := protocol.StringArg(a.Args, "patch")
+	if err != nil {
+		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: "invalid arguments: " + err.Error()}, nil
+	}
+	path, err := jail.ResolvePath(p.root, pathArg)
 	if err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 	}
-	blocks, err := parsePatch(a.Args["patch"])
+	blocks, err := parsePatch(patch)
 	if err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 	}

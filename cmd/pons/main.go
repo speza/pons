@@ -21,12 +21,15 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/samperrin/pons"
 	"github.com/samperrin/pons/plugins/bash"
 	"github.com/samperrin/pons/plugins/brain/llm"
 	"github.com/samperrin/pons/plugins/edit"
+	"github.com/samperrin/pons/plugins/external"
 	"github.com/samperrin/pons/plugins/fs"
 	"github.com/samperrin/pons/plugins/sessionrecorder"
 	"github.com/samperrin/pons/plugins/sessionsjsonl"
@@ -49,6 +52,9 @@ func main() {
 	login := flag.Bool("login", false, "codex only: authenticate with ChatGPT (browser flow), save credentials, and exit")
 	maxTurns := flag.Int("max-turns", 12, "loop budget")
 	interactive := flag.Bool("i", false, "interactive: read tasks from stdin, one per line; the conversation continues in-process")
+	pluginPath := flag.String("plugin-path", "", "PATH supplied to external plugin children (credentials are not inherited by default)")
+	var pluginPaths repeatableStrings
+	flag.Var(&pluginPaths, "plugin", "explicit external hands plugin manifest (repeatable; never discovered implicitly)")
 	flag.Parse()
 
 	// Workspace: the real agent works on the current directory by default.
@@ -169,6 +175,33 @@ func main() {
 
 	core := pons.New()
 	core.Workspace, core.MaxTurns = ws, *maxTurns
+
+	// External plugins are explicit, repeatable hands-side additions. Their
+	// manifests are never discovered from the workspace or current directory.
+	// Built-ins are composed first so every conflict remains additive and
+	// deterministic rather than last-wins.
+	externalPlugins := make([]*external.Plugin, 0, len(pluginPaths))
+	closeExternalPlugins := func(logErrors bool) {
+		for _, externalPlugin := range slices.Backward(externalPlugins) {
+			if err := externalPlugin.Close(); err != nil && logErrors {
+				logger.Printf("plugin shutdown: %v", err)
+			}
+		}
+	}
+	for _, manifestPath := range pluginPaths {
+		plugin, perr := external.NewHands(manifestPath, external.HostConfig{
+			Workspace:   ws,
+			CallTimeout: 60 * time.Second,
+			Path:        *pluginPath,
+		})
+		if perr != nil {
+			closeExternalPlugins(false)
+			logger.Printf("plugin %q: %v", manifestPath, perr)
+			os.Exit(1)
+		}
+		externalPlugins = append(externalPlugins, plugin)
+	}
+	defer closeExternalPlugins(*debug)
 	if *debug {
 		core.Log = logger
 	}
@@ -186,7 +219,13 @@ func main() {
 			}
 		case pons.EventActionStart:
 			if *debug {
-				fmt.Printf("▸ %s  %s\n", e.Action.Kind, argsJSON(e.Action))
+				if e.Tool != nil && e.Tool.Source.External {
+					fmt.Printf("▸ PLUGIN TOOL  %s@%s · %s  %s\n",
+						e.Tool.Source.PluginName, e.Tool.Source.PluginVersion,
+						e.Action.Kind, argsJSON(e.Action))
+				} else {
+					fmt.Printf("▸ %s  %s\n", e.Action.Kind, argsJSON(e.Action))
+				}
 			} else {
 				fmt.Printf("▸ %s: %s\n", e.Action.Kind, primaryArg(e.Action))
 			}
@@ -203,15 +242,25 @@ func main() {
 			showResult(obs)
 		}
 	})
-	if err := core.Use(
+	plugins := []pons.Plugin{
 		fsTools,
 		editTool,
 		bash.New(bash.Config{Root: ws, Timeout: 60, MaxLines: 200, MaxBytes: 50 * 1024}),
-		rec,
-		brain,
-	); err != nil {
+	}
+	for _, plugin := range externalPlugins {
+		plugins = append(plugins, plugin)
+	}
+	plugins = append(plugins, rec, brain)
+	if err := core.Use(plugins...); err != nil {
+		closeExternalPlugins(false)
 		logger.Printf("compose failed: %v", err)
 		os.Exit(1)
+	}
+	if *debug {
+		for _, plugin := range externalPlugins {
+			info := plugin.Host().PluginInfo()
+			logger.Printf("external plugin loaded: %s@%s (%d tool(s))", info.Name, info.Version, len(plugin.Tools()))
+		}
 	}
 
 	logger.Printf("workspace: %s", ws)
@@ -259,6 +308,18 @@ func main() {
 	}
 }
 
+type repeatableStrings []string
+
+func (r *repeatableStrings) String() string { return strings.Join(*r, ",") }
+
+func (r *repeatableStrings) Set(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("plugin path must not be empty")
+	}
+	*r = append(*r, value)
+	return nil
+}
+
 func isTTY(f *os.File) bool {
 	info, err := f.Stat()
 	if err != nil {
@@ -270,15 +331,27 @@ func isTTY(f *os.File) bool {
 // primaryArg picks the human-meaningful argument of a tool call for the
 // compact transcript line.
 func primaryArg(a *protocol.Action) string {
+	args, err := protocol.ObjectArgs(a.Args)
+	if err != nil {
+		return firstLine(string(a.Args), 100)
+	}
 	for _, key := range []string{"command", "path", "query"} {
-		if v, ok := a.Args[key]; ok {
-			return firstLine(v, 100)
+		if v, ok := args[key]; ok {
+			return firstLine(jsonValuePreview(v), 100)
 		}
 	}
-	for _, v := range a.Args {
-		return firstLine(v, 100)
+	for _, v := range args {
+		return firstLine(jsonValuePreview(v), 100)
 	}
 	return ""
+}
+
+func jsonValuePreview(raw json.RawMessage) string {
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	return string(raw)
 }
 
 func firstLine(s string, n int) string {
@@ -320,11 +393,10 @@ func indent(s string) string {
 }
 
 func argsJSON(a *protocol.Action) string {
-	b, err := json.Marshal(a.Args)
-	if err != nil {
-		return "{}"
+	s := string(a.Args)
+	if s == "" || s == "null" {
+		s = "{}"
 	}
-	s := string(b)
 	if len(s) > 300 {
 		s = s[:300] + "…"
 	}

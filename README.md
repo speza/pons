@@ -61,6 +61,7 @@ Key invariants:
 | `plugins/edit` | `edit_file` — SEARCH/REPLACE patch application (exact match, unique, fuzzy fallback, CRLF/BOM aware, unified diff in the result payload) |
 | `plugins/bash` | `bash` — unrestricted command execution (per-call timeout, output tail-truncation, full output to temp file). Trust comes from composition |
 | `plugins/shell` | `run_command` — first-token allowlist variant, for sandboxed compositions |
+| `plugins/external` | Persistent hands-side JSON-RPC/NDJSON host and `tool_provider/v1` adapter; `plugins/external/sdk` serves Go and dependency-free TypeScript plugins |
 | `plugins/brain/llm` | Real LLM brain: one model call per turn, tool schemas auto-discovered from registered plugins; context compaction; resume seeding |
 | `plugins/brain/scripted` | Deterministic brain (LLM stand-in for CI) |
 | `internal/jail`, `internal/unidiff` | Shared libraries between plugins (code, not registrations) |
@@ -163,8 +164,19 @@ go run ./cmd/pons -provider codex --resume <session-id> -message "next step…"
 ```
 
 Useful flags: `--workspace` (jail root; default: current directory),
-`--session-dir`, `--max-turns`, `--compact-chars`, `--debug` (raw tool
-inputs/outputs and provider turn details).
+`--session-dir`, `--max-turns`, `--compact-chars`, `--plugin MANIFEST` (explicit
+repeatable hands-side external plugin), `--plugin-path PATH` (safe PATH for
+interpreted plugin runtimes), `--debug` (raw tool inputs/outputs and provider
+turn details). External children get an empty environment by default; use
+`--plugin-path` or an embedding `external.HostConfig{Path: ...}` for Node/Bun
+without inheriting credentials.
+
+External tool arguments are typed JSON objects, not string maps. Small Go and
+TypeScript provider examples live in [`examples/external-echo`](examples/external-echo)
+and [`examples/external-echo-ts`](examples/external-echo-ts); build one beside
+its manifest, then pass `--plugin ./plugin.json`. For a Node-based plugin, pass
+for example `--plugin-path /usr/local/bin:/usr/bin:/bin`. Manifests are never
+discovered implicitly.
 
 Tool calls within a turn execute **concurrently**; results are recorded in
 call order (never completion order) so transcripts and resumes stay
@@ -184,7 +196,8 @@ defaults to `gpt-5.6-terra`; available models come from the backend's
 
 The LLM brain discovers tools automatically: a plugin registered via
 `AddTool` becomes a tool schema for the model in the same run — adding a
-capability plugin needs zero brain changes.
+capability plugin needs zero brain changes. External `tool_provider/v1`
+capabilities follow the same path after hands-side discovery.
 
 ## Architecture decisions
 
@@ -198,6 +211,7 @@ The reasoning behind the big choices is recorded as ADRs in [`docs/`](docs/):
 | [ADR-0004](docs/adr-0004-sandboxed-hands-boundary.md) | Hands as a sandbox boundary; protocol as the deployment seam | Design accepted; transport pending |
 | [ADR-0005](docs/adr-0005-transcript-model-vs-engine.md) | Transcript model = contract; **default engine = JSONL** | Accepted |
 | [ADR-0006](docs/adr-0006-concurrent-tool-execution.md) | Tool execution concurrent within a turn; record in call order | Accepted |
+| [ADR-0007](docs/adr-0007-language-neutral-plugin-runtime.md) | Language-neutral persistent external hands plugins | Accepted; tool-provider v1 implemented |
 
 ## Dependencies
 

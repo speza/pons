@@ -23,15 +23,15 @@ const (
 
 // Action constructors — the vocabulary brains use to speak to this plugin.
 func Read(path string) protocol.Action {
-	return protocol.Action{Kind: KindRead, Args: map[string]string{"path": path}}
+	return protocol.Action{Kind: KindRead, Args: protocol.MustArgsJSON(map[string]string{"path": path})}
 }
 
 func Write(path, content string) protocol.Action {
-	return protocol.Action{Kind: KindWrite, Args: map[string]string{"path": path, "content": content}}
+	return protocol.Action{Kind: KindWrite, Args: protocol.MustArgsJSON(map[string]string{"path": path, "content": content})}
 }
 
 func List(path string) protocol.Action {
-	return protocol.Action{Kind: KindList, Args: map[string]string{"path": path}}
+	return protocol.Action{Kind: KindList, Args: protocol.MustArgsJSON(map[string]string{"path": path})}
 }
 
 // FS is the filesystem tool plugin.
@@ -85,7 +85,11 @@ func (p *FS) resolvePath(path string) (string, error) {
 }
 
 func (p *FS) readFile(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
-	path, err := p.resolvePath(a.Args["path"])
+	pathArg, err := protocol.StringArg(a.Args, "path")
+	if err != nil {
+		return invalidArgs(a, err), nil
+	}
+	path, err := p.resolvePath(pathArg)
 	if err != nil {
 		return denied(a, err), nil
 	}
@@ -97,21 +101,33 @@ func (p *FS) readFile(ctx context.Context, a protocol.Action) (protocol.ToolResu
 }
 
 func (p *FS) writeFile(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
-	path, err := p.resolvePath(a.Args["path"])
+	pathArg, err := protocol.StringArg(a.Args, "path")
+	if err != nil {
+		return invalidArgs(a, err), nil
+	}
+	content, err := protocol.StringArg(a.Args, "content")
+	if err != nil {
+		return invalidArgs(a, err), nil
+	}
+	path, err := p.resolvePath(pathArg)
 	if err != nil {
 		return denied(a, err), nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 	}
-	if err := os.WriteFile(path, []byte(a.Args["content"]), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 	}
 	return protocol.ToolResult{ActionID: a.ID, OK: true, Output: "wrote " + path}, nil
 }
 
 func (p *FS) listDir(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
-	path, err := p.resolvePath(a.Args["path"])
+	pathArg, err := protocol.StringArg(a.Args, "path")
+	if err != nil {
+		return invalidArgs(a, err), nil
+	}
+	path, err := p.resolvePath(pathArg)
 	if err != nil {
 		return denied(a, err), nil
 	}
@@ -132,4 +148,8 @@ func (p *FS) listDir(ctx context.Context, a protocol.Action) (protocol.ToolResul
 
 func denied(a protocol.Action, err error) protocol.ToolResult {
 	return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}
+}
+
+func invalidArgs(a protocol.Action, err error) protocol.ToolResult {
+	return protocol.ToolResult{ActionID: a.ID, OK: false, Error: "invalid arguments: " + err.Error()}
 }

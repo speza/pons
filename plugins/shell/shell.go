@@ -23,7 +23,7 @@ const KindRun protocol.ActionKind = "run_command"
 
 // Run is the action constructor.
 func Run(command string) protocol.Action {
-	return protocol.Action{Kind: KindRun, Args: map[string]string{"command": command}}
+	return protocol.Action{Kind: KindRun, Args: protocol.MustArgsJSON(map[string]string{"command": command})}
 }
 
 // Shell is the command-execution plugin.
@@ -54,7 +54,11 @@ func (p *Shell) Setup(c *pons.Core) error {
 }
 
 func (p *Shell) run(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
-	fields := strings.Fields(a.Args["command"])
+	command, err := protocol.StringArg(a.Args, "command")
+	if err != nil {
+		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: "invalid arguments: " + err.Error()}, nil
+	}
+	fields := strings.Fields(command)
 	if len(fields) == 0 {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: "empty command"}, nil
 	}
@@ -70,7 +74,7 @@ func (p *Shell) run(ctx context.Context, a protocol.Action) (protocol.ToolResult
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(cctx, "sh", "-c", a.Args["command"])
+	cmd := exec.CommandContext(cctx, "sh", "-c", command)
 	if p.cfg.Root != "" {
 		cmd.Dir = p.cfg.Root
 	}

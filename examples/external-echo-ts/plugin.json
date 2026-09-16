@@ -1,0 +1,7 @@
+{
+  "manifest_version": 1,
+  "name": "example.echo.ts",
+  "entrypoint": "/usr/bin/env",
+  "args": ["node", "../../.build/examples/external-echo-ts/index.js"],
+  "runtime_protocol": 1
+}

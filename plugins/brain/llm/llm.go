@@ -11,10 +11,11 @@
 // The conversation is modeled with a sealed Block interface — invalid
 // content states are unrepresentable. Provider adapters (anthropic, openai)
 // translate that model to their wire formats; the brain↔hands protocol
-// (Action/ToolResult) is untouched and stays stringly-typed by design.
+// carries action arguments as typed JSON bytes and leaves decoding to tools.
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,7 +23,6 @@ import (
 	"log"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
@@ -471,27 +471,33 @@ func (b *Brain) systemPrompt() string {
 	return sb.String()
 }
 
-// stringify flattens model tool input into the protocol's map[string]string.
-func stringify(in map[string]any) map[string]string {
-	out := make(map[string]string, len(in))
-	for k, v := range in {
-		switch t := v.(type) {
-		case string:
-			out[k] = t
-		case bool:
-			out[k] = strconv.FormatBool(t)
-		case float64:
-			out[k] = strconv.FormatFloat(t, 'f', -1, 64)
-		case nil:
-			// omit
-		default:
-			b, err := json.Marshal(v)
-			if err == nil {
-				out[k] = string(b)
-			}
-		}
+// decodeToolInput preserves JSON number lexemes with json.Number. Decoding
+// provider arguments through float64 would round integers above 2^53 before
+// they reach a typed external tool.
+func decodeToolInput(raw []byte) map[string]any {
+	if len(raw) == 0 {
+		return nil
 	}
-	return out
+	var input map[string]any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&input); err != nil {
+		return nil
+	}
+	return input
+}
+
+// stringify preserves model tool input as typed JSON instead of coercing
+// booleans, numbers, arrays, and nested objects to strings.
+func stringify(in map[string]any) json.RawMessage {
+	if in == nil {
+		return json.RawMessage(`{}`)
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 // --- resume ----------------------------------------------------------------
@@ -521,9 +527,12 @@ func TurnsFromEntries(entries []sessions.Entry) []Turn {
 				if a.Kind == protocol.ActFinish {
 					continue // loop bookkeeping, not model context
 				}
-				input := make(map[string]any, len(a.Args))
-				for k, v := range a.Args {
-					input[k] = v
+				var input map[string]any
+				if len(a.Args) > 0 {
+					_ = json.Unmarshal(a.Args, &input)
+				}
+				if input == nil {
+					input = map[string]any{}
 				}
 				blocks = append(blocks, ToolUse{ID: a.ID, Name: string(a.Kind), Input: input})
 			}
