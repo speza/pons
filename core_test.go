@@ -215,6 +215,36 @@ func TestAdditiveEnforcement(t *testing.T) {
 	}
 }
 
+func TestToolSpecsAreDefensiveCopies(t *testing.T) {
+	c := New()
+	params := []ToolParam{{Name: "command", Type: "string"}}
+	if err := c.AddTool("run", ToolDef{
+		Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+			return protocol.ToolResult{}, nil
+		},
+		Params: params,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	params[0].Name = "changed by caller"
+	specs := c.ToolSpecs()
+	if got := specs[0].Params[0].Name; got != "command" {
+		t.Fatalf("registration retained caller's params slice: %q", got)
+	}
+
+	specs[0].Params[0].Name = "changed from snapshot"
+	if got := c.ToolSpecs()[0].Params[0].Name; got != "command" {
+		t.Fatalf("ToolSpecs exposed registry params slice: %q", got)
+	}
+
+	eventSpec := c.toolSpec("run")
+	eventSpec.Params[0].Name = "changed from event"
+	if got := c.ToolSpecs()[0].Params[0].Name; got != "command" {
+		t.Fatalf("event metadata exposed registry params slice: %q", got)
+	}
+}
+
 type wrapFunc func(ctx context.Context, a protocol.Action) (protocol.ToolResult, error)
 
 func (f wrapFunc) Execute(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {

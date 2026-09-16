@@ -162,7 +162,13 @@ func (c *Core) AddTool(kind protocol.ActionKind, def ToolDef) error {
 		return fmt.Errorf("pons: action kind %q already registered (plugin conflict)", kind)
 	}
 	c.handlers[kind] = def.Handler
-	c.specs[kind] = ToolSpec{Kind: kind, Description: def.Description, Params: def.Params, InputSchema: append(json.RawMessage(nil), def.InputSchema...), Source: def.Source}
+	c.specs[kind] = ToolSpec{
+		Kind:        kind,
+		Description: def.Description,
+		Params:      append([]ToolParam(nil), def.Params...),
+		InputSchema: append(json.RawMessage(nil), def.InputSchema...),
+		Source:      def.Source,
+	}
 	return nil
 }
 
@@ -178,6 +184,7 @@ func (c *Core) HasTool(kind protocol.ActionKind) bool {
 func (c *Core) ToolSpecs() []ToolSpec {
 	out := make([]ToolSpec, 0, len(c.specs))
 	for _, s := range c.specs {
+		s.Params = append([]ToolParam(nil), s.Params...)
 		s.InputSchema = append(json.RawMessage(nil), s.InputSchema...)
 		out = append(out, s)
 	}
@@ -393,6 +400,7 @@ func (c *Core) toolSpec(kind protocol.ActionKind) *ToolSpec {
 	if !ok {
 		return nil
 	}
+	spec.Params = append([]ToolParam(nil), spec.Params...)
 	spec.InputSchema = append(json.RawMessage(nil), spec.InputSchema...)
 	return &spec
 }
