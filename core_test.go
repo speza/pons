@@ -64,8 +64,28 @@ func TestToolPanicBecomesObservation(t *testing.T) {
 	if err != nil || res.Answer != "done" {
 		t.Fatalf("panic handling: result=%+v err=%v", res, err)
 	}
-	if got := res.History[0].Results[0].Error; got != "tool panic: boom" {
-		t.Fatalf("panic observation: %q", got)
+	got := res.History[0].Results[0]
+	if got.Error != "tool panic: boom" || got.ActionID != "panic" || got.Kind != "panic" {
+		t.Fatalf("panic observation: %+v", got)
+	}
+}
+
+func TestToolResultIdentityIsOwnedByCore(t *testing.T) {
+	c := New()
+	setBrain(t, c, &continueBrain{fakeBrain{turns: [][]protocol.Action{{{ID: "call", Kind: "tool"}}, {Finish("done")}}}})
+	if err := c.AddTool("tool", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+		return protocol.ToolResult{ActionID: "forged-id", Kind: "forged-kind", OK: true}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := c.Run(context.Background(), "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := res.History[0].Results[0]
+	if got.ActionID != "call" || got.Kind != "tool" {
+		t.Fatalf("tool result identity was not normalized: %+v", got)
 	}
 }
 

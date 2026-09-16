@@ -341,11 +341,12 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 				defer wg.Done()
 				tr, err := executeTool(port, ctx, a)
 				if err != nil { // handler crash ≠ observation; contain it
-					tr = protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}
+					tr = protocol.ToolResult{ActionID: a.ID, Kind: string(a.Kind), OK: false, Error: err.Error()}
 				}
-				if tr.ActionID == "" {
-					tr.ActionID = a.ID
-				}
+				// Tool handlers are not allowed to alter the correlation identity
+				// or payload namespace established by the action being executed.
+				tr.ActionID = a.ID
+				tr.Kind = string(a.Kind)
 				results[i] = tr
 			}(i, a)
 		}
@@ -417,11 +418,11 @@ func (c *Core) buildToolPort() ToolPort {
 				Error: fmt.Sprintf("no plugin provides action kind %q", a.Kind), Kind: string(a.Kind)}, nil
 		}
 		tr, err := h(ctx, a)
-		// Result payloads are namespaced by the action kind that produced
-		// them; plugins may not even set it.
-		if tr.Kind == "" {
-			tr.Kind = string(a.Kind)
-		}
+		// Result identity belongs to the harness, not the handler. This keeps
+		// in-process tools subject to the same correlation and payload
+		// namespace guarantees as external tools.
+		tr.ActionID = a.ID
+		tr.Kind = string(a.Kind)
 		return tr, err
 	})
 	for _, wrap := range slices.Backward(c.wraps) {
