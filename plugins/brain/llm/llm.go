@@ -593,6 +593,23 @@ func stringify(in map[string]any) json.RawMessage {
 	return b
 }
 
+// decodeToolArgs preserves JSON number lexemes with json.Number, like
+// decodeToolInput. The resume path must match the live path: decoding
+// through float64 would round integers above 2^53 before they reach a
+// typed external tool.
+func decodeToolArgs(raw json.RawMessage) map[string]any {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return map[string]any{}
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var m map[string]any
+	if err := dec.Decode(&m); err != nil || m == nil {
+		return map[string]any{}
+	}
+	return m
+}
+
 // --- resume ----------------------------------------------------------------
 
 // TurnsFromEntries converts recorded session entries into conversation
@@ -622,7 +639,7 @@ func TurnsFromEntries(entries []sessions.Entry) []Turn {
 				}
 				var input map[string]any
 				if len(a.Args) > 0 {
-					_ = json.Unmarshal(a.Args, &input)
+					input = decodeToolArgs(a.Args)
 				}
 				if input == nil {
 					input = map[string]any{}

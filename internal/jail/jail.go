@@ -1,5 +1,10 @@
 // Package jail implements the shared path-containment check used by
 // filesystem-touching tool plugins (fs, edit).
+//
+// Coordination covers fs/edit only (via internal/filelock): bash children
+// and external plugins bypass it. Resolve-then-open is check-then-use, not
+// an OS security boundary (see ADR-0004) — deployment isolation applies
+// where the hands must not reach outside the workspace.
 package jail
 
 import (
