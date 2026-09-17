@@ -62,7 +62,7 @@ Key invariants:
 | `plugins/bash` | `bash` — unrestricted command execution (per-call timeout, output tail-truncation, full output to temp file). Trust comes from composition |
 | `plugins/shell` | `run_command` — first-token allowlist variant, for sandboxed compositions |
 | `plugins/external` | Persistent hands-side JSON-RPC/NDJSON host and `tool_provider/v1` adapter; `plugins/external/sdk` serves Go and dependency-free TypeScript plugins |
-| `plugins/brain/llm` | Real LLM brain: one model call per turn, tool schemas auto-discovered from registered plugins; context compaction; resume seeding |
+| `plugins/brain/llm` | Real LLM brain: one model call per turn, tool schemas auto-discovered from registered plugins; context compaction; resume seeding; provider failover chain |
 | `plugins/brain/scripted` | Deterministic brain (LLM stand-in for CI) |
 | `internal/jail`, `internal/unidiff` | Shared libraries between plugins (code, not registrations) |
 | `cmd/pons/` | The CLI: LLM brain, interactive mode, `--resume`, compaction |
@@ -167,9 +167,46 @@ Useful flags: `--workspace` (jail root; default: current directory),
 `--session-dir`, `--max-turns`, `--compact-chars`, `--plugin MANIFEST` (explicit
 repeatable hands-side external plugin), `--plugin-path PATH` (safe PATH for
 interpreted plugin runtimes), `--debug` (raw tool inputs/outputs and provider
-turn details). External children get an empty environment by default; use
-`--plugin-path` or an embedding `external.HostConfig{Path: ...}` for Node/Bun
-without inheriting credentials.
+turn details). Tool output caps are tunable at the composition: `--fs-read-bytes`
+(read_file cap; 0 = 256 KiB, negative = unlimited), `--bash-timeout`,
+`--bash-max-lines`, `--bash-max-bytes`, and `--plugin-max-result-bytes`
+(external tool result cap; 0 = 1 MiB). External children get an empty
+environment by default; use `--plugin-path` or an embedding
+`external.HostConfig{Path: ...}` for Node/Bun without inheriting credentials.
+
+Durable settings live in `~/.pons/config.json` (global defaults) and
+`.pons.json` in the workspace (project overrides); explicit flags win over
+both. Recognized keys: `provider`, `model`, `base_url`, `session_dir`,
+`max_turns`, `compact_chars`, `fs_read_bytes`, `bash_timeout`,
+`bash_max_lines`, `bash_max_bytes`, `plugin_max_result_bytes`, `fallbacks`,
+and the multi-provider block: `providers` (array of
+`{id, provider, model, base_url, api_key}`) plus
+`default_provider_id`. Multiple entries of the same provider type are
+allowed (e.g. two ChatGPT subscriptions with distinct auth entries).
+The default entry is the primary and the remaining entries back it up in
+listed order. The flat `provider`/`model`/`base_url` keys and `providers`
+are mutually exclusive. Decoding is strict: unknown keys, trailing data, or
+wrong types fail startup rather than being ignored. Invocation intent
+(`--message`, `--resume`, `-i`, `--debug`, `--login`) stays flag-only.
+
+Provider failover: when the primary provider fails to complete a turn
+(outage, rate limit), the brain retries the same conversation on the next
+slot — the history is provider-agnostic, so a mid-run switch is a clean
+handoff. Configure with `-fallback provider[:model]` (repeatable, replaces
+the backup list) or through `providers`/`fallbacks` in a config file;
+cancellation is never retried. An explicit `-provider` flag runs ad-hoc
+(flags-only credentials) with the declared providers backing it up.
+
+Credentials live in one auth store: `~/.pons/auth.json` (0600), a JSON
+object mapping auth ids to codex OAuth credentials
+(`{"codex-personal": {"access": …, "accountId": …, "refresh": …, "expires": …}}`).
+A codex provider entry's `id` names its credential directly — `--login -as
+<id>` is all the wiring. A store holding exactly one entry stands in for
+any id, so single-subscription setups need no naming at all. The legacy
+single-credential file shape is read as the `codex` entry and upgraded in
+place on the next refresh. Refreshes rewrite the whole store under an
+advisory file lock, so concurrent pons processes do not clobber each
+other's tokens.
 
 External tool arguments are typed JSON objects, not string maps. Small Go and
 TypeScript provider examples live in [`examples/external-echo`](examples/external-echo)
