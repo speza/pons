@@ -130,7 +130,6 @@ func replaceEnv(env []string, key, value string) []string {
 
 type pendingCall struct {
 	response chan rpcResponse
-	canceled bool
 }
 
 type rpcResponse struct {
@@ -245,6 +244,7 @@ func (h *Host) Start(ctx context.Context) error {
 	h.mu.Unlock()
 
 	cmd := exec.Command(h.manifest.ResolvedEntrypoint(), h.manifest.Args...)
+	setProcessGroup(cmd)
 	cmd.Dir = h.manifest.Dir()
 	if cmd.Dir == "" {
 		cmd.Dir = "."
@@ -544,10 +544,7 @@ func (h *Host) removePending(id string) {
 
 func (h *Host) cancelPending(id string) {
 	h.mu.Lock()
-	p, ok := h.pending[id]
-	if ok {
-		p.canceled = true
-	}
+	_, ok := h.pending[id]
 	h.mu.Unlock()
 	if !ok {
 		return
@@ -785,7 +782,7 @@ func (h *Host) fail(err error) {
 		_ = stdin.Close()
 	}
 	if !closing && cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
+		killProcess(cmd)
 	}
 }
 
@@ -801,7 +798,7 @@ func (h *Host) terminate() error {
 		_ = stdin.Close()
 	}
 	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
+		killProcess(cmd)
 	}
 	return nil
 }

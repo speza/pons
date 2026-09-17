@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func newFS(t *testing.T, root string) *FS {
@@ -15,6 +16,60 @@ func newFS(t *testing.T, root string) *FS {
 		t.Fatal(err)
 	}
 	return p
+}
+
+func TestReadTruncatesLargeFile(t *testing.T) {
+	root := t.TempDir()
+	p, err := New(Config{Root: root, MaxReadBytes: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if werr := os.WriteFile(filepath.Join(root, "big.txt"), []byte(strings.Repeat("x", 1000)), 0o644); werr != nil {
+		t.Fatal(werr)
+	}
+	res, err := p.readFile(context.Background(), Read("big.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK || !strings.Contains(res.Output, "truncated") || len(res.Output) >= 1000 {
+		t.Fatalf("large read not truncated: ok=%v len=%d out=%q", res.OK, len(res.Output), res.Output)
+	}
+}
+
+func TestReadTruncationKeepsValidUTF8(t *testing.T) {
+	root := t.TempDir()
+	p, err := New(Config{Root: root, MaxReadBytes: 11})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if werr := os.WriteFile(filepath.Join(root, "u.txt"), []byte(strings.Repeat("é", 20)), 0o644); werr != nil {
+		t.Fatal(werr)
+	}
+	res, err := p.readFile(context.Background(), Read("u.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK || !strings.Contains(res.Output, "truncated") {
+		t.Fatalf("expected truncated ok read: %+v", res)
+	}
+	if body := strings.SplitN(res.Output, "\n…[", 2)[0]; !utf8.ValidString(body) {
+		t.Fatalf("truncated body is not valid UTF-8: %q", body)
+	}
+}
+
+func TestReadRejectsBinary(t *testing.T) {
+	root := t.TempDir()
+	p := newFS(t, root)
+	if werr := os.WriteFile(filepath.Join(root, "bin.dat"), []byte{0x00, 0xff, 0xfe, 0x01}, 0o644); werr != nil {
+		t.Fatal(werr)
+	}
+	res, err := p.readFile(context.Background(), Read("bin.dat"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK || !strings.Contains(res.Error, "not UTF-8") {
+		t.Fatalf("binary read should be rejected: %+v", res)
+	}
 }
 
 func TestJailRejectsEscape(t *testing.T) {

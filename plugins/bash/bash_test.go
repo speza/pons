@@ -3,6 +3,7 @@ package bash
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestRunCapturesOutput(t *testing.T) {
@@ -41,5 +42,14 @@ func TestTailTruncationWithFullOutput(t *testing.T) {
 	}
 	if !strings.Contains(res.Output, "full output: ") {
 		t.Fatalf("full output path missing:\n%s", res.Output)
+	}
+}
+
+func TestByteTruncationKeepsValidUTF8(t *testing.T) {
+	// 100 two-byte runes, no trailing newline, byte cut lands mid-rune.
+	s := strings.Repeat("é", 100)
+	out, _ := truncateOutput(s, 1000, 15)
+	if !utf8.ValidString(out) {
+		t.Fatalf("byte truncation produced invalid UTF-8: %q", out)
 	}
 }

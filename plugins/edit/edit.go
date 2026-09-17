@@ -32,6 +32,7 @@ import (
 	"sync"
 
 	"github.com/samperrin/pons"
+	"github.com/samperrin/pons/internal/filelock"
 	"github.com/samperrin/pons/internal/jail"
 	"github.com/samperrin/pons/internal/unidiff"
 	"github.com/samperrin/pons/protocol"
@@ -168,6 +169,11 @@ func (p *Edit) apply(ctx context.Context, a protocol.Action) (protocol.ToolResul
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: "patch contains no SEARCH/REPLACE blocks"}, nil
 	}
 
+	// The operation is a read-modify-write. Serialize edits so concurrent
+	// actions cannot lose one another's changes (ADR-0006). The per-path
+	// lock additionally coordinates with fs.writeFile on the same file.
+	unlock := filelock.Lock(path)
+	defer unlock()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 

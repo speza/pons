@@ -143,6 +143,7 @@ func (s *Store) load(sessionID string) (*fileData, error) {
 					return nil, fmt.Errorf("sessionsjsonl: duplicate entry id %q", rec.Entry.ID)
 				}
 				entryIDs[rec.Entry.ID] = struct{}{}
+				rec.Entry.SessionID = sessionID
 				d.entries = append(d.entries, *rec.Entry)
 				d.leaf = rec.Entry.ID // last leaf-relevant record wins
 			}

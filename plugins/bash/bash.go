@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/samperrin/pons"
 	"github.com/samperrin/pons/protocol"
@@ -204,6 +205,12 @@ func truncateOutput(s string, maxLines, maxBytes int) (string, *ExecExtras) {
 		cut := len(result) - maxBytes
 		if nl := strings.IndexByte(result[cut:], '\n'); nl >= 0 {
 			cut += nl + 1
+		} else {
+			// No line boundary in range: keep the cut inside a rune so the
+			// tail stays valid UTF-8.
+			for cut < len(result) && !utf8.RuneStart(result[cut]) {
+				cut++
+			}
 		}
 		result = result[cut:]
 		truncated = true

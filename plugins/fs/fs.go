@@ -5,11 +5,14 @@ package fs
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/samperrin/pons"
+	"github.com/samperrin/pons/internal/filelock"
 	"github.com/samperrin/pons/internal/jail"
 	"github.com/samperrin/pons/protocol"
 )
@@ -37,11 +40,27 @@ func List(path string) protocol.Action {
 // FS is the filesystem tool plugin.
 type FS struct {
 	root string // resolved jail root
+	cfg  Config
 }
 
 // Config tunes the plugin.
 type Config struct {
 	Root string // jail root; "" = process cwd
+	// MaxReadBytes caps read_file output so a huge or binary file cannot
+	// flood the model context. 0 = default (256 KiB); negative = unlimited.
+	MaxReadBytes int
+}
+
+const defaultMaxReadBytes = 256 << 10
+
+func (p *FS) maxReadBytes() int {
+	if p.cfg.MaxReadBytes > 0 {
+		return p.cfg.MaxReadBytes
+	}
+	if p.cfg.MaxReadBytes < 0 {
+		return -1
+	}
+	return defaultMaxReadBytes
 }
 
 // New creates the plugin (it is installed with pons.Core.Use).
@@ -50,7 +69,7 @@ func New(cfg Config) (*FS, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fs: %w", err)
 	}
-	return &FS{root: root}, nil
+	return &FS{root: root, cfg: cfg}, nil
 }
 
 // Setup registers the three filesystem tools.
@@ -93,11 +112,48 @@ func (p *FS) readFile(ctx context.Context, a protocol.Action) (protocol.ToolResu
 	if err != nil {
 		return denied(a, err), nil
 	}
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 	}
-	return protocol.ToolResult{ActionID: a.ID, OK: true, Output: string(b)}, nil
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
+	}
+
+	limit := p.maxReadBytes()
+	data, truncated := readBounded(f, limit)
+	if !utf8.Valid(data) {
+		return protocol.ToolResult{ActionID: a.ID, OK: false,
+			Error: fmt.Sprintf("%s is not UTF-8 text (binary file); use bash to inspect it", path)}, nil
+	}
+	if truncated {
+		return protocol.ToolResult{ActionID: a.ID, OK: true, Output: string(data) + fmt.Sprintf(
+			"\n…[truncated: file is %d bytes, showing first %d — use bash to read the rest]", info.Size(), len(data))}, nil
+	}
+	return protocol.ToolResult{ActionID: a.ID, OK: true, Output: string(data)}, nil
+}
+
+// readBounded reads at most limit bytes (limit < 0 = unlimited) and reports
+// whether content was cut off. Reading beyond the limit by one chunk keeps
+// the truncation signal reliable even if the stat size is stale.
+func readBounded(f *os.File, limit int) (data []byte, truncated bool) {
+	if limit < 0 {
+		data, _ = io.ReadAll(f)
+		return data, false
+	}
+	data, _ = io.ReadAll(io.LimitReader(f, int64(limit)+1))
+	if len(data) > limit {
+		cut := data[:limit]
+		// Trim a trailing partial rune so valid text is not mistaken for
+		// binary content by the UTF-8 check.
+		for len(cut) > 0 && !utf8.Valid(cut) {
+			cut = cut[:len(cut)-1]
+		}
+		return cut, true
+	}
+	return data, false
 }
 
 func (p *FS) writeFile(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
@@ -113,6 +169,10 @@ func (p *FS) writeFile(ctx context.Context, a protocol.Action) (protocol.ToolRes
 	if err != nil {
 		return denied(a, err), nil
 	}
+	// Coordinate with edit_file's read-modify-write on the same path so a
+	// concurrent edit cannot overwrite this write with stale content.
+	unlock := filelock.Lock(path)
+	defer unlock()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 	}
