@@ -19,7 +19,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -33,17 +32,8 @@ const KindBash protocol.ActionKind = "bash"
 // maxTimeoutSeconds caps per-call timeouts (pi caps too).
 const maxTimeoutSeconds = 600
 
-// defaultMaxCaptureBytes bounds how much combined child output is kept in
-// memory and spilled to the full-output temp file. Display truncation
-// (MaxLines/MaxBytes) applies on top of this; the capture cap is the
-// backstop so a runaway command cannot OOM the agent or fill the disk.
-// Temp files are intentionally retained for the session (the model greps
-// them via the full_output path), so the cap also bounds /tmp litter
-// to one file of at most this size per truncated call.
-const defaultMaxCaptureBytes = 1 << 20
-
-// maxFullFileBytes is defense-in-depth for saveFull direct callers;
-// the run path is already bounded by the capture cap.
+// maxFullFileBytes bounds the full-output spill file so one truncated call
+// cannot fill /tmp; larger outputs keep the tail (see saveFull).
 const maxFullFileBytes = 8 << 20
 
 // Run is the action constructor. timeoutSecs = 0 means no per-call timeout.
@@ -64,10 +54,6 @@ type Config struct {
 	Timeout  int    // default timeout seconds; 0 = no default (pi semantics)
 	MaxLines int    // tail-truncation lines (default 200)
 	MaxBytes int    // tail-truncation bytes (default 50KiB)
-	// MaxCaptureBytes caps combined output retained in memory and spilled
-	// to the full-output file. 0 = default (1MiB). Must exceed MaxBytes
-	// to be useful; smaller values are clamped up to MaxBytes.
-	MaxCaptureBytes int
 }
 
 // New creates the plugin (installed with pons.Core.Use).
@@ -129,30 +115,9 @@ func (p *Bash) run(ctx context.Context, a protocol.Action) (protocol.ToolResult,
 	if p.cfg.Root != "" {
 		cmd.Dir = p.cfg.Root
 	}
-	// Stream through a tail-keeping writer so output is bounded even
-	// before display truncation runs: the tail is what the model sees,
-	// and it is also the most useful slice to spill to disk.
-	cw := &cappedWriter{max: p.maxCaptureBytes()}
-	cmd.Stdout = cw
-	cmd.Stderr = cw
-	err = cmd.Run()
-	outStr := cw.String()
+	out, err := cmd.CombinedOutput()
 
-	text, extras := truncateOutput(outStr, p.maxLines(), p.maxBytes())
-	if cw.Truncated() {
-		if extras == nil {
-			extras = &ExecExtras{Truncated: true}
-			if full, ferr := saveFull(outStr); ferr == nil {
-				extras.FullOutput = full
-				text = fmt.Sprintf("…[output exceeded %d-byte capture cap; saved tail: %s]\n%s", cw.max, full, text)
-			} else {
-				text = fmt.Sprintf("…[output exceeded %d-byte capture cap]\n%s", cw.max, text)
-			}
-		} else if extras.FullOutput != "" {
-			text = fmt.Sprintf("…[output exceeded %d-byte capture cap; earliest output dropped]\n%s", cw.max, text)
-		}
-		extras.Truncated = true
-	}
+	text, extras := truncateOutput(string(out), p.maxLines(), p.maxBytes())
 	res := protocol.ToolResult{ActionID: a.ID, OK: true, Kind: string(KindBash), Output: text, ExitCode: 0}
 	if extras != nil {
 		res.Payload, _ = json.Marshal(extras)
@@ -200,69 +165,6 @@ func (p *Bash) maxBytes() int {
 		return p.cfg.MaxBytes
 	}
 	return 50 * 1024
-}
-
-func (p *Bash) maxCaptureBytes() int {
-	capN := p.cfg.MaxCaptureBytes
-	if capN <= 0 {
-		capN = defaultMaxCaptureBytes
-	}
-	// The capture window must cover the display window; otherwise the
-	// display tail would be cut from already-dropped output.
-	if min := p.maxBytes() + 1024; capN < min {
-		capN = min
-	}
-	return capN
-}
-
-// cappedWriter keeps the LAST max bytes written: memory stays bounded
-// while the retained slice is the tail the model actually sees. Total
-// counts every byte offered so callers can tell capture truncation from
-// display truncation. Safe for concurrent Stdout/Stderr writes.
-type cappedWriter struct {
-	mu    sync.Mutex
-	buf   []byte
-	total int
-	max   int
-}
-
-func (w *cappedWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.total += len(p)
-	if w.max <= 0 {
-		return len(p), nil
-	}
-	if len(p) >= w.max {
-		w.buf = append(w.buf[:0], p[len(p)-w.max:]...)
-		return len(p), nil
-	}
-	w.buf = append(w.buf, p...)
-	if len(w.buf) > w.max {
-		// Drop from the front; copy to avoid pinning discarded prefix.
-		kept := append([]byte(nil), w.buf[len(w.buf)-w.max:]...)
-		w.buf = kept
-	}
-	return len(p), nil
-}
-
-// Truncated reports whether more was offered than retained.
-func (w *cappedWriter) Truncated() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.total > len(w.buf)
-}
-
-// String returns the retained tail, trimmed at the head to a rune
-// boundary so dropping mid-rune does not emit invalid UTF-8.
-func (w *cappedWriter) String() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	b := w.buf
-	for len(b) > 0 && !utf8.RuneStart(b[0]) {
-		b = b[1:]
-	}
-	return string(b)
 }
 
 // truncateOutput keeps the LAST maxLines lines and last maxBytes bytes of
@@ -346,9 +248,8 @@ func truncateOutput(s string, maxLines, maxBytes int) (string, *ExecExtras) {
 }
 
 func saveFull(s string) (string, error) {
-	// Defense-in-depth: the run path is already bounded by the capture
-	// cap, but truncateOutput is also reachable in tests/helpers with
-	// arbitrary input. Spill at most the tail so one call cannot fill /tmp.
+	// Bound the spill so one truncated call cannot fill /tmp; larger
+	// outputs keep the tail, matching what the model sees.
 	if len(s) > maxFullFileBytes {
 		s = s[len(s)-maxFullFileBytes:]
 		if nl := strings.IndexByte(s, '\n'); nl >= 0 {

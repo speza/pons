@@ -69,20 +69,3 @@ func TestByteOnlyTruncationReportsBytesNotZeroLines(t *testing.T) {
 		t.Fatalf("expected bytes note:\n%s", out)
 	}
 }
-
-func TestCaptureCapBoundsRunawayOutput(t *testing.T) {
-	// ~4KB of output with a ~1KB capture window: memory and the spilled
-	// file stay bounded, the tail survives, and the cap is disclosed.
-	p := New(Config{MaxLines: 10000, MaxBytes: 100, MaxCaptureBytes: 200})
-	res, _ := p.run(t.Context(), Run("seq 1 500", 10))
-	if !strings.Contains(res.Output, "capture cap") {
-		t.Fatalf("missing capture-cap note:\n%s", res.Output)
-	}
-	extras, ok := AsExecResult(res)
-	if !ok || !extras.Truncated || extras.FullOutput == "" {
-		t.Fatalf("missing truncation payload: %+v", res)
-	}
-	if !strings.Contains(res.Output, "500\n") {
-		t.Fatalf("tail should survive the capture window:\n%s", res.Output)
-	}
-}
