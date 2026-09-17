@@ -127,10 +127,18 @@ func waitForCallback(ctx context.Context, state string) (code string, err error)
 	}
 }
 
-// RunLogin performs the full browser login and stores credentials at
-// authPath. Guidance is printed for the user; the browser is opened
-// automatically when an opener is available.
-func RunLogin(ctx context.Context, authPath string) error {
+// RunLogin performs the full browser login and stores credentials in the
+// pons auth store under the given auth id ("codex" when empty). Guidance
+// is printed for the user; the browser is opened automatically when an
+// opener is available.
+func RunLogin(ctx context.Context, id string) error {
+	if id == "" {
+		id = LegacyAuthID
+	}
+	authPath, err := DefaultCodexAuthPath()
+	if err != nil {
+		return err
+	}
 	p := newPKCE()
 	authURL := authorizeURL(p)
 	fmt.Println("Opening your browser to authenticate with ChatGPT…")
@@ -155,7 +163,8 @@ func RunLogin(ctx context.Context, authPath string) error {
 
 	a := &codexAuth{
 		http:       defaultHTTPClient(),
-		authPath:   authPath,
+		storePath:  authPath,
+		id:         id,
 		Access:     tokens.Access,
 		AccountID:  tokens.AccountID,
 		Refresh:    tokens.Refresh,
@@ -165,8 +174,8 @@ func RunLogin(ctx context.Context, authPath string) error {
 	if err := a.save(); err != nil {
 		return fmt.Errorf("login succeeded but saving %s failed: %w", authPath, err)
 	}
-	fmt.Printf("Logged in. Credentials saved to %s (expires %s).\n",
-		authPath, a.ExpiresAt.Format(time.RFC3339))
+	fmt.Printf("Logged in. Credentials saved to %s (auth id %s, expires %s).\n",
+		authPath, id, a.ExpiresAt.Format(time.RFC3339))
 	return nil
 }
 

@@ -309,7 +309,7 @@ data: {"type":"response.completed","response":{"id":"r","object":"response","out
 
 	authFile := filepath.Join(t.TempDir(), "auth.json")
 	os.WriteFile(authFile, fmt.Appendf(nil, `{"access":"old-token","accountId":"acct","refresh":"refresh-token","expires":%d}`, time.Now().Add(time.Hour).UnixMilli()), 0o600)
-	auth, err := loadCodexAuth(authFile)
+	auth, err := loadCodexAuth(authFile, "codex")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,11 +339,11 @@ data: {"type":"response.completed","response":{"id":"r","object":"response","out
 func TestLoadCodexAuth(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "auth.json")
-	if _, err := loadCodexAuth(path); err == nil {
+	if _, err := loadCodexAuth(path, "codex"); err == nil {
 		t.Fatal("missing file should error")
 	}
 	os.WriteFile(path, []byte(`{"other":{}}`), 0o644)
-	if _, err := loadCodexAuth(path); err == nil || !strings.Contains(err.Error(), "has no access token") {
+	if _, err := loadCodexAuth(path, "codex"); err == nil || !strings.Contains(err.Error(), "has no access token") {
 		t.Fatalf("missing token: %v", err)
 	}
 }
@@ -438,7 +438,8 @@ func TestExchangeCodeRequestShape(t *testing.T) {
 func TestSaveLoadRoundtrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".pons", "auth.json")
 	a := &codexAuth{
-		authPath:  path,
+		storePath: path,
+		id:        "codex",
 		Access:    "tok",
 		AccountID: "acct",
 		Refresh:   "ref",
@@ -451,7 +452,7 @@ func TestSaveLoadRoundtrip(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("auth file perms: %v", info.Mode().Perm())
 	}
-	loaded, err := loadCodexAuth(path)
+	loaded, err := loadCodexAuth(path, "codex")
 	if err != nil {
 		t.Fatal(err)
 	}

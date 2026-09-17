@@ -75,13 +75,56 @@ type Client interface {
 	Complete(ctx context.Context, system string, turns []Turn, tools []pons.ToolSpec) (Turn, error)
 }
 
+// Fallback is one named provider slot in the brain's provider chain: the
+// primary slot plus each fallback in order. The ID is a stable label for
+// selection and logs — and for codex slots, the auth-store entry the
+// slot's credentials live under; the rest configures one provider.
+type Fallback struct {
+	ID       string // stable name (e.g. "codex-personal"); optional
+	Provider string // "anthropic", "openai", "codex", "openai-responses"
+	Model    string
+	BaseURL  string
+	APIKey   string // falls back to the provider's env key
+}
+
+// failoverClient tries provider slots in order. The conversation model
+// (sealed Blocks) is provider-agnostic, so switching mid-run is a clean
+// handoff: the next provider replays the same history. Any Complete error
+// except caller cancellation triggers the next slot; when every slot
+// fails, the last error is returned.
+type failoverClient struct {
+	clients []Client
+	names   []string
+	logf    func(string, ...any)
+}
+
+func (f *failoverClient) Complete(ctx context.Context, system string, turns []Turn, tools []pons.ToolSpec) (Turn, error) {
+	var lastErr error
+	for i, c := range f.clients {
+		turn, err := c.Complete(ctx, system, turns, tools)
+		if err == nil {
+			if lastErr != nil && f.logf != nil {
+				f.logf("[llm] recovered on provider %s", f.names[i])
+			}
+			return turn, nil
+		}
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+			return Turn{}, err
+		}
+		lastErr = err
+		if f.logf != nil {
+			f.logf("[llm] provider %s failed: %v", f.names[i], err)
+		}
+	}
+	return Turn{}, lastErr
+}
+
 // Config tunes the brain.
 type Config struct {
-	Provider    string // "anthropic", "openai", "codex" (pi subscription), "openai-responses"
+	Provider    string // "anthropic", "openai", "codex" (ChatGPT subscription), "openai-responses"
 	Model       string // provider-specific; defaults per provider
 	APIKey      string // falls back to ANTHROPIC_API_KEY / OPENAI_API_KEY
 	BaseURL     string // override the provider endpoint
-	AuthPath    string // codex only: pons auth-file path (default ~/.pons/auth.json)
 	MaxTokens   int    // default 4096
 	SystemExtra string // appended to the system prompt
 	Logger      *log.Logger
@@ -93,9 +136,16 @@ type Config struct {
 	// everything, greppable via $PONS_SESSION_FILE.
 	CompactChars int
 	CompactKeep  int
+
+	// Fallbacks are tried in order when the primary provider fails to
+	// complete a turn (provider outage, rate limit). Each slot is a full
+	// provider configuration; see Fallback.
+	Fallbacks []Fallback
 }
 
-// Brain is the LLM-driven ControlPort.
+// Brain is the LLM-driven ControlPort. It holds the conversation in
+// process and is not safe for concurrent use: drive one Core.Run at a
+// time (the interactive CLI does this).
 type Brain struct {
 	cfg         Config
 	model       string
@@ -120,94 +170,137 @@ func New(cfg Config) (*Brain, error) {
 		b.logf = func(string, ...any) {}
 	}
 
-	var client Client
+	slots := make([]Fallback, 0, 1+len(cfg.Fallbacks))
+	slots = append(slots, Fallback{
+		ID:       "primary",
+		Provider: provider,
+		Model:    cfg.Model,
+		BaseURL:  cfg.BaseURL,
+		APIKey:   cfg.APIKey,
+	})
+	slots = append(slots, cfg.Fallbacks...)
+
+	clients := make([]Client, 0, len(slots))
+	names := make([]string, 0, len(slots))
+	var model string
+	for i, slot := range slots {
+		c, m, err := providerClient(slot, b.maxTokens())
+		if err != nil {
+			if i == 0 {
+				return nil, err
+			}
+			return nil, fmt.Errorf("llm: fallback %q: %w", slot.ID, err)
+		}
+		clients = append(clients, c)
+		names = append(names, fmt.Sprintf("%s(%s/%s)", slot.ID, slot.Provider, m))
+		if i == 0 {
+			model = m
+		}
+	}
+	b.model = model
+	if len(clients) == 1 {
+		b.client = clients[0]
+	} else {
+		b.client = &failoverClient{clients: clients, names: names, logf: b.logf}
+	}
+	return b, nil
+}
+
+// providerClient builds one provider slot: key resolution from env, the
+// provider's default model and endpoint, and the Client constructor.
+// codex slots resolve credentials from the pons auth store; entries are
+// keyed by slot id.
+func providerClient(slot Fallback, maxTokens int) (Client, string, error) {
+	provider := slot.Provider
+	if provider == "" {
+		provider = "anthropic"
+	}
 	switch provider {
 	case "anthropic":
-		key := cfg.APIKey
+		key := slot.APIKey
 		if key == "" {
 			key = os.Getenv("ANTHROPIC_API_KEY")
 		}
 		if key == "" {
-			return nil, errors.New("llm: no API key — set ANTHROPIC_API_KEY (or Config.APIKey)")
+			return nil, "", errors.New("llm: no API key — set ANTHROPIC_API_KEY (or Config.APIKey)")
 		}
-		model := cfg.Model
+		model := slot.Model
 		if model == "" {
 			model = "claude-sonnet-4-5"
 		}
-		baseURL := cfg.BaseURL
+		baseURL := slot.BaseURL
 		if baseURL == "" {
 			baseURL = "https://api.anthropic.com"
 		}
-		ac := newAnthropicClient(key, baseURL, b.maxTokens())
+		ac := newAnthropicClient(key, baseURL, maxTokens)
 		ac.model = model
-		client = ac
-		b.model = model
+		return ac, model, nil
 	case "codex":
-		// ChatGPT-subscription auth from pons's own auth file (~/.pons/auth.json,
-		// created by --login; refreshed tokens are written back to it).
-		authPath := cfg.AuthPath
-		if authPath == "" {
-			def, derr := DefaultCodexAuthPath()
-			if derr != nil {
-				return nil, derr
-			}
-			authPath = def
+		// ChatGPT-subscription auth from pons's auth store (~/.pons/auth.json,
+		// created by --login -as <id>; refreshed tokens are written back to it).
+		authPath, derr := DefaultCodexAuthPath()
+		if derr != nil {
+			return nil, "", derr
 		}
-		auth, err := loadCodexAuth(authPath)
+		// Auth resolution: the slot's own id names the store entry —
+		// login with -as <id> to match. Synthetic slot ids (unnamed
+		// primary, ad-hoc flag) resolve to the default "codex" entry,
+		// which is what a bare --login writes.
+		authID := slot.ID
+		switch slot.ID {
+		case "", "primary", "flag":
+			authID = LegacyAuthID
+		}
+		auth, err := loadCodexAuth(authPath, authID)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		model := cfg.Model
+		model := slot.Model
 		if model == "" {
 			model = "gpt-5.6-terra"
 		}
-		baseURL := cfg.BaseURL
+		baseURL := slot.BaseURL
 		if baseURL == "" {
 			baseURL = codexBaseURL
 		}
-		client = &responsesClient{auth: auth, baseURL: baseURL, model: model, maxTokens: b.maxTokens()}
-		b.model = model
+		return &responsesClient{auth: auth, baseURL: baseURL, model: model, maxTokens: maxTokens}, model, nil
 	case "openai-responses":
 		// Responses API with a plain API key.
-		key := cfg.APIKey
+		key := slot.APIKey
 		if key == "" {
 			key = os.Getenv("OPENAI_API_KEY")
 		}
 		if key == "" {
-			return nil, errors.New("llm: no API key — set OPENAI_API_KEY (or Config.APIKey)")
+			return nil, "", errors.New("llm: no API key — set OPENAI_API_KEY (or Config.APIKey)")
 		}
-		model := cfg.Model
+		model := slot.Model
 		if model == "" {
 			model = "gpt-5.6-terra"
 		}
-		baseURL := cfg.BaseURL
+		baseURL := slot.BaseURL
 		if baseURL == "" {
 			baseURL = "https://api.openai.com/v1"
 		}
-		client = &responsesClient{apiKey: key, baseURL: baseURL, model: model, maxTokens: b.maxTokens()}
-		b.model = model
+		return &responsesClient{apiKey: key, baseURL: baseURL, model: model, maxTokens: maxTokens}, model, nil
 	case "openai":
-		key := cfg.APIKey
+		key := slot.APIKey
 		if key == "" {
 			key = os.Getenv("OPENAI_API_KEY") // empty is fine for local servers
 		}
-		model := cfg.Model
+		model := slot.Model
 		if model == "" {
 			model = "gpt-4o-mini"
 		}
-		baseURL := cfg.BaseURL
+		baseURL := slot.BaseURL
 		if baseURL == "" {
 			baseURL = "https://api.openai.com/v1"
 		}
-		oc := newOpenAIClient(key, baseURL, b.maxTokens())
+		oc := newOpenAIClient(key, baseURL, maxTokens)
 		oc.model = model
-		client = oc
-		b.model = model
+		return oc, model, nil
 	default:
-		return nil, fmt.Errorf("llm: unknown provider %q (want \"anthropic\", \"openai\", \"codex\", or \"openai-responses\")", provider)
+		return nil, "", fmt.Errorf("llm: unknown provider %q (want \"anthropic\", \"openai\", \"codex\", or \"openai-responses\")", provider)
 	}
-	b.client = client
-	return b, nil
 }
 
 func (b *Brain) maxTokens() int {
