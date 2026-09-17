@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"unicode/utf8"
@@ -130,9 +131,7 @@ func loadSettings(home, workspace string) (settings, error) {
 		if err != nil {
 			return settings{}, err
 		}
-		for k, v := range m {
-			merged[k] = v
-		}
+		maps.Copy(merged, m)
 	}
 	if len(merged) == 0 {
 		return settings{}, nil

@@ -352,10 +352,7 @@ func main() {
 		fmt.Printf("pons — type a task per line (exit/Ctrl+D to quit)\n")
 	}
 	sc := bufio.NewScanner(os.Stdin)
-	for {
-		if rootCtx.Err() != nil {
-			break
-		}
+	for rootCtx.Err() == nil {
 		if isTTY(os.Stdin) {
 			fmt.Print("> ")
 		}

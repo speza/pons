@@ -56,9 +56,7 @@ func TestFailoverStopsOnCancellation(t *testing.T) {
 	failing := &fallbackFakeClient{err: context.Canceled}
 	backup := &fallbackFakeClient{turn: Turn{Role: "assistant"}}
 	f := &failoverClient{clients: []Client{failing, backup}, names: []string{"a", "b"}}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	_, err := f.Complete(ctx, "sys", nil, nil)
+	_, err := f.Complete(t.Context(), "sys", nil, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("want cancellation, got %v", err)
 	}

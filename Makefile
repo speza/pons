@@ -1,5 +1,8 @@
 GO_FILES := $(shell find . -type f -name '*.go' -not -path './.git/*' -print)
-GOLANGCI_LINT ?= golangci-lint
+# Resolve from the Go bin dir so make lint works even when ~/go/bin is
+# not on PATH (CI pins the action's binary; install locally with
+# `make install-tools`).
+GOLANGCI_LINT ?= $(shell go env GOPATH)/bin/golangci-lint
 GOLANGCI_LINT_VERSION ?= v2.6.0
 LINT_GOTOOLCHAIN ?= go1.25.0
 
