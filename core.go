@@ -407,7 +407,7 @@ func (c *Core) toolSpec(kind protocol.ActionKind) *ToolSpec {
 }
 
 // buildToolPort composes the dispatch handler with registered middleware
-// (outermost wrap = last registered, so middleware order reads top-down).
+// (outermost wrap = first registered, so middleware order reads top-down).
 func (c *Core) buildToolPort() ToolPort {
 	var port ToolPort = dispatchFunc(func(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
 		h, ok := c.handlers[a.Kind]

@@ -126,3 +126,27 @@ func TestRelativePathsUseWorkspaceRoot(t *testing.T) {
 		t.Fatalf("relative write landed outside workspace: %q err=%v", got, err)
 	}
 }
+
+func TestWritePreservesMode(t *testing.T) {
+	root := t.TempDir()
+	p := newFS(t, root)
+	ctx := context.Background()
+	path := filepath.Join(root, "run.sh")
+	if err := os.WriteFile(path, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, _ := p.writeFile(ctx, Write(path, "new"))
+	if !res.OK {
+		t.Fatalf("write: %s", res.Error)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("write clobbered mode: %o", info.Mode().Perm())
+	}
+	if got, _ := os.ReadFile(path); string(got) != "new" {
+		t.Fatalf("write content: %q", got)
+	}
+}

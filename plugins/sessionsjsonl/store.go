@@ -110,6 +110,7 @@ func (s *Store) load(sessionID string) (*fileData, error) {
 	d := &fileData{sess: sessions.Session{ID: sessionID}}
 	entryIDs := make(map[string]struct{})
 	reader := bufio.NewReader(f)
+	lineno := 0
 	for {
 		line, readErr := reader.ReadBytes('\n')
 		if readErr == io.EOF {
@@ -117,8 +118,9 @@ func (s *Store) load(sessionID string) (*fileData, error) {
 			// unterminated record is a crash tail and is deliberately ignored.
 			break
 		}
+		lineno++
 		if readErr != nil {
-			return nil, readErr
+			return nil, fmt.Errorf("sessionsjsonl: read %q at line %d: %w", sessionID, lineno, readErr)
 		}
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
@@ -126,21 +128,21 @@ func (s *Store) load(sessionID string) (*fileData, error) {
 		}
 		var rec wireRecord
 		if err := json.Unmarshal(line, &rec); err != nil {
-			return nil, fmt.Errorf("sessionsjsonl: invalid record: %w", err)
+			return nil, fmt.Errorf("sessionsjsonl: invalid record at line %d: %w", lineno, err)
 		}
 		switch rec.Type {
 		case "session":
 			if rec.ID != "" && rec.ID != sessionID {
-				return nil, fmt.Errorf("sessionsjsonl: session id %q does not match file %q", rec.ID, sessionID)
+				return nil, fmt.Errorf("sessionsjsonl: session id %q does not match file %q at line %d", rec.ID, sessionID, lineno)
 			}
 			d.sess.CWD, d.sess.CreatedAt = rec.CWD, rec.CreatedAt
 		case "entry":
 			if rec.Entry != nil {
 				if rec.Entry.ID == "" {
-					return nil, fmt.Errorf("sessionsjsonl: entry has empty id")
+					return nil, fmt.Errorf("sessionsjsonl: entry has empty id at line %d", lineno)
 				}
 				if _, exists := entryIDs[rec.Entry.ID]; exists {
-					return nil, fmt.Errorf("sessionsjsonl: duplicate entry id %q", rec.Entry.ID)
+					return nil, fmt.Errorf("sessionsjsonl: duplicate entry id %q at line %d", rec.Entry.ID, lineno)
 				}
 				entryIDs[rec.Entry.ID] = struct{}{}
 				rec.Entry.SessionID = sessionID

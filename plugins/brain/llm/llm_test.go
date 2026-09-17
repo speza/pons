@@ -8,6 +8,7 @@ import (
 
 	"github.com/samperrin/pons"
 	"github.com/samperrin/pons/protocol"
+	"github.com/samperrin/pons/sessions"
 )
 
 // fakeClient is a scripted provider for testing the brain logic without HTTP.
@@ -292,5 +293,23 @@ func TestToolSpecsReachTheModel(t *testing.T) {
 	b.NextActions(context.Background(), protocol.Observation{Turn: 1})
 	if len(fake.capturedTools) != 1 || fake.capturedTools[0].Kind != "bash" {
 		t.Fatalf("tools not passed to client: %+v", fake.capturedTools)
+	}
+}
+
+func TestResumePreservesLargeInteger(t *testing.T) {
+	const raw = `{"value":9007199254740993}`
+	turns := TurnsFromEntries([]sessions.Entry{{
+		Kind:    sessions.KindAction,
+		Payload: []byte(`[{"id":"a","kind":"tool","args":` + raw + `}]`),
+	}})
+	if len(turns) != 1 {
+		t.Fatalf("turns: %+v", turns)
+	}
+	use, ok := turns[0].Blocks[0].(ToolUse)
+	if !ok {
+		t.Fatalf("block: %#v", turns[0].Blocks[0])
+	}
+	if got := string(stringify(use.Input)); got != raw {
+		t.Fatalf("resume lost numeric precision: got %s, want %s", got, raw)
 	}
 }

@@ -123,7 +123,10 @@ func (p *FS) readFile(ctx context.Context, a protocol.Action) (protocol.ToolResu
 	}
 
 	limit := p.maxReadBytes()
-	data, truncated := readBounded(f, limit)
+	data, truncated, rerr := readBounded(f, limit)
+	if rerr != nil {
+		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: rerr.Error()}, nil
+	}
 	if !utf8.Valid(data) {
 		return protocol.ToolResult{ActionID: a.ID, OK: false,
 			Error: fmt.Sprintf("%s is not UTF-8 text (binary file); use bash to inspect it", path)}, nil
@@ -138,12 +141,16 @@ func (p *FS) readFile(ctx context.Context, a protocol.Action) (protocol.ToolResu
 // readBounded reads at most limit bytes (limit < 0 = unlimited) and reports
 // whether content was cut off. Reading beyond the limit by one chunk keeps
 // the truncation signal reliable even if the stat size is stale.
-func readBounded(f *os.File, limit int) (data []byte, truncated bool) {
+// Read errors are returned so a partial read is never reported as success.
+func readBounded(f *os.File, limit int) (data []byte, truncated bool, err error) {
 	if limit < 0 {
-		data, _ = io.ReadAll(f)
-		return data, false
+		data, err = io.ReadAll(f)
+		return data, false, err
 	}
-	data, _ = io.ReadAll(io.LimitReader(f, int64(limit)+1))
+	data, err = io.ReadAll(io.LimitReader(f, int64(limit)+1))
+	if err != nil {
+		return nil, false, err
+	}
 	if len(data) > limit {
 		cut := data[:limit]
 		// Trim a trailing partial rune so valid text is not mistaken for
@@ -151,9 +158,9 @@ func readBounded(f *os.File, limit int) (data []byte, truncated bool) {
 		for len(cut) > 0 && !utf8.Valid(cut) {
 			cut = cut[:len(cut)-1]
 		}
-		return cut, true
+		return cut, true, nil
 	}
-	return data, false
+	return data, false, nil
 }
 
 func (p *FS) writeFile(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
@@ -176,7 +183,13 @@ func (p *FS) writeFile(ctx context.Context, a protocol.Action) (protocol.ToolRes
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	// Atomic replace like edit_file, preserving the existing mode so a
+	// write does not silently drop executable bits (new files: 0644).
+	mode := os.FileMode(0o644)
+	if info, serr := os.Stat(path); serr == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := writeAtomic(path, []byte(content), mode); err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 	}
 	return protocol.ToolResult{ActionID: a.ID, OK: true, Output: "wrote " + path}, nil
@@ -208,6 +221,35 @@ func (p *FS) listDir(ctx context.Context, a protocol.Action) (protocol.ToolResul
 
 func denied(a protocol.Action, err error) protocol.ToolResult {
 	return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}
+}
+
+// writeAtomic replaces path via a temp file in the same directory plus a
+// rename, so concurrent readers never see a half-written file. Mirrors
+// the edit plugin's writer (same-dir temp is required: the directory must
+// already exist).
+func writeAtomic(path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".pons-fs-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func invalidArgs(a protocol.Action, err error) protocol.ToolResult {

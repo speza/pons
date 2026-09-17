@@ -32,6 +32,10 @@ const KindBash protocol.ActionKind = "bash"
 // maxTimeoutSeconds caps per-call timeouts (pi caps too).
 const maxTimeoutSeconds = 600
 
+// maxFullFileBytes bounds the full-output spill file so one truncated call
+// cannot fill /tmp; larger outputs keep the tail (see saveFull).
+const maxFullFileBytes = 8 << 20
+
 // Run is the action constructor. timeoutSecs = 0 means no per-call timeout.
 func Run(command string, timeoutSecs int) protocol.Action {
 	args := map[string]any{"command": command}
@@ -186,7 +190,7 @@ func AsExecResult(tr protocol.ToolResult) (ExecExtras, bool) {
 }
 
 func truncateOutput(s string, maxLines, maxBytes int) (string, *ExecExtras) {
-	result, dropped, truncated := s, 0, false
+	result, droppedLines, truncated := s, 0, false
 
 	lines := strings.Split(s, "\n")
 	trailingNewline := s != "" && strings.HasSuffix(s, "\n")
@@ -194,14 +198,16 @@ func truncateOutput(s string, maxLines, maxBytes int) (string, *ExecExtras) {
 		lines = lines[:len(lines)-1]
 	}
 	if len(lines) > maxLines {
-		dropped = len(lines) - maxLines
-		result = strings.Join(lines[dropped:], "\n")
+		droppedLines = len(lines) - maxLines
+		result = strings.Join(lines[droppedLines:], "\n")
 		if trailingNewline {
 			result += "\n"
 		}
 		truncated = true
 	}
+	bytesDropped := 0
 	if len(result) > maxBytes {
+		pre := result
 		cut := len(result) - maxBytes
 		if nl := strings.IndexByte(result[cut:], '\n'); nl >= 0 {
 			cut += nl + 1
@@ -212,23 +218,48 @@ func truncateOutput(s string, maxLines, maxBytes int) (string, *ExecExtras) {
 				cut++
 			}
 		}
+		droppedLines += strings.Count(pre[:cut], "\n")
+		bytesDropped = len(pre) - len(pre[cut:])
 		result = result[cut:]
 		truncated = true
 	}
 	if !truncated {
 		return s, nil
 	}
-	extras := &ExecExtras{Truncated: true, DroppedLines: dropped}
+	extras := &ExecExtras{Truncated: true, DroppedLines: droppedLines}
+	note := ""
+	switch {
+	case droppedLines > 0:
+		note = fmt.Sprintf("%d earlier lines truncated", droppedLines)
+	case bytesDropped > 0:
+		// Single huge line with no newline in range: lines dropped is
+		// zero but bytes were still cut.
+		note = fmt.Sprintf("%d earlier bytes truncated", bytesDropped)
+	default:
+		note = "output truncated"
+	}
 	if full, err := saveFull(s); err == nil {
 		extras.FullOutput = full
-		result = fmt.Sprintf("…[%d earlier lines truncated; full output: %s]\n%s", dropped, full, result)
+		result = fmt.Sprintf("…[%s; full output: %s]\n%s", note, full, result)
 	} else {
-		result = fmt.Sprintf("…[%d earlier lines truncated]\n%s", dropped, result)
+		result = fmt.Sprintf("…[%s]\n%s", note, result)
 	}
 	return result, extras
 }
 
 func saveFull(s string) (string, error) {
+	// Bound the spill so one truncated call cannot fill /tmp; larger
+	// outputs keep the tail, matching what the model sees.
+	if len(s) > maxFullFileBytes {
+		s = s[len(s)-maxFullFileBytes:]
+		if nl := strings.IndexByte(s, '\n'); nl >= 0 {
+			s = s[nl+1:]
+		} else {
+			for len(s) > 0 && !utf8.RuneStart(s[0]) {
+				s = s[1:]
+			}
+		}
+	}
 	f, err := os.CreateTemp("", "pons-bash-*.log")
 	if err != nil {
 		return "", err

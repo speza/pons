@@ -246,3 +246,25 @@ func TestFileIsTheTranscript(t *testing.T) {
 		t.Fatalf("file not self-describing:\n%s", raw)
 	}
 }
+
+func TestCorruptRecordErrorNamesLine(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	sess, err := s.CreateSession(ctx, "/tmp/ws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(s.file(sess.ID), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Line 2 is corrupt; the error must say so for debuggability.
+	if _, err := f.WriteString("{not json}\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	_, err = s.GetSession(ctx, sess.ID)
+	if err == nil || !strings.Contains(err.Error(), "line 2") {
+		t.Fatalf("expected line-numbered error, got: %v", err)
+	}
+}
