@@ -114,6 +114,18 @@ External tool providers are supplied by the hands-side plugin runtime in
 ADR-0007. That runtime uses the same action and result contracts as in-process
 hands.
 
+### 7. Brain/hands is architectural vocabulary, not the whole API taxonomy
+
+**Brain** and **hands** name the core separation: planning and interpretation
+on one side, execution on the other. They remain useful explanatory and
+package-level terms, but new public APIs should prefer neutral names such as
+control/planning, tool/execution, runtime, execution environment, message, and
+provider.
+
+The anatomy metaphor is not extended to channels, schedulers, sandboxes, or
+other orchestration components. Existing names remain stable unless a later
+breaking change has a concrete benefit.
+
 ## Consequences
 
 **Positive**
