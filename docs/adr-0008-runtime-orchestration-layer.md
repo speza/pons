@@ -1,8 +1,8 @@
 # ADR-0008: Long-lived orchestration is a pluggable runtime above the pons kernel
 
-**Status:** Accepted
+**Status:** Accepted; persistence and client synchronization refined by ADR-0010
 **Date:** 2026-09-18
-**Related:** ADR-0001, ADR-0002, ADR-0005, ADR-0007
+**Related:** ADR-0001, ADR-0002, ADR-0005, ADR-0007, ADR-0010
 
 ## Context
 
@@ -115,7 +115,8 @@ The first runtime composition is:
 - the CLI as an HTTP client rather than a separate transport;
 - one process with per-conversation serialization;
 - one conversation per channel conversation/thread; and
-- a durable inbox and outbox using local JSON state.
+- a durable inbox and outbox in the transactional conversation store selected
+  by ADR-0010.
 
 The public API calls the resource a **conversation**. Its opaque identifier is
 also the underlying pons session identifier in v1; the storage package may
@@ -126,6 +127,7 @@ The first HTTP shape is:
 
 ```text
 POST /v1/conversations
+GET  /v1/conversations/{id}
 GET  /v1/conversations/{id}/events
 POST /v1/conversations/{id}/messages
 ```
@@ -133,11 +135,19 @@ POST /v1/conversations/{id}/messages
 Conversation creation is server-owned. A message uses a `parts` array even
 though v1 accepts only `{type: "text"}` parts. The message endpoint is
 asynchronous and returns `202 Accepted`; an idempotency key identifies retries.
-SSE is a separate subscription primitive. The CLI opens it before posting a
-message, while reconnecting clients use event identity/current durable state.
+The conversation `GET` returns a renderable snapshot and its event cursor. SSE
+is a separate subscription primitive. The CLI may open it before posting a
+message; a reconnecting client first renders a snapshot and then subscribes
+after that snapshot's cursor. Durable changes are replayable, while token
+deltas and progress are transient.
 
 The initial HTTP server is local-only. Exposing it beyond loopback requires a
 future authentication decision.
+
+HTTP and SSE are one transport adapter, not manager concerns. The runtime
+surface exposes conversation creation, submission, coherent snapshots, and
+event subscriptions using provider-neutral types. Native HTTP/SSE lives in
+`runtime/httptransport`; future protocols translate at the same boundary.
 
 ### 5. Messages steer only at safe turn boundaries
 
@@ -177,11 +187,10 @@ and cancellation are separate lifecycle controls.
 
 ### 7. Persistence and crash recovery are explicit
 
-The transcript remains the durable conversation history. Runtime operational
-state is separate and is stored as an atomically replaced JSON snapshot per
-conversation. It contains pending inbox entries, processing state, outbox
-entries, and inbound deduplication IDs. The runtime is single-process in v1;
-multiple processes require a shared store with atomic claims or leases.
+Semantic messages are the durable conversation history and are read directly
+for both LLM hydration and client snapshots. Submissions, runs, and tool calls
+own operational state. These records and a client event outbox share one
+transactional store, as specified by ADR-0010.
 
 The persistence ordering for a tool turn is:
 
@@ -201,16 +210,18 @@ automatically retries a tool action.
 
 LLM provider requests may be retried with backoff. An incomplete streamed
 assistant response is discarded and regenerated; no tool call from an
-incomplete response is executed. Token and tool-progress events are live and
-best-effort. The completed assistant response and current runtime state are
-durable and replayable; reconnecting clients need not receive old token
-deltas.
+incomplete response is executed. Token deltas, tool progress, and heartbeats
+are live, best-effort, and never part of the durable event outbox. Complete
+assistant messages, tool intent/results, and current run state are durable.
+Reconnect reconstructs the UI from a conversation snapshot, not historical
+token deltas or a full event replay.
 
-### 8. Channels remain runtime plugins
+### 8. Channels remain runtime adapters
 
-The HTTP channel is the first built-in transport. Future channels and triggers
-adapt to the normalized runtime message model. A scheduler is another inbound
-source and follows the same message-to-agent path.
+The HTTP channel is the first built-in transport adapter. Future channels and
+triggers adapt to the normalized runtime message model. They are not core
+plugins: a scheduler is another inbound adapter and follows the same
+message-to-agent path.
 
 Cross-channel identity linking, handoff, and conversation forking are deferred.
 When eventually added, handoff will fork a completed active transcript path
@@ -226,9 +237,9 @@ effects.
   request/reply handling difficult.
 - **Use a persistent brain while idle:** not selected for v1. Idle cores and
   brains are torn down; the runtime hydrates them from the conversation.
-- **Use JSONL for mutable runtime state:** not selected for v1. The transcript
-  is append-only JSONL, but queue and delivery state is a small mutable JSON
-  snapshot with atomic replacement.
+- **Use JSONL for mutable runtime state:** not selected. ADR-0010 replaces the
+  original JSONL-plus-JSON baseline with implemented transactional semantic
+  and operational state plus an event outbox.
 - **Build cross-channel continuation immediately:** not selected. Channel
   conversation identity is a safer initial session boundary than guessing
   identity or context across transports.
@@ -237,8 +248,8 @@ effects.
 
 - pons can remain a small, useful agent harness without committing to a
   particular messaging product.
-- The first always-on runtime can be implemented and tested locally without
-  authentication, a database, or multiple workers.
+- The first always-on runtime is local and single-process; it uses SQLite and
+  loopback-only HTTP without remote authentication.
 - The same normalized message path supports human messages, future webhooks,
   and future schedules.
 - Durable inbox recovery must distinguish incomplete agent processing from
@@ -253,6 +264,8 @@ effects.
 ## References
 
 - `docs/runtime-v1.md` — concrete v1 runtime and HTTP design
+- `docs/adr-0010-runtime-state-and-client-synchronization.md` — transactional
+  runtime state, snapshots, durable events, and transient streaming
 - `core.go` — finite agent loop and core plugin composition
 - `protocol/` — brain/hands wire types
 - `sessions/` — transcript and session storage contract

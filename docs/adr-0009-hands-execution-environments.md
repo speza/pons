@@ -36,7 +36,7 @@ pons host: brain + Core + policy
               |
        environment provider
               |
-       hands runtime endpoint
+       tool host endpoint
               |
        fs / edit / bash / external hands
 ```
@@ -46,11 +46,11 @@ any one remote service. An environment provider owns provisioning, policy,
 connectivity, health, and teardown. The host continues to own action
 correlation and execution deadlines.
 
-### 2. One complete hands runtime runs inside an environment
+### 2. One complete tool host runs inside an environment
 
-The environment contains one `pons-hands` runtime with the built-in hands
+The environment contains one `pons-hands` tool host with the built-in hands
 capabilities and any explicitly composed external hands providers. The host
-registers the runtime's discovered catalog as proxy tools in `Core`.
+registers the tool host's discovered catalog as proxy tools in `Core`.
 
 Individual tools are not independently sandboxed in v1. A single environment
 provides the workspace and process context shared by the hands in one active
@@ -81,7 +81,7 @@ The host remains responsible for:
 ### 4. Seatbelt is the first local backend
 
 The first environment backend targets macOS Seatbelt. It launches the complete
-hands runtime under a generated policy profile and connects its stdio to the
+tool host under a generated policy profile and connects its stdio to the
 existing external host adapter.
 
 The default profile grants:
@@ -89,14 +89,17 @@ The default profile grants:
 - read/write access only to the explicitly selected workspace;
 - read-only access to required system binaries and libraries;
 - a temporary scratch area;
-- process execution needed by the hands runtime and configured commands;
+- process execution needed by the tool host and configured commands;
 - no network access;
 - no host home-directory access;
 - no inherited credentials or ambient environment; and
 - host-enforced time and resource limits where available.
 
 Extra paths, network access, secrets, and mounts require explicit deployment
-policy. Seatbelt is a baseline for both accidental and hostile hands code; it
+policy. Activating an external provider explicitly adds its manifest,
+executable, existing path arguments, and configured PATH directories as
+read-only policy inputs; it does not grant general home-directory access.
+Seatbelt is a baseline for both accidental and hostile hands code; it
 is not a claim that every local OS configuration provides VM-strength
 isolation.
 
@@ -108,7 +111,7 @@ container internally.
 ### 5. The workspace is explicit and persistent
 
 A local environment receives the real workspace path explicitly. The policy
-allows the hands runtime to operate on that path and does not infer access
+allows the tool host to operate on that path and does not infer access
 from the child working directory.
 
 Workspace changes persist after an environment is torn down. The environment
@@ -118,7 +121,7 @@ an equivalent workspace contract before it can be used as a backend.
 
 ### 6. Credentials and network access are opt-in
 
-The hands runtime receives an empty environment by default. Credentials are
+The tool host receives an empty environment by default. Credentials are
 not copied into the environment implicitly. A future host-side broker may
 provide scoped credentials for a specific action or provider.
 
@@ -173,4 +176,6 @@ residency.
 - `docs/adr-0007-language-neutral-plugin-runtime.md` — external hands wire
   protocol
 - `plugins/external/` — current persistent tool-provider host
+- `environment/` — provider/session contract and Seatbelt implementation
+- `internal/toolhost/` — built-in tool catalog served by `pons-hands`
 - `protocol/` — action and result types

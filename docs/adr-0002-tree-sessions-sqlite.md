@@ -1,8 +1,13 @@
 # ADR-0002: Session trees use append-only JSONL (SQLite is not selected)
 
-**Status:** Accepted
+**Status:** Superseded by ADR-0010 and ADR-0011
 **Date:** 2026-09-15
 **Related:** ADR-0001, ADR-0005
+
+This decision records the earlier finite harness. The server-centred CLI no
+longer has a direct execution path or uses this store. ADR-0010 selects the
+transactional runtime store; JSONL is now a potential export format rather
+than application persistence.
 
 ## Context
 
@@ -72,6 +77,4 @@ not impose this location.
 
 ## References
 
-- `sessions/sessions.go` — tree model and `Store`
-- `plugins/sessionsjsonl/` — append-only JSONL engine
-- `plugins/sessionrecorder/` — turn recording and `PONS_SESSION_FILE`
+- ADR-0011 records removal of the session model, JSONL engine, and recorder.

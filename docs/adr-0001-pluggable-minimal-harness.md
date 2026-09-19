@@ -1,8 +1,12 @@
 # ADR-0001: pons is a minimal, plugin-extensible agent harness
 
-**Status:** Accepted
+**Status:** Accepted for the core; persistence superseded by ADR-0010 and ADR-0011
 **Date:** 2025-09-14
 **Related:** ADR-0003, ADR-0004, ADR-0005, ADR-0006, ADR-0007
+
+The brain/hands and finite-core decisions remain current. ADR-0011 removes the
+session-recorder persistence composition described below from the application.
+It is retained here as historical context rather than as current guidance.
 
 ## Context
 

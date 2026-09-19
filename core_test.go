@@ -2,6 +2,7 @@ package pons
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -89,6 +90,22 @@ func TestToolResultIdentityIsOwnedByCore(t *testing.T) {
 	}
 }
 
+func TestExecuteDispatchesStandaloneHandsAction(t *testing.T) {
+	c := New()
+	if err := c.AddTool("tool", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+		return protocol.ToolResult{ActionID: "forged", Kind: "forged", OK: true, Output: "done"}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := c.Execute(context.Background(), protocol.Action{ID: "call", Kind: "tool", Args: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.Output != "done" || result.ActionID != "call" || result.Kind != "tool" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
 // alwaysBrain continues regardless of results.
 type continueBrain struct{ fakeBrain }
 
@@ -160,6 +177,30 @@ func TestOnTurnAndWraps(t *testing.T) {
 	}
 	if len(turns) != 2 || len(turns[0].Results) != 1 || turns[0].Results[0].Output != "pong:1" {
 		t.Fatalf("turn hooks wrong: %+v", turns)
+	}
+}
+
+func TestCheckedPlanFailurePreventsToolExecution(t *testing.T) {
+	c := New()
+	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{{ID: "call", Kind: "tool"}}}})
+	executed := false
+	if err := c.AddTool("tool", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+		executed = true
+		return protocol.ToolResult{OK: true}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	c.OnEventError(func(event Event) error {
+		if event.Type == EventPlan {
+			return errors.New("durable event write failed")
+		}
+		return nil
+	})
+	if _, err := c.Run(context.Background(), "goal"); err == nil || !strings.Contains(err.Error(), "durable event write failed") {
+		t.Fatalf("run error = %v", err)
+	}
+	if executed {
+		t.Fatal("tool executed after checked plan event failed")
 	}
 }
 
@@ -296,7 +337,7 @@ func TestRunResultAndEvents(t *testing.T) {
 	}
 	want := []EventType{
 		EventAgentStart, EventTurnStart,
-		EventActionStart, EventActionEnd, EventTurnEnd,
+		EventPlan, EventActionStart, EventActionEnd, EventTurnEnd,
 		EventTurnStart, EventTurnEnd, EventFinish, // finish turn is recorded too
 	}
 	if len(types) != len(want) {

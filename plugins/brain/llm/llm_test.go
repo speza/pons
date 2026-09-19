@@ -8,7 +8,6 @@ import (
 
 	"github.com/samperrin/pons"
 	"github.com/samperrin/pons/protocol"
-	"github.com/samperrin/pons/sessions"
 )
 
 // fakeClient is a scripted provider for testing the brain logic without HTTP.
@@ -17,6 +16,13 @@ func TestToolInputPreservesLargeInteger(t *testing.T) {
 	input := decodeToolInput([]byte(raw))
 	if got := string(stringify(input)); got != raw {
 		t.Fatalf("tool input lost numeric precision: got %s, want %s", got, raw)
+	}
+}
+
+func TestSystemPromptDoesNotAdvertiseLegacyTranscript(t *testing.T) {
+	b := &Brain{}
+	if prompt := b.systemPrompt(); strings.Contains(prompt, "PONS_SESSION_FILE") || strings.Contains(prompt, "NDJSON") {
+		t.Fatalf("legacy transcript leaked into system prompt: %q", prompt)
 	}
 }
 
@@ -54,12 +60,16 @@ func TestBrainMapsToolUseToActions(t *testing.T) {
 	ctx := context.Background()
 	obs := protocol.Observation{Turn: 1, Message: "g", Workspace: "/w"}
 
-	actions, err := b.NextActions(ctx, obs)
+	plan, err := b.NextPlan(ctx, obs)
 	if err != nil {
 		t.Fatal(err)
 	}
+	actions := plan.Actions
 	if len(actions) != 1 || actions[0].Kind != "bash" || actions[0].ID != "call_1" {
 		t.Fatalf("actions: %+v", actions)
+	}
+	if len(plan.Parts) != 2 || plan.Parts[0].Type != pons.AssistantPartText || plan.Parts[0].Text != "Let me look around." || plan.Parts[1].Type != pons.AssistantPartToolCall || plan.Parts[1].Action.ID != "call_1" {
+		t.Fatalf("assistant parts: %+v", plan.Parts)
 	}
 	var input map[string]any
 	if err := json.Unmarshal(actions[0].Args, &input); err != nil {
@@ -293,23 +303,5 @@ func TestToolSpecsReachTheModel(t *testing.T) {
 	b.NextActions(context.Background(), protocol.Observation{Turn: 1})
 	if len(fake.capturedTools) != 1 || fake.capturedTools[0].Kind != "bash" {
 		t.Fatalf("tools not passed to client: %+v", fake.capturedTools)
-	}
-}
-
-func TestResumePreservesLargeInteger(t *testing.T) {
-	const raw = `{"value":9007199254740993}`
-	turns := TurnsFromEntries([]sessions.Entry{{
-		Kind:    sessions.KindAction,
-		Payload: []byte(`[{"id":"a","kind":"tool","args":` + raw + `}]`),
-	}})
-	if len(turns) != 1 {
-		t.Fatalf("turns: %+v", turns)
-	}
-	use, ok := turns[0].Blocks[0].(ToolUse)
-	if !ok {
-		t.Fatalf("block: %#v", turns[0].Blocks[0])
-	}
-	if got := string(stringify(use.Input)); got != raw {
-		t.Fatalf("resume lost numeric precision: got %s, want %s", got, raw)
 	}
 }

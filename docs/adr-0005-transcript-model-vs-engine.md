@@ -1,8 +1,13 @@
 # ADR-0005: The transcript model is a contract; engine and location are composition choices
 
-**Status:** Accepted
+**Status:** Superseded by ADR-0010 and ADR-0011
 **Date:** 2026-09-15
 **Related:** ADR-0001, ADR-0002, ADR-0003
+
+This decision records the earlier finite harness and its session-tree
+contract. The server-centred application no longer uses that composition.
+ADR-0010 defines its transactional store; JSONL is an export rather than a
+second authoritative copy.
 
 ## Context
 
@@ -79,7 +84,6 @@ inspection and resume.
 
 ## References
 
-- `sessions/sessions.go` — transcript model and `Store`
-- `plugins/sessionsjsonl/` — JSONL engine
-- `plugins/sessionrecorder/` — recording and transcript publication
 - `docs/adr-0002-tree-sessions-sqlite.md` — concrete tree/storage choice
+- `docs/adr-0011-server-centred-runtime-storage.md` — removal of the legacy
+  session stack

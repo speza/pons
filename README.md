@@ -6,9 +6,9 @@ commands flow down, sensory observations flow up. The reflex centers live
 there.
 
 That is the whole architecture. pons is a minimal, pluggable agent harness in
-Go: a ~400-line core (the bridge), one dependency-free JSON seam
-(`protocol/`), and everything else — tools, brains, sessions, policy — is a
-plugin you compose. The reasoning **brain** and the executing **hands** are
+Go: a small core (the bridge), one dependency-free JSON seam (`protocol/`),
+and explicit adapters around it. Tools and brains are plugins; runtime
+storage and transports are injected infrastructure. The reasoning **brain** and the executing **hands** are
 structurally separated; the pons is what connects them:
 actions down, observations up, nothing in between improvises.
 
@@ -39,7 +39,7 @@ schedulers, or other runtime components.
 └──────────────┬─────────────────────────────────────────────┘
                │ protocol.Action / protocol.ToolResult
 ┌──────────────┴────────────── hands ───────────────────────┐
-│ Real execution: fs, edit, bash, sessions. Jailed or       │
+│ Real execution: fs, edit, bash. Jailed or isolated per  │
 │ allow-listed per plugin.                                  │
 └───────────────────────────────────────────────────────────┘
 ```
@@ -54,7 +54,7 @@ Key invariants:
    boundary — inside the producing tool plugin, or middleware over the port.
 4. **`protocol/` is the seam.** Pure, dependency-free JSON types; the same
    `Action`/`ToolResult` contract serves in-process hands and the external
-   hands-side runtime (ADR-0004 and ADR-0007).
+   hands-side tool host (ADR-0004 and ADR-0007).
 
 ## Packages
 
@@ -62,9 +62,11 @@ Key invariants:
 |---|---|
 | `protocol/` | Wire contract: `Action`, `ToolResult`, `Observation`. Core reserves only the `finish` kind |
 | `core.go` | The turn loop, the two ports, and the plugin seam. Imports only `protocol` |
-| `sessions/` | Transcript data-model contract (`Store` interface, entry tree) — engine-independent |
-| `plugins/sessionsjsonl` | **Default transcript engine**: append-only NDJSON, one file per session — the file IS the transcript |
-| `plugins/sessionrecorder` | Records turns into any `sessions.Store`; publishes the transcript path via `$PONS_SESSION_FILE` |
+| `runtime/` | Transport-independent durable conversations, transactional `Store` contract, run scheduling, workspace leases, and event subscriptions |
+| `runtime/sqlite` | SQLite implementation of `runtime.Store` |
+| `runtime/httptransport` | Native HTTP/SSE server and client adapter over the runtime |
+| `environment/` | Provider/session seam and macOS Seatbelt hands environment |
+| `internal/toolhost` | Composes and serves the built-in tool catalog behind the hands boundary |
 | `plugins/fs` | `read_file`, `write_file`, `list_dir` — symlink-resilient workspace jail |
 | `plugins/edit` | `edit_file` — SEARCH/REPLACE patch application (exact match, unique, fuzzy fallback, CRLF/BOM aware, unified diff in the result payload) |
 | `plugins/bash` | `bash` — unrestricted command execution (per-call timeout, output tail-truncation, full output to temp file). Trust comes from composition |
@@ -73,7 +75,8 @@ Key invariants:
 | `plugins/brain/llm` | Real LLM brain: one model call per turn, tool schemas auto-discovered from registered plugins; context compaction; resume seeding; provider failover chain |
 | `plugins/brain/scripted` | Deterministic brain (LLM stand-in for CI) |
 | `internal/jail`, `internal/unidiff` | Shared libraries between plugins (code, not registrations) |
-| `cmd/pons/` | The CLI: LLM brain, interactive mode, `--resume`, compaction |
+| `cmd/pons/` | Bundled runtime+client CLI, long-lived server, and standalone HTTP/SSE client |
+| `cmd/pons-hands/` | Standalone built-in tool host served over `tool_provider/v1` |
 | `cmd/pons-demo/` | Deterministic scripted demo |
 
 ## Even base tools are plugins
@@ -109,24 +112,22 @@ result, err := core.Run(ctx, message)   // plan → act → reflect → repeat
 **Context compaction** lives in the LLM brain: when the conversation exceeds
 a size estimate (`--compact-chars`, default ~400k chars ≈ 100k tokens;
 negative disables), older turns are summarized into a single user message,
-keeping the most recent turns verbatim. The transcript file is never touched
-— it keeps everything, and the brain reaches details that fell out of
-context by grepping `$PONS_SESSION_FILE` like any file on disk.
+keeping the most recent turns verbatim. Canonical runtime messages remain
+unchanged in SQLite; compaction only changes the provider context for a run.
 
-## Transcripts
+## Runtime persistence
 
-Plain NDJSON files, one per session, no engine required to read them:
+The server stores canonical semantic messages, submissions, runs, tool calls,
+and its durable client-event outbox in one SQLite database:
 
 ```
-~/.pons/sessions/<munged-project-path>/<session-id>.jsonl
+~/.pons/runtime/<munged-project-path>/runtime.db
 ```
 
-- Self-describing records: session header, entries, branch markers
-- Greppable, `tail -f`-able while the agent runs, `jq`-able, diffable
-- `--resume` continues one by id (or `latest`); the file is never rewritten —
-  branching appends, abandoned branches stay queryable
-- `sessions.Store.Search` remains a storage-level operation; the live agent
-  inspects the published transcript with bash
+The runtime reads messages directly for LLM hydration and client snapshots;
+it does not rebuild either view by replaying events. SQLite is behind an
+injected `runtime.Store` boundary. An inspectable JSONL form can be added as an
+export without becoming a second source of truth.
 
 ## Development checks
 
@@ -152,39 +153,64 @@ go test ./...            # everything; no API keys needed
 go run ./cmd/pons-demo     # scripted brain
 
 export ANTHROPIC_API_KEY=sk-ant-…
-go run ./cmd/pons                       # Anthropic
+go run ./cmd/pons -message "inspect this project" # bundled server + client
 
 export OPENAI_API_KEY=sk-…
-go run ./cmd/pons -provider openai      # OpenAI or any compatible server
-go run ./cmd/pons -provider openai -base-url http://127.0.0.1:11434/v1   # Ollama et al.
+go run ./cmd/pons -provider openai -message "inspect this project"
+go run ./cmd/pons -provider openai -base-url http://127.0.0.1:11434/v1 -message "inspect this project"
 
-go run ./cmd/pons -provider codex -login   # one-time: browser login with
+go run ./cmd/pons -provider codex -login # one-time: browser login with
                                         # your ChatGPT account (PKCE flow)
-go run ./cmd/pons -provider codex       # then just use it
+go run ./cmd/pons -provider codex -i    # bundled interactive mode
 
-# interactive: one task per line, conversation continues in-process
-go run ./cmd/pons -provider codex -i
+# Long-lived local runtime. The server owns conversations and agent runs;
+# clients submit messages and consume SSE events.
+go run ./cmd/pons serve -provider codex
+go run ./cmd/pons client -message "inspect this project"
+go run ./cmd/pons client -conversation <id> -message "continue"
 
-# resume: continue the most recent session (brain context hydrated from
-# the transcript tree — no goal needed for a status/continuation run)
-go run ./cmd/pons -provider codex --resume latest
-go run ./cmd/pons -provider codex --resume <session-id> -message "next step…"
+# Build the hands-side host, then create one Seatbelt environment per run.
+go build -o .build/pons-hands ./cmd/pons-hands
+go run ./cmd/pons -provider codex -sandbox seatbelt \
+  -hands-command .build/pons-hands -message "inspect this project"
 ```
 
 Useful flags: `--workspace` (jail root; default: current directory),
-`--session-dir`, `--max-turns`, `--compact-chars`, `--plugin MANIFEST` (explicit
+`--state-dir`, `--max-turns`, `--compact-chars`, `--plugin MANIFEST` (explicit
 repeatable hands-side external plugin), `--plugin-path PATH` (safe PATH for
-interpreted plugin runtimes), `--debug` (raw tool inputs/outputs and provider
-turn details). Tool output caps are tunable at the composition: `--fs-read-bytes`
+interpreted plugin runtimes), `--sandbox seatbelt`, `--hands-command`, and
+`--debug` (raw tool inputs/outputs and provider turn details). Tool output caps
+are tunable at the composition: `--fs-read-bytes`
 (read_file cap; 0 = 256 KiB, negative = unlimited), `--bash-timeout`,
 `--bash-max-lines`, `--bash-max-bytes`, and `--plugin-max-result-bytes`
 (external tool result cap; 0 = 1 MiB). External children get an empty
 environment by default; use `--plugin-path` or an embedding
 `external.HostConfig{Path: ...}` for Node/Bun without inheriting credentials.
 
+With `--sandbox seatbelt`, each server-managed run starts a fresh `pons-hands`
+tool host under a generated macOS Seatbelt policy and closes it when the run
+becomes idle. The workspace persists; network and ambient credentials are
+denied unless explicitly configured. Without `--sandbox`, tools run in-process
+for development and platforms without the Seatbelt backend.
+
+`pons serve` runs the v1 orchestration server on `127.0.0.1:7337` by default.
+It durably accepts messages, serializes each conversation, enforces a global
+run limit and an exclusive lease for the workspace, hydrates a fresh brain for
+each active run, and streams events over SSE. Runtime state lives in
+`<state-dir>/runtime.db`; clients hydrate with
+`GET /v1/conversations/{id}` and then subscribe after its durable cursor.
+`pons client` is the HTTP/SSE client. When continuing an existing conversation
+it renders the canonical snapshot before subscribing after that snapshot's
+cursor; use `--server`, `--conversation`, and `--idempotency-key` to control
+connection, continuation, and safe retry behavior. The v1 server
+refuses non-loopback listen addresses. There is no separate direct execution
+or JSONL persistence path. With no subcommand, pons starts a server on an
+ephemeral loopback port, uses the same HTTP/SSE client path, and shuts the
+server down when the invocation or interactive session ends.
+
 Durable settings live in `~/.pons/config.json` (global defaults) and
 `.pons.json` in the workspace (project overrides); explicit flags win over
-both. Recognized keys: `provider`, `model`, `base_url`, `session_dir`,
+both. Recognized keys: `provider`, `model`, `base_url`, `state_dir`,
 `max_turns`, `compact_chars`, `fs_read_bytes`, `bash_timeout`,
 `bash_max_lines`, `bash_max_bytes`, `plugin_max_result_bytes`, `fallbacks`,
 and the multi-provider block: `providers` (array of
@@ -195,7 +221,7 @@ The default entry is the primary and the remaining entries back it up in
 listed order. The flat `provider`/`model`/`base_url` keys and `providers`
 are mutually exclusive. Decoding is strict: unknown keys, trailing data, or
 wrong types fail startup rather than being ignored. Invocation intent
-(`--message`, `--resume`, `-i`, `--debug`, `--login`) stays flag-only.
+(`--message`, `-i`, `--debug`, `--login`) stays flag-only.
 
 Provider failover: when the primary provider fails to complete a turn
 (outage, rate limit), the brain retries the same conversation on the next
@@ -251,26 +277,32 @@ The reasoning behind the big choices is recorded as ADRs in [`docs/`](docs/):
 | ADR | Decision | Status |
 |---|---|---|
 | [ADR-0001](docs/adr-0001-pluggable-minimal-harness.md) | Minimal pluggable harness, brain/hands separation | Accepted |
-| [ADR-0002](docs/adr-0002-tree-sessions-sqlite.md) | Session trees use append-only JSONL; SQLite is not selected | Accepted |
+| [ADR-0002](docs/adr-0002-tree-sessions-sqlite.md) | Earlier finite-harness JSONL session storage | Superseded by ADR-0010/0011 |
 | [ADR-0003](docs/adr-0003-tool-result-contract.md) | ToolResult: status envelope / canonical observation / typed plugin payloads | Accepted |
 | [ADR-0004](docs/adr-0004-sandboxed-hands-boundary.md) | Hands are the execution boundary; isolation is deployment policy | Accepted |
-| [ADR-0005](docs/adr-0005-transcript-model-vs-engine.md) | Transcript model is a contract; engine and location are composition choices | Accepted |
+| [ADR-0005](docs/adr-0005-transcript-model-vs-engine.md) | Earlier finite-harness transcript/storage separation | Superseded by ADR-0010 |
 | [ADR-0006](docs/adr-0006-concurrent-tool-execution.md) | Tool execution concurrent within a turn; record in call order | Accepted |
 | [ADR-0007](docs/adr-0007-language-neutral-plugin-runtime.md) | Language-neutral persistent external tool plugins | Accepted |
 | [ADR-0008](docs/adr-0008-runtime-orchestration-layer.md) | Long-lived orchestration runtime above the core; built-in chat/message path | Accepted |
 | [ADR-0009](docs/adr-0009-hands-execution-environments.md) | Provider-backed hands execution environments; Seatbelt first | Accepted |
+| [ADR-0010](docs/adr-0010-runtime-state-and-client-synchronization.md) | Transactional runtime messages/state, client snapshots, durable event outbox, transient token deltas | Accepted |
+| [ADR-0011](docs/adr-0011-server-centred-runtime-storage.md) | Server-centred execution; injected runtime store; legacy session stack removed | Accepted |
 
-The concrete first-runtime shape is described in [`docs/runtime-v1.md`](docs/runtime-v1.md), and the hands environment shape is described in [`docs/hands-environment-v1.md`](docs/hands-environment-v1.md).
+The concrete first-runtime shape and client synchronization contract are
+described in [`docs/runtime-v1.md`](docs/runtime-v1.md), and the hands
+environment shape is described in
+[`docs/hands-environment-v1.md`](docs/hands-environment-v1.md).
 
 ## Dependencies
 
-Two official LLM SDKs (`anthropic-sdk-go`, `openai-go`) and their transitive
-deps. Nothing else: no storage drivers, no cgo, no framework — the transcript
-layer is stdlib-only, and `pons` builds as a single static binary.
+The two official LLM SDKs (`anthropic-sdk-go`, `openai-go`), a pure-Go SQLite
+driver, and their transitive dependencies. The server uses the standard
+library HTTP stack and builds without cgo.
 
 ## Next
 
 - Streaming observations: text deltas and partial tool output on `OnEvent`
-- Deployment isolation for hands: configure the OS, container, or VM boundary described by ADR-0004
+- Linux and remote execution-environment providers behind the environment seam
+- Per-run execution-environment lifecycle in the long-lived runtime
 - Branch summaries + agent-driven branching
 - `go install`-able releases (the module is `github.com/samperrin/pons`)

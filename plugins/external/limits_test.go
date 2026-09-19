@@ -115,3 +115,17 @@ func TestMalformedAndOversizedFramesFailStartup(t *testing.T) {
 	}
 	_ = oversized.Close()
 }
+
+func TestCloseDrainsFastStartupStderr(t *testing.T) {
+	plugin, err := scriptManifest(t, `printf 'startup diagnostic\n' >&2`, external.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := plugin.Host().Start(context.Background()); err == nil {
+		t.Fatal("provider exit unexpectedly started")
+	}
+	_ = plugin.Close()
+	if stderr := plugin.Host().Stderr(); !strings.Contains(stderr, "startup diagnostic") {
+		t.Fatalf("stderr was not drained: %q", stderr)
+	}
+}

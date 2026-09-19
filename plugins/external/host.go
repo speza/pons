@@ -56,6 +56,10 @@ type HostConfig struct {
 	HostName    string
 	HostVersion string
 	Workspace   string
+	// WorkingDirectory overrides the manifest directory for the child. It is
+	// used by environment providers whose generated launcher has no manifest
+	// file but must start inside an explicitly selected workspace.
+	WorkingDirectory string
 
 	StartupTimeout  time.Duration
 	ShutdownTimeout time.Duration
@@ -245,7 +249,10 @@ func (h *Host) Start(ctx context.Context) error {
 
 	cmd := exec.Command(h.manifest.ResolvedEntrypoint(), h.manifest.Args...)
 	setProcessGroup(cmd)
-	cmd.Dir = h.manifest.Dir()
+	cmd.Dir = h.cfg.WorkingDirectory
+	if cmd.Dir == "" {
+		cmd.Dir = h.manifest.Dir()
+	}
 	if cmd.Dir == "" {
 		cmd.Dir = "."
 	}
@@ -833,6 +840,7 @@ func (h *Host) Close() error {
 		}
 		h.mu.Lock()
 		stdin, processDone := h.stdin, h.processDone
+		startedProcess := h.cmd != nil
 		h.mu.Unlock()
 		if stdin != nil {
 			_ = stdin.Close()
@@ -847,11 +855,29 @@ func (h *Host) Close() error {
 			_ = h.terminate()
 			<-processDone
 		}
+		// cmd.Wait closes the child pipes. Drain both readers before exposing
+		// final diagnostics so a fast startup failure cannot lose stderr.
+		if startedProcess && !waitForReaders(wait, h.readerDone, h.stderrDone) {
+			h.closeErr = errors.Join(h.closeErr, errors.New("external: timed out draining child output"))
+		}
 		if h.closeErr == nil && failed != nil {
 			h.closeErr = failed
 		}
 	})
 	return h.closeErr
+}
+
+func waitForReaders(timeout time.Duration, readers ...<-chan struct{}) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for _, done := range readers {
+		select {
+		case <-done:
+		case <-timer.C:
+			return false
+		}
+	}
+	return true
 }
 
 type frameReader struct {
