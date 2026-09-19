@@ -15,6 +15,14 @@ actions down, observations up, nothing in between improvises.
 Built brain/hands-first: reasoning never touches the machine, execution
 never reasons.
 
+## Terminology
+
+**Brain** and **hands** are the architectural metaphor: the brain plans and
+interprets, while the hands execute. New public APIs use neutral terms where
+possible: control/planning, tool/execution, runtime, execution environment,
+message, and provider. We do not extend the anatomy metaphor to channels,
+schedulers, or other runtime components.
+
 ## The separation contract
 
 ```
@@ -249,6 +257,10 @@ The reasoning behind the big choices is recorded as ADRs in [`docs/`](docs/):
 | [ADR-0005](docs/adr-0005-transcript-model-vs-engine.md) | Transcript model is a contract; engine and location are composition choices | Accepted |
 | [ADR-0006](docs/adr-0006-concurrent-tool-execution.md) | Tool execution concurrent within a turn; record in call order | Accepted |
 | [ADR-0007](docs/adr-0007-language-neutral-plugin-runtime.md) | Language-neutral persistent external tool plugins | Accepted |
+| [ADR-0008](docs/adr-0008-runtime-orchestration-layer.md) | Long-lived orchestration runtime above the core; built-in chat/message path | Accepted |
+| [ADR-0009](docs/adr-0009-hands-execution-environments.md) | Provider-backed hands execution environments; Seatbelt first | Accepted |
+
+The concrete first-runtime shape is described in [`docs/runtime-v1.md`](docs/runtime-v1.md), and the hands environment shape is described in [`docs/hands-environment-v1.md`](docs/hands-environment-v1.md).
 
 ## Dependencies
 
