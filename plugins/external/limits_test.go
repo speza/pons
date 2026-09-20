@@ -98,7 +98,8 @@ while :; do :; done`
 
 func TestMalformedAndOversizedFramesFailStartup(t *testing.T) {
 	malformed, err := scriptManifest(t, `read request
-printf 'not-json\n'`, external.Limits{})
+printf 'not-json\n'
+while :; do :; done`, external.Limits{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +109,8 @@ printf 'not-json\n'`, external.Limits{})
 	_ = malformed.Close()
 
 	oversized, err := scriptManifest(t, `read request
-awk 'BEGIN { for (i = 0; i < 2048; i++) printf "x"; printf "\n" }'`, external.Limits{MaxFrameBytes: 128})
+awk 'BEGIN { for (i = 0; i < 2048; i++) printf "x"; printf "\n" }'
+while :; do :; done`, external.Limits{MaxFrameBytes: 128})
 	if err != nil {
 		t.Fatal(err)
 	}
