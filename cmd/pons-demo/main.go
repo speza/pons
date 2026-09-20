@@ -1,9 +1,6 @@
-// Command pons-demo composes a complete agent entirely from plugins:
+// Command pons-demo composes a finite agent entirely from plugins:
 //
-//	core (loop) + fs + edit + bash + JSONL sessions + scripted brain
-//
-// The brain can inspect its own recorded session through bash over
-// $PONS_SESSION_FILE, just like a human can grep the transcript.
+//	core (loop) + fs + edit + bash + scripted brain
 package main
 
 import (
@@ -18,8 +15,6 @@ import (
 	"github.com/samperrin/pons/plugins/brain/scripted"
 	"github.com/samperrin/pons/plugins/edit"
 	"github.com/samperrin/pons/plugins/fs"
-	"github.com/samperrin/pons/plugins/sessionrecorder"
-	"github.com/samperrin/pons/plugins/sessionsjsonl"
 	"github.com/samperrin/pons/protocol"
 )
 
@@ -37,32 +32,16 @@ func main() {
 	seed := filepath.Join(ws, "notes.txt")
 	os.WriteFile(seed, []byte("alpha\nbeta\ngamma\n"), 0o644)
 
-	// Session store lives outside the workspace (sessions ≠ task files).
-	sessionDir, err := os.MkdirTemp("", "pons-sessions-*")
-	if err != nil {
-		panic(err)
-	}
-	defer os.RemoveAll(sessionDir)
-	store, err := sessionsjsonl.New(sessionDir)
-	if err != nil {
-		panic(err)
-	}
-	defer store.Close()
-
-	rec := sessionrecorder.New(store)
-	rec.TranscriptPath = store.SessionFile
-
-	// Compose the agent. Nothing else exists: no tools, no brain, no
-	// persistence beyond exactly these plugins.
+	// Compose the finite agent. Runtime persistence belongs to the server
+	// composition, not to a turn-observer plugin.
 	core := pons.New()
 	core.Workspace, core.MaxTurns, core.Log = ws, 10, logger
-	const goal = "Inspect notes.txt, write an uppercase copy, verify, review own session"
+	const goal = "Inspect notes.txt, write an uppercase copy, and verify it"
 
 	err = core.Use(
 		mustFS(ws),
 		mustEdit(ws),
 		bash.New(bash.Config{Root: ws, Timeout: 30, MaxLines: 200, MaxBytes: 50 * 1024}),
-		rec,
 		scripted.New(
 			scripted.Step{
 				Reason:  "Look at what's in the workspace",
@@ -79,10 +58,6 @@ func main() {
 			scripted.Step{
 				Reason:  "Verify with a command",
 				Actions: []protocol.Action{bash.Run("grep -c [A-Z] upper.txt", 10)},
-			},
-			scripted.Step{
-				Reason:  "Review own transcript with bash (plain NDJSON at $PONS_SESSION_FILE)",
-				Actions: []protocol.Action{bash.Run("grep -c delta $PONS_SESSION_FILE", 10)},
 			},
 		),
 	)
@@ -102,11 +77,9 @@ func main() {
 		fmt.Printf("finished after %d turn(s): %s\n", result.Turns, result.Answer)
 	}
 
-	// Prove the output exists and show the session tree is real.
+	// Prove the output exists.
 	out, _ := os.ReadFile(filepath.Join(ws, "upper.txt"))
 	fmt.Printf("\nfinal upper.txt:\n%s", out)
-
-	fmt.Println("\nsession transcript: plain NDJSON at $PONS_SESSION_FILE — greppable with bash, no export step")
 }
 
 func mustFS(ws string) *fs.FS {

@@ -97,7 +97,9 @@ while :; do :; done`
 }
 
 func TestMalformedAndOversizedFramesFailStartup(t *testing.T) {
-	malformed, err := scriptManifest(t, `printf 'not-json\n'`, external.Limits{})
+	malformed, err := scriptManifest(t, `read request
+printf 'not-json\n'
+while :; do :; done`, external.Limits{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +108,9 @@ func TestMalformedAndOversizedFramesFailStartup(t *testing.T) {
 	}
 	_ = malformed.Close()
 
-	oversized, err := scriptManifest(t, `awk 'BEGIN { for (i = 0; i < 2048; i++) printf "x"; printf "\n" }'`, external.Limits{MaxFrameBytes: 128})
+	oversized, err := scriptManifest(t, `read request
+awk 'BEGIN { for (i = 0; i < 2048; i++) printf "x"; printf "\n" }'
+while :; do :; done`, external.Limits{MaxFrameBytes: 128})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,4 +118,18 @@ func TestMalformedAndOversizedFramesFailStartup(t *testing.T) {
 		t.Fatalf("oversized frame should fail startup: %v", err)
 	}
 	_ = oversized.Close()
+}
+
+func TestCloseDrainsFastStartupStderr(t *testing.T) {
+	plugin, err := scriptManifest(t, `printf 'startup diagnostic\n' >&2`, external.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := plugin.Host().Start(context.Background()); err == nil {
+		t.Fatal("provider exit unexpectedly started")
+	}
+	_ = plugin.Close()
+	if stderr := plugin.Host().Stderr(); !strings.Contains(stderr, "startup diagnostic") {
+		t.Fatalf("stderr was not drained: %q", stderr)
+	}
 }

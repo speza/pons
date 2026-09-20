@@ -43,7 +43,7 @@ type settings struct {
 	Provider             *string            `json:"provider,omitempty"`
 	Model                *string            `json:"model,omitempty"`
 	BaseURL              *string            `json:"base_url,omitempty"`
-	SessionDir           *string            `json:"session_dir,omitempty"`
+	StateDir             *string            `json:"state_dir,omitempty"`
 	MaxTurns             *int               `json:"max_turns,omitempty"`
 	CompactChars         *int               `json:"compact_chars,omitempty"`
 	FsReadBytes          *int               `json:"fs_read_bytes,omitempty"`

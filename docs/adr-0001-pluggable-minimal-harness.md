@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2025-09-14
-**Related:** ADR-0003, ADR-0004, ADR-0005, ADR-0006, ADR-0007
+**Related:** ADR-0003, ADR-0004, ADR-0006, ADR-0007, ADR-0008, ADR-0011
 
 ## Context
 
@@ -25,13 +25,13 @@ three seams:
 - `protocol/` defines the JSON contract: `Action`, `ToolResult`,
   `Observation`, and `TurnLog`.
 - `ControlPort` is the brain interface:
-  `NextActions`, `Interpret`, and `Close`.
+  `Respond`, `Interpret`, and `Close`.
 - `ToolPort` is the hands interface: `Execute` for one action.
 
 `Core.Run` executes the fixed loop:
 
 ```text
-plan -> execute -> interpret -> repeat
+respond -> execute -> interpret -> repeat
 ```
 
 It supplies the turn budget, dispatches actions by kind, reserves the
@@ -104,15 +104,12 @@ registered in `Core`, converts tool calls to `Action` values, and treats a
 text-only provider response as the finish signal. Provider translation and
 context compaction remain inside that brain plugin.
 
-### 6. Sessions and external tools are plugins
-
-Session persistence is supplied by `sessionrecorder` over the `sessions.Store`
-contract; the default engine and transcript decisions are recorded in
-ADR-0002 and ADR-0005.
+### 6. Execution capabilities are plugins; runtime persistence is not
 
 External tool providers are supplied by the hands-side plugin runtime in
 ADR-0007. That runtime uses the same action and result contracts as in-process
-hands.
+hands. Runtime persistence is infrastructure owned by the server composition
+behind `runtime.Store`, not a core plugin, as specified by ADR-0011.
 
 ### 7. Brain/hands is architectural vocabulary, not the whole API taxonomy
 
@@ -134,19 +131,19 @@ breaking change has a concrete benefit.
 - The composition site shows which capabilities and policies are installed.
 - Tools can be removed without changing the core loop.
 - In-process and external hands use the same brain/hands contract.
-- Tool, session, and provider implementations remain outside the core.
+- Tool, runtime-store, and provider implementations remain outside the core.
 
 **Accepted risks**
 
 - The core does not provide an operating-system security boundary. A shell or
   other privileged tool is safe only when its composing deployment supplies
   the required isolation; ADR-0004 defines that posture.
-- JSONL session search is a linear scan. Its scope and replacement policy are
-  defined by ADR-0005.
+- Long-lived scheduling, persistence, and client delivery add a separate
+  runtime layer above the finite core, as specified by ADR-0008.
 
 ## References
 
 - `core.go` — loop, ports, registry, and hooks
 - `protocol/protocol.go` — brain/hands wire types
-- `sessions/` — transcript contract
-- `plugins/` — capabilities and adapters
+- `runtime/` — long-lived orchestration and its store contract
+- `plugins/` — brain and execution capabilities

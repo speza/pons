@@ -2,7 +2,7 @@
 //
 // Architecture (mirrors how pi's agent loop works):
 //
-//   - ONE model call per turn. NextActions sends the conversation and the
+//   - ONE model call per turn. Respond sends the conversation and the
 //     tool schemas; tool_use blocks in the response become protocol.Actions.
 //   - Interpret is bookkeeping, not a second model call: tool results are
 //     queued and sent back as tool_result blocks with the next call.
@@ -28,7 +28,6 @@ import (
 
 	"github.com/samperrin/pons"
 	"github.com/samperrin/pons/protocol"
-	"github.com/samperrin/pons/sessions"
 )
 
 // Block is one content block in a conversation turn. Sealed: only the
@@ -132,8 +131,7 @@ type Config struct {
 	// Compaction: when the conversation (estimate) exceeds CompactChars,
 	// older turns are summarized into one user message, keeping the last
 	// CompactKeep turns verbatim. 0 = default (~400k chars); negative
-	// disables. The session transcript file is never touched — it keeps
-	// everything, greppable via $PONS_SESSION_FILE.
+	// disables.
 	CompactChars int
 	CompactKeep  int
 
@@ -316,7 +314,10 @@ func (b *Brain) Setup(c *pons.Core) error {
 	return c.SetBrain(b)
 }
 
-func (b *Brain) NextActions(ctx context.Context, obs protocol.Observation) ([]protocol.Action, error) {
+// Respond preserves the ordered assistant blocks alongside the actions the
+// core executes. Runtimes use this response to commit a complete semantic
+// assistant message before tools begin.
+func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.AssistantResponse, error) {
 	// Fold queued tool results into the conversation before the next call.
 	if len(b.pending) > 0 {
 		blocks := make([]Block, 0, len(b.pending))
@@ -348,7 +349,7 @@ func (b *Brain) NextActions(ctx context.Context, obs protocol.Observation) ([]pr
 
 	assistant, err := b.client.Complete(ctx, b.systemPrompt(), b.turns, b.core.ToolSpecs())
 	if err != nil {
-		return nil, fmt.Errorf("llm: %w", err)
+		return pons.AssistantResponse{}, fmt.Errorf("llm: %w", err)
 	}
 	b.turns = append(b.turns, assistant)
 
@@ -372,9 +373,9 @@ func (b *Brain) NextActions(ctx context.Context, obs protocol.Observation) ([]pr
 		// degenerate response (vague instruction, provider hiccup). Surface
 		// it as an error instead of a silent no-op answer.
 		if summary == "" {
-			return nil, fmt.Errorf("llm: model returned an empty response (no tool calls, no text) — rephrase or retry")
+			return pons.AssistantResponse{}, fmt.Errorf("llm: model returned an empty response (no tool calls, no text) — rephrase or retry")
 		}
-		return []protocol.Action{pons.Finish(summary)}, nil
+		return pons.AssistantResponse{Actions: []protocol.Action{pons.Finish(summary)}}, nil
 	}
 	actions := make([]protocol.Action, 0, len(calls))
 	for _, c := range calls {
@@ -384,7 +385,22 @@ func (b *Brain) NextActions(ctx context.Context, obs protocol.Observation) ([]pr
 			Args: stringify(c.Input),
 		})
 	}
-	return actions, nil
+	byID := make(map[string]protocol.Action, len(actions))
+	for _, action := range actions {
+		byID[action.ID] = action
+	}
+	parts := make([]pons.AssistantPart, 0, len(assistant.Blocks))
+	for _, block := range assistant.Blocks {
+		switch block := block.(type) {
+		case Text:
+			if block.Value != "" {
+				parts = append(parts, pons.AssistantPart{Type: pons.AssistantPartText, Text: block.Value})
+			}
+		case ToolUse:
+			parts = append(parts, pons.AssistantPart{Type: pons.AssistantPartToolCall, Action: byID[block.ID]})
+		}
+	}
+	return pons.AssistantResponse{Parts: parts, Actions: actions}, nil
 }
 
 func (b *Brain) Interpret(ctx context.Context, obs protocol.Observation, tr protocol.ToolResult) (protocol.Interpretation, error) {
@@ -437,9 +453,7 @@ func (b *Brain) shouldCompact() bool {
 
 // compact summarizes all but the goal and the most recent turns into a
 // single user message. Best effort: a failed summary call leaves the
-// conversation untouched (the next turn simply retries). The session
-// transcript file is not modified — it keeps everything, and
-// $PONS_SESSION_FILE stays the agent's grep-able record.
+// conversation untouched (the next turn simply retries).
 func (b *Brain) compact(ctx context.Context) error {
 	keep := b.cfg.CompactKeep
 	if keep <= 0 {
@@ -475,7 +489,7 @@ func (b *Brain) compact(ctx context.Context) error {
 		}
 	}
 	compacted := Turn{Role: "user", Blocks: []Block{Text{Value: fmt.Sprintf(
-		"[Earlier conversation compacted into this summary — the full transcript remains in $PONS_SESSION_FILE.]\n\n%s",
+		"[Earlier conversation compacted into this summary.]\n\n%s",
 		strings.TrimSpace(summary.String()))}}}
 	if b.logf != nil {
 		b.logf("[llm] compacted %d turns into %d-char summary (keeping %d recent)", len(middle), summary.Len(), keep)
@@ -556,7 +570,6 @@ func (b *Brain) systemPrompt() string {
 	sb.WriteString("- Read a file before editing it; keep SEARCH blocks short and unique in the file.\n")
 	sb.WriteString("- Prefer small, verifiable steps; verify your work with commands before finishing.\n")
 	sb.WriteString("- Failed tools are observations, not crashes: adjust and retry instead of repeating identical calls.\n")
-	sb.WriteString("- Your full transcript is recorded to $PONS_SESSION_FILE (when set) as NDJSON. Use bash (grep/tail) to review anything that has fallen out of context.\n")
 	sb.WriteString("- Action kinds you call that no plugin provides will come back as errors; use the tools that exist.\n")
 	if b.cfg.SystemExtra != "" {
 		sb.WriteString("\n" + b.cfg.SystemExtra + "\n")
@@ -593,83 +606,8 @@ func stringify(in map[string]any) json.RawMessage {
 	return b
 }
 
-// decodeToolArgs preserves JSON number lexemes with json.Number, like
-// decodeToolInput. The resume path must match the live path: decoding
-// through float64 would round integers above 2^53 before they reach a
-// typed external tool.
-func decodeToolArgs(raw json.RawMessage) map[string]any {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return map[string]any{}
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var m map[string]any
-	if err := dec.Decode(&m); err != nil || m == nil {
-		return map[string]any{}
-	}
-	return m
-}
-
-// --- resume ----------------------------------------------------------------
-
-// TurnsFromEntries converts recorded session entries into conversation
-// turns for the brain: user entries become user messages, action entries
-// become assistant tool-use turns (decoded from the recorded payload),
-// result entries become user tool-result turns. Finish actions and empty
-// records are skipped — they are loop bookkeeping, not conversation.
-func TurnsFromEntries(entries []sessions.Entry) []Turn {
-	var turns []Turn
-	for _, e := range entries {
-		switch e.Kind {
-		case sessions.KindUser, sessions.KindNote:
-			turns = append(turns, Turn{Role: "user", Blocks: []Block{Text{Value: e.Text}}})
-		case sessions.KindAssistant:
-			if e.Text != "" {
-				turns = append(turns, Turn{Role: "assistant", Blocks: []Block{Text{Value: e.Text}}})
-			}
-		case sessions.KindAction:
-			var actions []protocol.Action
-			if len(e.Payload) > 0 {
-				_ = json.Unmarshal(e.Payload, &actions)
-			}
-			var blocks []Block
-			for _, a := range actions {
-				if a.Kind == protocol.ActFinish {
-					continue // loop bookkeeping, not model context
-				}
-				var input map[string]any
-				if len(a.Args) > 0 {
-					input = decodeToolArgs(a.Args)
-				}
-				if input == nil {
-					input = map[string]any{}
-				}
-				blocks = append(blocks, ToolUse{ID: a.ID, Name: string(a.Kind), Input: input})
-			}
-			if len(blocks) > 0 {
-				turns = append(turns, Turn{Role: "assistant", Blocks: blocks})
-			}
-		case sessions.KindResult:
-			var results []protocol.ToolResult
-			if len(e.Payload) > 0 {
-				_ = json.Unmarshal(e.Payload, &results)
-			}
-			var blocks []Block
-			for _, r := range results {
-				blocks = append(blocks, Result{ToolUseID: r.ActionID, Content: r.Observation(), IsError: !r.OK})
-			}
-			if len(blocks) > 0 {
-				turns = append(turns, Turn{Role: "user", Blocks: blocks})
-			} else if e.Text != "" {
-				turns = append(turns, Turn{Role: "user", Blocks: []Block{Text{Value: e.Text}}})
-			}
-		}
-	}
-	return turns
-}
-
 // Seed installs a hydrated conversation as the brain's context and the
-// next instruction as the new user turn. Resume and compaction interplay
+// next instruction as the new user turn. Hydration and compaction interplay
 // for free: if the seeded context exceeds the budget, the next planning
 // call compacts it.
 func (b *Brain) Seed(turns []Turn, message, workspace string) {

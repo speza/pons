@@ -178,7 +178,7 @@ type Observation struct {
 	Now       time.Time `json:"now"`
 }
 
-// TurnLog is one completed round-trip (plan + results). Actions contains the
+// TurnLog is one completed round-trip (response + results). Actions contains the
 // complete plan, including a possible finish control action; Results contains
 // only the non-finish actions that hands executed, in matching call order.
 type TurnLog struct {

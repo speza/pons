@@ -9,11 +9,11 @@
 //   - the turn loop and a plugin seam for ADDING capabilities
 //
 // A fresh Core has zero capabilities — no tools, no brain. Plugins purely
-// add functionality (tools, brains, middleware, persistence hooks); the
+// add functionality (tools, brains, middleware, observers); the
 // core never imports a plugin. Typical main():
 //
 //	core := pons.New()
-//	core.Use(fs.New(fs.Config{Root: ws}), shell.New(cfg), sessionsjsonl.New(dir))
+//	core.Use(fs.New(fs.Config{Root: ws}), shell.New(cfg))
 //	core.Use(brainscripted.New(steps...))
 //	core.Run(ctx)
 package pons
@@ -32,15 +32,38 @@ import (
 	"github.com/samperrin/pons/protocol"
 )
 
-// ControlPort is what a brain must speak. It sees Observations, emits
-// Actions; it never executes anything.
+// ControlPort is what a brain must speak. It sees Observations, produces
+// assistant responses, and never executes actions itself.
 type ControlPort interface {
-	// NextActions plans the next round of actions for this observation.
-	NextActions(ctx context.Context, obs protocol.Observation) ([]protocol.Action, error)
+	// Respond produces the assistant response for this observation.
+	Respond(ctx context.Context, obs protocol.Observation) (AssistantResponse, error)
 	// Interpret reflects on a completed tool result.
 	Interpret(ctx context.Context, obs protocol.Observation, tr protocol.ToolResult) (protocol.Interpretation, error)
 	// Close releases brain resources.
 	Close(ctx context.Context) error
+}
+
+type AssistantPartType string
+
+const (
+	AssistantPartText     AssistantPartType = "text"
+	AssistantPartToolCall AssistantPartType = "tool_call"
+)
+
+// AssistantPart is one ordered provider-neutral block in an assistant response.
+// Action is populated for AssistantPartToolCall.
+type AssistantPart struct {
+	Type   AssistantPartType
+	Text   string
+	Action protocol.Action
+}
+
+// AssistantResponse is the complete output produced by a brain for one step.
+// Parts preserve its provider-neutral content; Actions are the tool calls the
+// core should execute.
+type AssistantResponse struct {
+	Parts   []AssistantPart
+	Actions []protocol.Action
 }
 
 // ToolPort is what hands must speak: execute one approved action.
@@ -48,10 +71,21 @@ type ToolPort interface {
 	Execute(ctx context.Context, a protocol.Action) (protocol.ToolResult, error)
 }
 
+// Execute dispatches one action through the configured hands middleware and
+// tool registry. It is the embedding seam used by a standalone tool host;
+// ordinary agents should call Run so planning and interpretation remain owned
+// by the core loop.
+func (c *Core) Execute(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return executeTool(c.buildToolPort(), ctx, a)
+}
+
 // ToolHandler executes one action kind. Tool plugins provide these.
 type ToolHandler func(ctx context.Context, a protocol.Action) (protocol.ToolResult, error)
 
-// TurnHook observes one completed turn (plan + results). Observational hooks
+// TurnHook observes one completed turn (response + results). Observational hooks
 // cannot fail the run; use TurnErrorHook for persistence that must be checked.
 type TurnHook func(obs protocol.Observation, turn protocol.TurnLog)
 
@@ -78,11 +112,12 @@ type Core struct {
 	MaxTurns  int
 	Log       *log.Logger
 
-	handlers map[protocol.ActionKind]ToolHandler
-	specs    map[protocol.ActionKind]ToolSpec
-	wraps    []func(ToolPort) ToolPort
-	onTurns  []turnHook
-	onEvents []func(Event)
+	handlers      map[protocol.ActionKind]ToolHandler
+	specs         map[protocol.ActionKind]ToolSpec
+	wraps         []func(ToolPort) ToolPort
+	onTurns       []turnHook
+	onEvents      []func(Event)
+	onEventErrors []func(Event) error
 }
 
 func New() *Core {
@@ -231,14 +266,15 @@ func (c *Core) OnTurnError(h TurnErrorHook) {
 type EventType string
 
 const (
-	EventAgentStart  EventType = "agent_start"
-	EventTurnStart   EventType = "turn_start"
-	EventActionStart EventType = "action_start"
-	EventActionEnd   EventType = "action_end"
-	EventTurnEnd     EventType = "turn_end"
-	EventFinish      EventType = "finish"
-	EventStopped     EventType = "stopped"
-	EventExhausted   EventType = "exhausted"
+	EventAgentStart        EventType = "agent_start"
+	EventTurnStart         EventType = "turn_start"
+	EventAssistantResponse EventType = "assistant_response"
+	EventActionStart       EventType = "action_start"
+	EventActionEnd         EventType = "action_end"
+	EventTurnEnd           EventType = "turn_end"
+	EventFinish            EventType = "finish"
+	EventStopped           EventType = "stopped"
+	EventExhausted         EventType = "exhausted"
 )
 
 // Event is one observable step of the loop.
@@ -249,8 +285,9 @@ type Event struct {
 	Action  *protocol.Action     // set on action_start / action_end
 	Result  *protocol.ToolResult // set on action_end
 	Tool    *ToolSpec            // registered tool metadata on action_start / action_end
-	Actions []protocol.Action    // set on turn_end (whole plan)
+	Actions []protocol.Action    // set on assistant_response and turn_end
 	Results []protocol.ToolResult
+	Parts   []AssistantPart // set on assistant_response (ordered assistant content)
 }
 
 // OnEvent subscribes to the loop's event stream. Multiple subscribers
@@ -259,10 +296,23 @@ func (c *Core) OnEvent(fn func(Event)) {
 	c.onEvents = append(c.onEvents, fn)
 }
 
-func (c *Core) emit(e Event) {
+// OnEventError subscribes a checked event sink. The core stops before the
+// next side effect when a sink fails; runtimes use this to make tool-call
+// intent durable before execution begins.
+func (c *Core) OnEventError(fn func(Event) error) {
+	c.onEventErrors = append(c.onEventErrors, fn)
+}
+
+func (c *Core) emit(e Event) error {
 	for _, fn := range c.onEvents {
 		fn(e)
 	}
+	for _, fn := range c.onEventErrors {
+		if err := fn(e); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RunResult is the outcome of one Run.
@@ -278,7 +328,7 @@ type RunResult struct {
 	History []protocol.TurnLog
 }
 
-// Run executes one full task: plan → act → reflect → repeat, until the
+// Run executes one full task: respond → act → reflect → repeat, until the
 // brain finishes (text-only / finish action) or MaxTurns is exhausted.
 func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 	if c.brain == nil {
@@ -293,16 +343,21 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 	if maxTurns <= 0 {
 		maxTurns = 25
 	}
-	c.emit(Event{Type: EventAgentStart, Text: message})
+	if err := c.emit(Event{Type: EventAgentStart, Text: message}); err != nil {
+		return result, fmt.Errorf("event agent_start: %w", err)
+	}
 
 	for turn := 1; turn <= maxTurns; turn++ {
 		obs.Turn, obs.Now = turn, time.Now()
-		c.emit(Event{Type: EventTurnStart, Turn: turn})
-
-		actions, err := brain.NextActions(ctx, obs)
-		if err != nil {
-			return result, fmt.Errorf("brain plan (turn %d): %w", turn, err)
+		if err := c.emit(Event{Type: EventTurnStart, Turn: turn}); err != nil {
+			return result, fmt.Errorf("event turn_start: %w", err)
 		}
+
+		response, err := brain.Respond(ctx, obs)
+		if err != nil {
+			return result, fmt.Errorf("brain response (turn %d): %w", turn, err)
+		}
+		actions := response.Actions
 		if len(actions) == 0 {
 			return result, fmt.Errorf("brain returned no actions at turn %d", turn)
 		}
@@ -328,10 +383,21 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 			answer, _ = protocol.StringArg(actions[finishIdx].Args, "reason")
 			c.logf("[turn %d] brain signalled finish: %s", turn, answer)
 		}
+		if len(run) > 0 {
+			parts, err := normalizeAssistantParts(response.Parts, run)
+			if err != nil {
+				return result, fmt.Errorf("brain response (turn %d): %w", turn, err)
+			}
+			if err := c.emit(Event{Type: EventAssistantResponse, Turn: turn, Actions: slices.Clone(run), Parts: parts}); err != nil {
+				return result, fmt.Errorf("event assistant_response: %w", err)
+			}
+		}
 
 		for i := range run {
 			a := run[i]
-			c.emit(Event{Type: EventActionStart, Turn: turn, Action: &a, Tool: c.toolSpec(a.Kind)})
+			if err := c.emit(Event{Type: EventActionStart, Turn: turn, Action: &a, Tool: c.toolSpec(a.Kind)}); err != nil {
+				return result, fmt.Errorf("event action_start: %w", err)
+			}
 		}
 		results = make([]protocol.ToolResult, len(run))
 		var wg sync.WaitGroup
@@ -353,7 +419,9 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 		wg.Wait()
 		for i := range run {
 			a, tr := run[i], results[i]
-			c.emit(Event{Type: EventActionEnd, Turn: turn, Action: &a, Result: &tr, Tool: c.toolSpec(a.Kind)})
+			if err := c.emit(Event{Type: EventActionEnd, Turn: turn, Action: &a, Result: &tr, Tool: c.toolSpec(a.Kind)}); err != nil {
+				return result, fmt.Errorf("event action_end: %w", err)
+			}
 			c.logf("[turn %d] ← %s ok=%v err=%q", turn, a.Kind, tr.OK, tr.Error)
 		}
 
@@ -364,11 +432,15 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 				return result, fmt.Errorf("turn hook (turn %d): %w", turn, err)
 			}
 		}
-		c.emit(Event{Type: EventTurnEnd, Turn: turn, Actions: actions, Results: results})
+		if err := c.emit(Event{Type: EventTurnEnd, Turn: turn, Actions: actions, Results: results}); err != nil {
+			return result, fmt.Errorf("event turn_end: %w", err)
+		}
 
 		if finished {
 			result.Answer = answer
-			c.emit(Event{Type: EventFinish, Turn: turn, Text: answer})
+			if err := c.emit(Event{Type: EventFinish, Turn: turn, Text: answer}); err != nil {
+				return result, fmt.Errorf("event finish: %w", err)
+			}
 			return result, nil
 		}
 
@@ -387,13 +459,59 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 		obs.History = append(obs.History, turnLog)
 		if stopped {
 			c.logf("[turn %d] brain stopped: %s", turn, stopReason)
-			c.emit(Event{Type: EventStopped, Turn: turn, Text: stopReason})
+			if err := c.emit(Event{Type: EventStopped, Turn: turn, Text: stopReason}); err != nil {
+				return result, fmt.Errorf("event stopped: %w", err)
+			}
 			return result, nil
 		}
 	}
 	result.Exhausted = true
-	c.emit(Event{Type: EventExhausted, Turn: maxTurns, Text: fmt.Sprintf("exhausted %d turns", maxTurns)})
+	if err := c.emit(Event{Type: EventExhausted, Turn: maxTurns, Text: fmt.Sprintf("exhausted %d turns", maxTurns)}); err != nil {
+		return result, fmt.Errorf("event exhausted: %w", err)
+	}
 	return result, nil
+}
+
+func normalizeAssistantParts(parts []AssistantPart, actions []protocol.Action) ([]AssistantPart, error) {
+	if len(parts) == 0 {
+		parts = make([]AssistantPart, 0, len(actions))
+		for _, action := range actions {
+			parts = append(parts, AssistantPart{Type: AssistantPartToolCall, Action: action})
+		}
+		return parts, nil
+	}
+	remaining := make(map[string]protocol.Action, len(actions))
+	for _, action := range actions {
+		if action.ID == "" {
+			return nil, errors.New("tool action is missing its correlation ID")
+		}
+		if _, exists := remaining[action.ID]; exists {
+			return nil, fmt.Errorf("duplicate tool action ID %q", action.ID)
+		}
+		remaining[action.ID] = action
+	}
+	out := make([]AssistantPart, len(parts))
+	copy(out, parts)
+	for i, part := range out {
+		switch part.Type {
+		case AssistantPartText:
+			if part.Text == "" {
+				return nil, fmt.Errorf("assistant part %d has empty text", i)
+			}
+		case AssistantPartToolCall:
+			action, ok := remaining[part.Action.ID]
+			if !ok || action.Kind != part.Action.Kind || !slices.Equal(action.Args, part.Action.Args) {
+				return nil, fmt.Errorf("assistant part %d does not match an executable action", i)
+			}
+			delete(remaining, part.Action.ID)
+		default:
+			return nil, fmt.Errorf("assistant part %d has unsupported type %q", i, part.Type)
+		}
+	}
+	if len(remaining) != 0 {
+		return nil, errors.New("assistant response omits an executable action")
+	}
+	return out, nil
 }
 
 func (c *Core) toolSpec(kind protocol.ActionKind) *ToolSpec {

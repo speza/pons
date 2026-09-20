@@ -32,13 +32,13 @@ func (s *Scripted) Setup(c *pons.Core) error {
 	return c.SetBrain(s)
 }
 
-func (s *Scripted) NextActions(ctx context.Context, obs protocol.Observation) ([]protocol.Action, error) {
+func (s *Scripted) Respond(ctx context.Context, obs protocol.Observation) (pons.AssistantResponse, error) {
 	if s.i >= len(s.Steps) {
-		return []protocol.Action{pons.Finish("done — script exhausted")}, nil
+		return pons.AssistantResponse{Actions: []protocol.Action{pons.Finish("done — script exhausted")}}, nil
 	}
 	st := s.Steps[s.i]
 	s.i++
-	return st.Actions, nil
+	return pons.AssistantResponse{Actions: st.Actions}, nil
 }
 
 func (s *Scripted) Interpret(ctx context.Context, obs protocol.Observation, tr protocol.ToolResult) (protocol.Interpretation, error) {

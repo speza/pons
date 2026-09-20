@@ -8,7 +8,6 @@ import (
 
 	"github.com/samperrin/pons"
 	"github.com/samperrin/pons/protocol"
-	"github.com/samperrin/pons/sessions"
 )
 
 // fakeClient is a scripted provider for testing the brain logic without HTTP.
@@ -17,6 +16,13 @@ func TestToolInputPreservesLargeInteger(t *testing.T) {
 	input := decodeToolInput([]byte(raw))
 	if got := string(stringify(input)); got != raw {
 		t.Fatalf("tool input lost numeric precision: got %s, want %s", got, raw)
+	}
+}
+
+func TestSystemPromptDoesNotAdvertiseLegacyTranscript(t *testing.T) {
+	b := &Brain{}
+	if prompt := b.systemPrompt(); strings.Contains(prompt, "PONS_SESSION_FILE") || strings.Contains(prompt, "NDJSON") {
+		t.Fatalf("legacy transcript leaked into system prompt: %q", prompt)
 	}
 }
 
@@ -54,12 +60,16 @@ func TestBrainMapsToolUseToActions(t *testing.T) {
 	ctx := context.Background()
 	obs := protocol.Observation{Turn: 1, Message: "g", Workspace: "/w"}
 
-	actions, err := b.NextActions(ctx, obs)
+	response, err := b.Respond(ctx, obs)
 	if err != nil {
 		t.Fatal(err)
 	}
+	actions := response.Actions
 	if len(actions) != 1 || actions[0].Kind != "bash" || actions[0].ID != "call_1" {
 		t.Fatalf("actions: %+v", actions)
+	}
+	if len(response.Parts) != 2 || response.Parts[0].Type != pons.AssistantPartText || response.Parts[0].Text != "Let me look around." || response.Parts[1].Type != pons.AssistantPartToolCall || response.Parts[1].Action.ID != "call_1" {
+		t.Fatalf("assistant parts: %+v", response.Parts)
 	}
 	var input map[string]any
 	if err := json.Unmarshal(actions[0].Args, &input); err != nil {
@@ -73,10 +83,11 @@ func TestBrainMapsToolUseToActions(t *testing.T) {
 	if _, err := b.Interpret(ctx, obs, protocol.ToolResult{ActionID: "call_1", OK: true, Output: "hi\n"}); err != nil {
 		t.Fatal(err)
 	}
-	actions, err = b.NextActions(ctx, obs)
+	response, err = b.Respond(ctx, obs)
 	if err != nil {
 		t.Fatal(err)
 	}
+	actions = response.Actions
 	reason, _ := protocol.StringArg(actions[0].Args, "reason")
 	if len(actions) != 1 || actions[0].Kind != protocol.ActFinish || reason != "All done." {
 		t.Fatalf("expected finish, got: %+v", actions)
@@ -105,13 +116,13 @@ func TestPendingResultsDoNotDropFollowUp(t *testing.T) {
 	}}
 	b := newBrain(t, fake)
 	ctx := context.Background()
-	if _, err := b.NextActions(ctx, protocol.Observation{Turn: 1, Message: "first", Workspace: "/w"}); err != nil {
+	if _, err := b.Respond(ctx, protocol.Observation{Turn: 1, Message: "first", Workspace: "/w"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := b.Interpret(ctx, protocol.Observation{}, protocol.ToolResult{ActionID: "c1", OK: true, Output: "pong"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.NextActions(ctx, protocol.Observation{Turn: 1, Message: "follow-up", Workspace: "/w"}); err != nil {
+	if _, err := b.Respond(ctx, protocol.Observation{Turn: 1, Message: "follow-up", Workspace: "/w"}); err != nil {
 		t.Fatal(err)
 	}
 	seen := fake.seen[1]
@@ -140,11 +151,11 @@ func TestFailedToolIsErrorResult(t *testing.T) {
 	ctx := context.Background()
 	obs := protocol.Observation{Turn: 1}
 
-	if _, err := b.NextActions(ctx, obs); err != nil {
+	if _, err := b.Respond(ctx, obs); err != nil {
 		t.Fatal(err)
 	}
 	b.Interpret(ctx, obs, protocol.ToolResult{ActionID: "c1", OK: false, Error: "no plugin provides"})
-	b.NextActions(ctx, obs)
+	b.Respond(ctx, obs)
 
 	for _, blk := range fake.seen[1][2].Blocks {
 		if r, ok := blk.(Result); ok && r.IsError {
@@ -159,7 +170,7 @@ func TestEmptyResponseIsSurfacedNotSwallowed(t *testing.T) {
 		{Role: "assistant", Blocks: []Block{}}, // degenerate: nothing at all
 	}}
 	b := &Brain{cfg: Config{}, client: fake, core: pons.New()}
-	_, err := b.NextActions(context.Background(), protocol.Observation{Turn: 1, Message: "test"})
+	_, err := b.Respond(context.Background(), protocol.Observation{Turn: 1, Message: "test"})
 	if err == nil || !strings.Contains(err.Error(), "empty response") {
 		t.Fatalf("empty response should error, got: %v", err)
 	}
@@ -175,15 +186,15 @@ func TestCompactionKeepsToolExchangeTogether(t *testing.T) {
 	b := &Brain{cfg: Config{CompactChars: 1, CompactKeep: 1}, client: fake, core: pons.New()}
 	ctx := context.Background()
 	obs := protocol.Observation{Turn: 1, Message: "goal"}
-	if _, err := b.NextActions(ctx, obs); err != nil {
+	if _, err := b.Respond(ctx, obs); err != nil {
 		t.Fatal(err)
 	}
 	b.Interpret(ctx, obs, protocol.ToolResult{ActionID: "c1", OK: true, Output: "one"})
-	if _, err := b.NextActions(ctx, obs); err != nil {
+	if _, err := b.Respond(ctx, obs); err != nil {
 		t.Fatal(err)
 	}
 	b.Interpret(ctx, obs, protocol.ToolResult{ActionID: "c2", OK: true, Output: "two"})
-	if _, err := b.NextActions(ctx, obs); err != nil {
+	if _, err := b.Respond(ctx, obs); err != nil {
 		t.Fatal(err)
 	}
 
@@ -216,19 +227,19 @@ func TestCompactionCollapsesMiddleTurns(t *testing.T) {
 	ctx := context.Background()
 	obs := protocol.Observation{Turn: 1, Message: "test goal"}
 	// Turn 1: tool call (no compaction — turns ≤ keep+1).
-	if _, err := b.NextActions(ctx, obs); err != nil {
+	if _, err := b.Respond(ctx, obs); err != nil {
 		t.Fatal(err)
 	}
 	b.Interpret(ctx, obs, protocol.ToolResult{ActionID: "c1", OK: true, Output: "FIRST-PONG " + strings.Repeat("mid ", 30)})
 	// Turn 2: still ≤ keep+1 → compaction no-op; second tool call.
-	if _, err := b.NextActions(ctx, obs); err != nil {
+	if _, err := b.Respond(ctx, obs); err != nil {
 		t.Fatal(err)
 	}
 	b.Interpret(ctx, obs, protocol.ToolResult{ActionID: "c2", OK: true, Output: "SECOND-PONG " + strings.Repeat("tail ", 30)})
 	// Turn 3: now there is a real middle (2 tool turns) — the summarizer
 	// call (seen[2]) fires, then the real Complete (seen[3]) gets the
 	// collapsed context.
-	if _, err := b.NextActions(ctx, obs); err != nil {
+	if _, err := b.Respond(ctx, obs); err != nil {
 		t.Fatal(err)
 	}
 
@@ -290,26 +301,8 @@ func TestToolSpecsReachTheModel(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	b.NextActions(context.Background(), protocol.Observation{Turn: 1})
+	b.Respond(context.Background(), protocol.Observation{Turn: 1})
 	if len(fake.capturedTools) != 1 || fake.capturedTools[0].Kind != "bash" {
 		t.Fatalf("tools not passed to client: %+v", fake.capturedTools)
-	}
-}
-
-func TestResumePreservesLargeInteger(t *testing.T) {
-	const raw = `{"value":9007199254740993}`
-	turns := TurnsFromEntries([]sessions.Entry{{
-		Kind:    sessions.KindAction,
-		Payload: []byte(`[{"id":"a","kind":"tool","args":` + raw + `}]`),
-	}})
-	if len(turns) != 1 {
-		t.Fatalf("turns: %+v", turns)
-	}
-	use, ok := turns[0].Blocks[0].(ToolUse)
-	if !ok {
-		t.Fatalf("block: %#v", turns[0].Blocks[0])
-	}
-	if got := string(stringify(use.Input)); got != raw {
-		t.Fatalf("resume lost numeric precision: got %s, want %s", got, raw)
 	}
 }

@@ -1,8 +1,8 @@
 # ADR-0008: Long-lived orchestration is a pluggable runtime above the pons kernel
 
-**Status:** Accepted
+**Status:** Accepted; state, storage, and coordination refined by ADR-0010 through ADR-0012
 **Date:** 2026-09-18
-**Related:** ADR-0001, ADR-0002, ADR-0005, ADR-0007
+**Related:** ADR-0001, ADR-0007, ADR-0009, ADR-0010, ADR-0011, ADR-0012
 
 ## Context
 
@@ -115,17 +115,18 @@ The first runtime composition is:
 - the CLI as an HTTP client rather than a separate transport;
 - one process with per-conversation serialization;
 - one conversation per channel conversation/thread; and
-- a durable inbox and outbox using local JSON state.
+- a durable inbox and outbox in the transactional conversation store selected
+  by ADR-0010.
 
 The public API calls the resource a **conversation**. Its opaque identifier is
-also the underlying pons session identifier in v1; the storage package may
-continue to call it a session. The internal distinction is not exposed as a
-second public identifier.
+the canonical runtime-store identity; there is no separate session identifier
+or legacy session store.
 
 The first HTTP shape is:
 
 ```text
 POST /v1/conversations
+GET  /v1/conversations/{id}
 GET  /v1/conversations/{id}/events
 POST /v1/conversations/{id}/messages
 ```
@@ -133,55 +134,51 @@ POST /v1/conversations/{id}/messages
 Conversation creation is server-owned. A message uses a `parts` array even
 though v1 accepts only `{type: "text"}` parts. The message endpoint is
 asynchronous and returns `202 Accepted`; an idempotency key identifies retries.
-SSE is a separate subscription primitive. The CLI opens it before posting a
-message, while reconnecting clients use event identity/current durable state.
+The conversation `GET` returns a renderable snapshot and its event cursor. SSE
+is a separate subscription primitive. The CLI may open it before posting a
+message; a reconnecting client first renders a snapshot and then subscribes
+after that snapshot's cursor. Durable changes are replayable, while token
+deltas and progress are transient.
 
 The initial HTTP server is local-only. Exposing it beyond loopback requires a
 future authentication decision.
 
-### 5. Messages steer only at safe turn boundaries
+HTTP and SSE are one transport adapter, not manager concerns. The runtime
+surface exposes conversation creation, submission, coherent snapshots, and
+event subscriptions using provider-neutral types. Native HTTP/SSE lives in
+`runtime/httptransport`; future protocols translate at the same boundary.
 
-Messages arriving while tools are executing are held in a per-conversation
-mailbox. The runtime waits for the complete tool batch, records results in
-planned call order, then the next agent decision receives the pending messages
-as separate user messages.
+### 5. Messages arriving during a run queue the next run
 
-A text-only assistant response is a response boundary: it is streamed to the
-channel, persisted as an assistant message, and the active core is torn down.
-The runtime then waits for another inbound message and creates a fresh core
-and brain from the durable conversation. It does not make an autonomous model
-call with no new input.
+Each accepted inbound message creates one durable queued submission. A message
+arriving while another run owns the conversation remains queued; it is not
+injected into the active core. When the current run commits its terminal state,
+the scheduler may claim the next submission and hydrate a fresh core and brain
+from canonical messages through that submission.
 
-The generic input seam is intentionally small:
+This preserves a clear response boundary and prevents later queued messages
+from leaking into an earlier run's provider context. Active-run steering at a
+safe model boundary would require a separate runner contract and is not part of
+the current runtime.
 
-```go
-type MessageSource interface {
-    GetMessages(ctx context.Context) ([]protocol.UserMessage, error)
-}
-```
+### 6. Runtime output is semantic even though the finite core has a finish signal
 
-`GetMessages` returns and claims currently pending messages in arrival order;
-an empty result is valid after a tool batch. The runtime seeds the source with
-the first message, so initial and steering input use the same path.
+The finite core retains its internal `finish` action as the signal that a
+bounded `Core.Run` has produced its answer. The runtime projects that answer as
+a final semantic `AssistantMessage`; clients and durable history do not consume
+the core action.
 
-### 6. Assistant output is not a `finish` action
-
-An assistant response is an `AssistantMessage`, not a core `finish` action.
-An assistant message may contain ordered text and tool-call blocks. Text may be
-streamed while a complete provider response is being assembled; tool calls are
-not executed until the complete assistant message is durable.
-
-The core/runtime lifecycle determines whether that assistant message ends a
-one-shot run or yields to an idle continuous conversation. Runtime shutdown
-and cancellation are separate lifecycle controls.
+Non-final assistant turns may contain ordered text and tool-call blocks. Tool
+calls are not executed until the complete assistant turn and requested tool
+intent are durable. Runtime shutdown and cancellation remain separate
+lifecycle controls.
 
 ### 7. Persistence and crash recovery are explicit
 
-The transcript remains the durable conversation history. Runtime operational
-state is separate and is stored as an atomically replaced JSON snapshot per
-conversation. It contains pending inbox entries, processing state, outbox
-entries, and inbound deduplication IDs. The runtime is single-process in v1;
-multiple processes require a shared store with atomic claims or leases.
+Semantic messages are the durable conversation history and are read directly
+for both LLM hydration and client snapshots. Submissions, runs, and tool calls
+own operational state. These records and a client event outbox share one
+transactional store, as specified by ADR-0010.
 
 The persistence ordering for a tool turn is:
 
@@ -201,16 +198,18 @@ automatically retries a tool action.
 
 LLM provider requests may be retried with backoff. An incomplete streamed
 assistant response is discarded and regenerated; no tool call from an
-incomplete response is executed. Token and tool-progress events are live and
-best-effort. The completed assistant response and current runtime state are
-durable and replayable; reconnecting clients need not receive old token
-deltas.
+incomplete response is executed. Token deltas, tool progress, and heartbeats
+are live, best-effort, and never part of the durable event outbox. Complete
+assistant messages, tool intent/results, and current run state are durable.
+Reconnect reconstructs the UI from a conversation snapshot, not historical
+token deltas or a full event replay.
 
-### 8. Channels remain runtime plugins
+### 8. Channels remain runtime adapters
 
-The HTTP channel is the first built-in transport. Future channels and triggers
-adapt to the normalized runtime message model. A scheduler is another inbound
-source and follows the same message-to-agent path.
+The HTTP channel is the first built-in transport adapter. Future channels and
+triggers adapt to the normalized runtime message model. They are not core
+plugins: a scheduler is another inbound adapter and follows the same
+message-to-agent path.
 
 Cross-channel identity linking, handoff, and conversation forking are deferred.
 When eventually added, handoff will fork a completed active transcript path
@@ -226,9 +225,9 @@ effects.
   request/reply handling difficult.
 - **Use a persistent brain while idle:** not selected for v1. Idle cores and
   brains are torn down; the runtime hydrates them from the conversation.
-- **Use JSONL for mutable runtime state:** not selected for v1. The transcript
-  is append-only JSONL, but queue and delivery state is a small mutable JSON
-  snapshot with atomic replacement.
+- **Use JSONL for mutable runtime state:** not selected. ADR-0010 replaces the
+  original JSONL-plus-JSON baseline with implemented transactional semantic
+  and operational state plus an event outbox.
 - **Build cross-channel continuation immediately:** not selected. Channel
   conversation identity is a safer initial session boundary than guessing
   identity or context across transports.
@@ -237,22 +236,23 @@ effects.
 
 - pons can remain a small, useful agent harness without committing to a
   particular messaging product.
-- The first always-on runtime can be implemented and tested locally without
-  authentication, a database, or multiple workers.
+- The first always-on runtime is local and single-process; it uses SQLite and
+  loopback-only HTTP without remote authentication.
 - The same normalized message path supports human messages, future webhooks,
   and future schedules.
 - Durable inbox recovery must distinguish incomplete agent processing from
   tool execution; arbitrary tool side effects cannot be made exactly once by
   the runtime.
-- A provider-neutral assistant turn is richer than the current action-only
-  control interface and will require a deliberate breaking API change when
-  implemented.
+- The runtime runner adapts the finite action-based core into provider-neutral
+  assistant turns without adding transport or persistence concerns to `Core`.
 - The HTTP API exposes a conversation resource rather than storage internals,
-  leaving future session backends and conversation forks possible.
+  leaving future store adapters and conversation forks possible.
 
 ## References
 
 - `docs/runtime-v1.md` — concrete v1 runtime and HTTP design
+- `docs/adr-0010-runtime-state-and-client-synchronization.md` — transactional
+  runtime state, snapshots, durable events, and transient streaming
 - `core.go` — finite agent loop and core plugin composition
 - `protocol/` — brain/hands wire types
 - `sessions/` — transcript and session storage contract

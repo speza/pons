@@ -6,7 +6,7 @@ GOLANGCI_LINT ?= $(shell go env GOPATH)/bin/golangci-lint
 GOLANGCI_LINT_VERSION ?= v2.6.0
 LINT_GOTOOLCHAIN ?= go1.25.0
 
-.PHONY: fmt fmt-check test test-race vet lint check install-tools
+.PHONY: fmt fmt-check test test-race vet lint check install-tools smoke-runtime
 
 fmt:
 	@if [ -n "$(GO_FILES)" ]; then gofmt -w $(GO_FILES); fi
@@ -36,3 +36,6 @@ lint:
 	GOTOOLCHAIN=$(LINT_GOTOOLCHAIN) $(GOLANGCI_LINT) run --timeout=5m ./...
 
 check: fmt-check test vet lint
+
+smoke-runtime:
+	./scripts/smoke-runtime.sh

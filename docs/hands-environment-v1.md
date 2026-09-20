@@ -1,6 +1,6 @@
 # Hands execution environment v1 design
 
-**Status:** Design target
+**Status:** Local provider and per-run lifecycle implemented
 **Related:** [ADR-0009](adr-0009-hands-execution-environments.md),
 [ADR-0007](adr-0007-language-neutral-plugin-runtime.md)
 
@@ -38,14 +38,14 @@ The host still normalizes action IDs and tool kinds, applies call deadlines
 and result limits, and decides what a failed environment means. The hands
 session receives no brain history or user conversation.
 
-## Hands runtime
+## Tool host
 
 `pons-hands` is a separate hands-side executable. It composes the built-in
 hands capabilities (`fs`, `edit`, `bash`) and explicitly configured external
 hands providers. It performs the same capability discovery and action/result
 exchange as the current external tool provider host.
 
-A hands runtime is one environment-level process, not one process per tool.
+A tool host is one environment-level process, not one process per tool.
 This keeps a shared workspace and tool catalog while allowing the whole hands
 side to be placed behind one OS or remote boundary.
 
@@ -69,6 +69,7 @@ The first policy object should remain small and explicit:
 
 ```text
 workspace path or workspace seed
+explicit read-only paths needed by configured hands providers
 network: disabled | enabled by explicit policy
 environment variables: explicit allowlist
 credentials: explicit references, never inherited
@@ -95,8 +96,10 @@ provider-generated profile and connects its stdio to the existing external
 adapter.
 
 The profile grants access to the explicit workspace, required system runtime
-files, and temporary scratch storage. It denies network, the host home
-directory, ambient credentials, and unrelated paths. The profile must also
+files, temporary scratch storage, and the manifest, executable, argument
+files, and PATH directories of explicitly configured external hands providers.
+Those provider paths are read-only. It denies network, the host home directory,
+ambient credentials, and unrelated paths. The profile must also
 allow the process creation and executable lookup needed by the configured
 hands; otherwise `bash` would be unusable even though the workspace policy
 was correct.
@@ -136,7 +139,7 @@ The E2B adapter would conceptually do this:
 10. Pause/retain or kill according to lifetime policy.
 ```
 
-The template would contain the hands runtime and bridge. The host should not
+The template would contain the tool host and bridge. The host should not
 turn every `bash` call into a new E2B command request: that would duplicate
 command, filesystem, schema, cancellation, and result semantics outside
 pons. A persistent hands endpoint keeps those semantics in one place.
@@ -152,7 +155,7 @@ There are two plausible transports:
    command/files APIs and registers a fixed catalog of proxy tools.
 
 The port bridge is the preferred long-term shape because it preserves the
-hands runtime and tool-provider catalog across local and remote backends. The
+tool host and tool-provider catalog across local and remote backends. The
 direct adapter is a useful prototype, but it would make E2B's API part of the
 hands implementation and would need a second implementation for every tool.
 
