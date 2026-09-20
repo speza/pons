@@ -148,7 +148,9 @@ excluded explicitly in [`.golangci.yml`](.golangci.yml).
 ## Running
 
 ```sh
-go test ./...            # everything; no API keys needed
+go test ./...            # default package/unit suite; no API keys needed
+make test-integration    # compiled pons + local fake provider + real HTTP/SSE + SQLite
+make test-integration-race
 make smoke-runtime       # live Codex + Luna + server/client + Seatbelt smoke test
 
 go run ./cmd/pons-demo     # scripted brain
@@ -223,6 +225,16 @@ agent to verify the module path through `read_file`, and requires the final
 answer `SMOKE_OK`. It uses the saved Codex login and is intentionally excluded
 from `make check` because it calls a live model. Set `PONS_SMOKE_MODEL` to
 override the model when diagnosing provider-specific behavior.
+
+`make test-integration` is the deterministic black-box check. It builds the
+`pons` binary, starts it as a subprocess against an in-process OpenAI-compatible
+fake provider, and drives the real loopback HTTP/SSE API and SQLite database.
+The portable case runs the real in-process filesystem tool and covers the tool
+round-trip, durable history, reconnect replay, and idempotent retry. On macOS,
+`make test-integration-seatbelt` opts into the corresponding test through the
+compiled `pons-hands` binary and the Seatbelt execution boundary. These tests
+never call a live model or external network. `make smoke-runtime` remains the
+separate live-provider and Seatbelt smoke check.
 
 Durable settings live in `~/.pons/config.json` (global defaults) and
 `.pons.json` in the workspace (project overrides); explicit flags win over

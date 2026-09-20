@@ -43,6 +43,25 @@ and the native network client belong to `runtime/httptransport`. Future AG-UI,
 ACP, or channel adapters project the same canonical state and events without
 changing runtime persistence or scheduling.
 
+## Black-box verification
+
+The deterministic integration suite is run with:
+
+```sh
+make test-integration
+make test-integration-race
+```
+
+It builds `cmd/pons` and launches that binary against a local,
+OpenAI-compatible fake provider. The test then uses the real loopback API and
+SSE stream, persists through SQLite, performs a real `read_file` tool
+round-trip, kills and restarts the server, replays the durable event cursor,
+checks idempotency, and continues the conversation through the compiled CLI.
+It has no API-key or external-network dependency. On macOS, the opt-in
+`make test-integration-seatbelt` target repeats the same flow with a compiled
+`pons-hands` process under Seatbelt. The live model/provider and Seatbelt smoke
+path remains intentionally separate under `make smoke-runtime`.
+
 The runtime queues a message arriving during an active run as the next fresh
 burst. It deliberately does not inject later submissions into an active run;
 doing so would require a separate safe-boundary steering contract. Likewise,

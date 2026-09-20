@@ -6,7 +6,7 @@ GOLANGCI_LINT ?= $(shell go env GOPATH)/bin/golangci-lint
 GOLANGCI_LINT_VERSION ?= v2.6.0
 LINT_GOTOOLCHAIN ?= go1.25.0
 
-.PHONY: fmt fmt-check test test-race vet lint check install-tools smoke-runtime
+.PHONY: fmt fmt-check test test-race test-integration test-integration-race test-integration-seatbelt vet lint check install-tools smoke-runtime
 
 fmt:
 	@if [ -n "$(GO_FILES)" ]; then gofmt -w $(GO_FILES); fi
@@ -25,6 +25,16 @@ test:
 
 test-race:
 	go test -race ./...
+
+test-integration:
+	go test -tags integration -count=1 ./integration
+
+test-integration-race:
+	go test -race -tags integration -count=1 ./integration
+
+test-integration-seatbelt:
+	@if [ "$$(uname -s)" != "Darwin" ]; then echo "Seatbelt integration test requires macOS"; exit 0; fi
+	PONS_SEATBELT_TEST=1 go test -tags integration -count=1 ./integration -run TestRuntimeBlackBoxSeatbelt
 
 vet:
 	go vet ./...

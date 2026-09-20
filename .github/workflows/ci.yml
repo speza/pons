@@ -30,6 +30,12 @@ jobs:
       - name: Race tests
         run: make test-race
 
+      - name: Deterministic integration tests
+        run: make test-integration
+
+      - name: Deterministic integration race tests
+        run: make test-integration-race
+
       - name: Lint
         uses: golangci/golangci-lint-action@v8
         with:
