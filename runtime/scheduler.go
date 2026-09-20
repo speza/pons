@@ -12,6 +12,8 @@ func (m *Manager) schedule() {
 	ticker := time.NewTicker(m.cfg.RepairInterval)
 	defer ticker.Stop()
 	for {
+		// Wakeups reduce latency but carry no authority and may coalesce. The
+		// repair tick makes durable work discoverable even if a hint is lost.
 		select {
 		case <-m.ctx.Done():
 			return
@@ -22,6 +24,8 @@ func (m *Manager) schedule() {
 	}
 }
 
+// dispatch reserves local capacity before claiming durable work. A successful
+// claim therefore always has a bounded run goroutine ready to own it locally.
 func (m *Manager) dispatch() {
 	for m.reserveSlot() {
 		claim, err := m.store.ClaimRunnable(m.ctx)
@@ -53,6 +57,9 @@ func (c *liveConversation) work(ctx context.Context, cancel context.CancelFunc, 
 	cancel()
 	c.mu.Lock()
 	var backgroundErr error
+	// Terminal persistence deliberately outlives the canceled run context. On
+	// shutdown or runner cancellation we still need to durably resolve the run
+	// and mark any requested tool outcome as unknown rather than strand it.
 	if runErr != nil {
 		toolEvents, interruptErr := c.manager.store.InterruptRequestedTools(context.Background(), claim.Run)
 		if interruptErr == nil {
@@ -143,6 +150,8 @@ func (m *Manager) releaseSlot(wake bool) {
 }
 
 func (m *Manager) notify() {
+	// The single buffered value coalesces hints. ClaimRunnable and the repair
+	// scan, rather than notification count, determine whether work exists.
 	select {
 	case m.wake <- struct{}{}:
 	default:

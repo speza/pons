@@ -22,12 +22,17 @@ type Config struct {
 	OnError        func(error)
 }
 
+// Manager coordinates bounded execution and process-local event delivery.
+// Store remains authoritative for conversations, runnable work, ownership,
+// and durable event order; Manager's memory is only a live acceleration layer.
 type Manager struct {
 	cfg    Config
 	store  Store
 	ctx    context.Context
 	cancel context.CancelFunc
 	wake   chan struct{}
+	// mu protects convs, active, and closed. It is never held across store calls
+	// or while acquiring a liveConversation mutex.
 	mu     sync.Mutex
 	convs  map[string]*liveConversation
 	active int
@@ -59,6 +64,9 @@ func New(cfg Config) (*Manager, error) {
 		cfg: cfg, store: cfg.Store, ctx: ctx, cancel: cancel,
 		wake: make(chan struct{}, 1), convs: make(map[string]*liveConversation),
 	}
+	// The scheduler remains in the wait group for the Manager's whole open
+	// lifetime. Runs are added only by that scheduler, so Close cannot race a
+	// zero counter with a new Add.
 	m.wg.Add(1)
 	go m.schedule()
 	m.notify()
@@ -194,6 +202,8 @@ func (m *Manager) Close() error {
 		return nil
 	}
 	m.closed = true
+	// Cancel scheduling and every per-run child context before closing local
+	// delivery channels. Run goroutines still record their terminal state.
 	m.cancel()
 	conversations := make([]*liveConversation, 0, len(m.convs))
 	for _, c := range m.convs {

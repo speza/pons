@@ -77,6 +77,9 @@ func (m *Manager) Subscribe(ctx context.Context, conversationID string, after ui
 }
 
 func (c *liveConversation) broadcastLocked(events ...Event) {
+	// The caller holds c.mu so catch-up registration and live delivery share one
+	// local order. Durable cursor checks remove the overlap where a subscriber
+	// reads a committed event before its process-local broadcast arrives.
 	for _, event := range events {
 		for id, subscriber := range c.subscribers {
 			if event.ID != 0 && event.ID <= subscriber.lastCursor {

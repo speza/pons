@@ -20,6 +20,9 @@ import (
 
 const runtimeDBName = "runtime.db"
 
+// Store is the local, exclusive-manager runtime backend. Its transactions
+// prevent duplicate claims and concurrent conversation/workspace ownership,
+// but they are not renewable leases or a distributed fencing mechanism.
 type Store struct{ db *sql.DB }
 
 var _ ponsruntime.Store = (*Store)(nil)
@@ -340,6 +343,10 @@ func conversationTx(ctx context.Context, tx *sql.Tx, id string) (ponsruntime.Con
 }
 
 func (s *Store) ClaimRunnable(ctx context.Context) (*ponsruntime.ClaimedRun, error) {
+	// Open configures SQLite transactions with _txlock=immediate, so eligibility
+	// checks and the queued-to-running transition serialize with competing local
+	// writers. Both conversation and workspace exclusion are decided inside this
+	// transaction; Manager's in-memory state is not an ownership lock.
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return nil, err
