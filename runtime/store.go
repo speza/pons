@@ -26,23 +26,29 @@ func NewID() string {
 type Store interface {
 	CreateConversation(context.Context, Conversation) error
 	Conversation(context.Context, string) (Conversation, error)
-	ConversationIDs(context.Context) ([]string, error)
 	Accept(context.Context, string, string, []TextPart) (AcceptedMessage, []Event, error)
-	ClaimNext(context.Context, string) (*ClaimedRun, error)
+	// ClaimRunnable atomically selects and claims the oldest queued submission
+	// whose conversation and workspace have no active run. It returns nil when
+	// no work is currently eligible. This transition is not, by itself, a
+	// renewable lease or distributed fencing contract.
+	ClaimRunnable(context.Context) (*ClaimedRun, error)
 	CommitAssistantTurn(context.Context, Run, []MessagePart) ([]Event, error)
 	ToolCompleted(context.Context, Run, protocol.ToolResult) ([]Event, error)
 	FinishRun(context.Context, Run, string) (Message, []Event, error)
 	FailRun(context.Context, Run, string) ([]Event, error)
-	HasPending(context.Context, string) (bool, error)
-	RecoverRunning(context.Context, string) error
+	// RecoverRunning resolves work abandoned by the previous exclusive store
+	// owner. Distributed implementations must recover only expired fenced
+	// claims; SQLite supports one Manager and calls this during startup.
+	RecoverRunning(context.Context) error
 	InterruptRequestedTools(context.Context, Run) ([]Event, error)
 	Events(context.Context, string, uint64) ([]Event, error)
 	View(context.Context, string) (ConversationView, error)
 }
 
 type ClaimedRun struct {
-	Message InboundMessage
-	History []Message
-	Run     Run
-	Events  []Event
+	Conversation Conversation
+	Message      InboundMessage
+	History      []Message
+	Run          Run
+	Events       []Event
 }

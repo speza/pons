@@ -62,7 +62,7 @@ Key invariants:
 |---|---|
 | `protocol/` | Wire contract: `Action`, `ToolResult`, `Observation`. Core reserves only the `finish` kind |
 | `core.go` | The turn loop, the two ports, and the plugin seam. Imports only `protocol` |
-| `runtime/` | Transport-independent durable conversations, transactional `Store` contract, run scheduling, workspace leases, and event subscriptions |
+| `runtime/` | Transport-independent durable conversations, transactional `Store` contract, bounded run scheduling, workspace exclusion, and event subscriptions |
 | `runtime/sqlite` | SQLite implementation of `runtime.Store` |
 | `runtime/httptransport` | Native HTTP/SSE server and client adapter over the runtime |
 | `environment/` | Provider/session seam and macOS Seatbelt hands environment |
@@ -200,7 +200,12 @@ for development and platforms without the Seatbelt backend.
 It durably accepts messages, serializes each conversation, enforces a global
 run limit and an exclusive lease for the workspace, hydrates a fresh brain for
 each active run, and streams events over SSE. Runtime state lives in
-`<state-dir>/runtime.db`; clients hydrate with
+`<state-dir>/runtime.db`. Runnable work is claimed lazily, active run
+goroutines are bounded by `--runtime-concurrency`, and SQLite transactionally
+excludes simultaneous runs for one conversation or workspace. Local wakeups
+are backed by a low-frequency repair scan. SQLite remains an explicitly
+single-manager backend: distributed workers still require renewable leases,
+fencing, and cross-process notification. Clients hydrate with
 `GET /v1/conversations/{id}` and then subscribe after its durable cursor.
 `pons client` is the HTTP/SSE client. When continuing an existing conversation
 it renders the canonical snapshot before subscribing after that snapshot's
@@ -298,6 +303,7 @@ The reasoning behind the big choices is recorded as ADRs in [`docs/`](docs/):
 | [ADR-0009](docs/adr-0009-hands-execution-environments.md) | Provider-backed hands execution environments; Seatbelt first | Accepted |
 | [ADR-0010](docs/adr-0010-runtime-state-and-client-synchronization.md) | Transactional runtime messages/state, client snapshots, durable event outbox, transient token deltas | Accepted |
 | [ADR-0011](docs/adr-0011-server-centred-runtime-storage.md) | Server-centred execution; injected runtime store; legacy session stack removed | Accepted |
+| [ADR-0012](docs/adr-0012-scalable-runtime-coordination.md) | Lazy bounded scheduling; durable claims, leases, fencing, and distributed-worker migration | Accepted |
 
 The concrete first-runtime shape and client synchronization contract are
 described in [`docs/runtime-v1.md`](docs/runtime-v1.md), and the hands

@@ -99,6 +99,10 @@ CREATE TABLE IF NOT EXISTS submissions (
 );
 CREATE INDEX IF NOT EXISTS submissions_pending
   ON submissions(conversation_id, status, accepted_at, id);
+CREATE INDEX IF NOT EXISTS submissions_runnable
+  ON submissions(status, accepted_at, id, conversation_id);
+CREATE UNIQUE INDEX IF NOT EXISTS submissions_one_running_per_conversation
+  ON submissions(conversation_id) WHERE status = 'running';
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -196,23 +200,6 @@ func (s *Store) Conversation(ctx context.Context, id string) (ponsruntime.Conver
 	}
 	conversation.CreatedAt, err = decodeTime(created)
 	return conversation, err
-}
-
-func (s *Store) ConversationIDs(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM conversations ORDER BY created_at, id`)
-	if err != nil {
-		return nil, fmt.Errorf("runtime: list conversations: %w", err)
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
 }
 
 func insertMessageTx(ctx context.Context, tx *sql.Tx, message ponsruntime.Message) error {
@@ -352,17 +339,32 @@ func conversationTx(ctx context.Context, tx *sql.Tx, id string) (ponsruntime.Con
 	return conversation, err
 }
 
-func (s *Store) ClaimNext(ctx context.Context, conversationID string) (*ponsruntime.ClaimedRun, error) {
+func (s *Store) ClaimRunnable(ctx context.Context) (*ponsruntime.ClaimedRun, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	var id, key, accepted string
+	var id, conversationID, key, accepted, workspace, conversationCreated string
 	err = tx.QueryRowContext(ctx, `
-SELECT id, idempotency_key, accepted_at FROM submissions
-WHERE conversation_id = ? AND status = ? ORDER BY accepted_at, id LIMIT 1`, conversationID, ponsruntime.RunQueued,
-	).Scan(&id, &key, &accepted)
+SELECT queued.id, queued.conversation_id, queued.idempotency_key, queued.accepted_at,
+       conversation.workspace, conversation.created_at
+FROM submissions AS queued
+JOIN conversations AS conversation ON conversation.id = queued.conversation_id
+WHERE queued.status = ?
+  AND NOT EXISTS (
+    SELECT 1 FROM submissions AS active
+    WHERE active.conversation_id = queued.conversation_id AND active.status = ?
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM submissions AS active
+    JOIN conversations AS active_conversation ON active_conversation.id = active.conversation_id
+    WHERE active.status = ? AND active_conversation.workspace = conversation.workspace
+  )
+ORDER BY queued.accepted_at, queued.id
+LIMIT 1`, ponsruntime.RunQueued, ponsruntime.RunRunning, ponsruntime.RunRunning,
+	).Scan(&id, &conversationID, &key, &accepted, &workspace, &conversationCreated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -377,13 +379,25 @@ WHERE conversation_id = ? AND status = ? ORDER BY accepted_at, id LIMIT 1`, conv
 	if err != nil {
 		return nil, err
 	}
+	createdAt, err := decodeTime(conversationCreated)
+	if err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	run := ponsruntime.Run{
 		ID: newID(), ConversationID: conversationID, InboundMessageID: id,
 		Status: ponsruntime.RunRunning, StartedAt: now,
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE submissions SET status = ? WHERE id = ?`, ponsruntime.RunRunning, id); err != nil {
+	result, err := tx.ExecContext(ctx, `UPDATE submissions SET status = ? WHERE id = ? AND status = ?`, ponsruntime.RunRunning, id, ponsruntime.RunQueued)
+	if err != nil {
 		return nil, err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if updated != 1 {
+		return nil, errors.New("runtime: runnable submission lost its claim race")
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO runs(id, conversation_id, submission_id, inbound_message_id, status, started_at)
@@ -413,8 +427,9 @@ VALUES(?, ?, ?, ?, ?, ?)`, run.ID, conversationID, id, id, run.Status, encodeTim
 		return nil, err
 	}
 	return &ponsruntime.ClaimedRun{
-		Message: ponsruntime.InboundMessage{ID: id, IdempotencyKey: key, Parts: parts, AcceptedAt: acceptedAt},
-		History: history, Run: run, Events: []ponsruntime.Event{subEvent, runEvent},
+		Conversation: ponsruntime.Conversation{ID: conversationID, Workspace: workspace, CreatedAt: createdAt},
+		Message:      ponsruntime.InboundMessage{ID: id, IdempotencyKey: key, Parts: parts, AcceptedAt: acceptedAt},
+		History:      history, Run: run, Events: []ponsruntime.Event{subEvent, runEvent},
 	}, nil
 }
 
@@ -729,26 +744,18 @@ func (s *Store) FailRun(ctx context.Context, run ponsruntime.Run, message string
 	return []ponsruntime.Event{runEvent, submissionEvent}, nil
 }
 
-func (s *Store) HasPending(ctx context.Context, conversationID string) (bool, error) {
-	var exists bool
-	err := s.db.QueryRowContext(ctx, `
-SELECT EXISTS(SELECT 1 FROM submissions WHERE conversation_id = ? AND status = ?)`, conversationID, ponsruntime.RunQueued,
-	).Scan(&exists)
-	return exists, err
-}
-
-func (s *Store) RecoverRunning(ctx context.Context, conversationID string) error {
+func (s *Store) RecoverRunning(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, inbound_message_id, started_at FROM runs
-WHERE conversation_id = ? AND status = ? ORDER BY started_at`, conversationID, ponsruntime.RunRunning)
+SELECT id, conversation_id, inbound_message_id, started_at FROM runs
+WHERE status = ? ORDER BY started_at`, ponsruntime.RunRunning)
 	if err != nil {
 		return err
 	}
-	type running struct{ id, inbound, started string }
+	type running struct{ id, conversation, inbound, started string }
 	var values []running
 	for rows.Next() {
 		var value running
-		if err := rows.Scan(&value.id, &value.inbound, &value.started); err != nil {
+		if err := rows.Scan(&value.id, &value.conversation, &value.inbound, &value.started); err != nil {
 			rows.Close()
 			return err
 		}
@@ -762,7 +769,7 @@ WHERE conversation_id = ? AND status = ? ORDER BY started_at`, conversationID, p
 		if err != nil {
 			return err
 		}
-		run := ponsruntime.Run{ID: value.id, ConversationID: conversationID, InboundMessageID: value.inbound, Status: ponsruntime.RunRunning, StartedAt: started}
+		run := ponsruntime.Run{ID: value.id, ConversationID: value.conversation, InboundMessageID: value.inbound, Status: ponsruntime.RunRunning, StartedAt: started}
 		if _, err := s.InterruptRequestedTools(ctx, run); err != nil {
 			return err
 		}

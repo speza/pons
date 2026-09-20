@@ -2,7 +2,8 @@
 
 **Status:** Transactional runtime and client synchronization implemented
 **Related:** [ADR-0008](adr-0008-runtime-orchestration-layer.md),
-[ADR-0010](adr-0010-runtime-state-and-client-synchronization.md)
+[ADR-0010](adr-0010-runtime-state-and-client-synchronization.md),
+[ADR-0012](adr-0012-scalable-runtime-coordination.md)
 
 This document turns ADR-0008 into the smallest useful local runtime shape. It
 is an implementation guide, not a second agent protocol.
@@ -23,7 +24,9 @@ agent and `pons client` uses that HTTP/SSE adapter. The default CLI invocation
 bundles both lifecycles but still communicates through the same loopback HTTP
 and SSE path.
 
-Runs are globally bounded and hold an exclusive workspace lease. When an
+Runs are globally bounded and SQLite claims runnable work only when its
+conversation and workspace have no active run. This is transactional local
+exclusion, not a renewable distributed lease. When an
 execution-environment provider is configured, each run starts a fresh hands
 session, registers only its discovered proxy tools, and closes the session
 before becoming idle. The Seatbelt provider launches `pons-hands`; the
@@ -266,9 +269,20 @@ owns its lifecycle.
 
 The initial local transactional implementation is `runtime/sqlite.Store`. The
 composition root imports both packages and injects the store into the manager.
-The runtime remains single-process in v1 and protects each conversation with an
-in-process lock; multiple processes additionally require database-backed
-atomic claims or leases.
+The runtime remains single-process in v1. The manager claims work lazily rather
+than loading every conversation at startup, creates live conversation state
+only for active/API/subscriber use, and starts no more than `MaxConcurrent` run
+goroutines. SQLite atomically enforces one running submission per conversation
+and exclusive workspace ownership. Process-local locks protect subscriber
+delivery and live object state; they are not execution ownership.
+
+Submissions and run completions send coalesced wake hints to the scheduler. A
+low-frequency bounded repair scan uses the same atomic claim operation, so a
+lost hint cannot strand durable work and does not require enumerating every
+conversation. SQLite startup recovery assumes one exclusive manager and marks
+abandoned requested tools interrupted with an unknown outcome; it never
+silently repeats them. Multiple live processes require renewable leases,
+fencing on every run mutation, and cross-process runnable/outbox notification.
 
 ### Implementation
 
@@ -407,7 +421,7 @@ Continue the runtime in this order:
 2. bounded event retention and the snapshot-required response for expired cursors;
 3. a second runtime channel;
 4. explicit cross-channel identity linking and handoff;
-5. durable multi-process claims/leases; and
+5. renewable multi-process leases, fencing, and cross-process notification; and
 6. authenticated remote HTTP deployment.
 
 A future handoff always forks a completed active transcript path into a new

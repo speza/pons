@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -46,8 +47,45 @@ type claimErrorStore struct {
 	err error
 }
 
-func (s claimErrorStore) ClaimNext(context.Context, string) (*ponsruntime.ClaimedRun, error) {
+func (s claimErrorStore) ClaimRunnable(context.Context) (*ponsruntime.ClaimedRun, error) {
 	return nil, s.err
+}
+
+type observingStore struct {
+	ponsruntime.Store
+	conversationReads atomic.Int32
+	claimCalls        atomic.Int32
+}
+
+type delayedClaimStore struct {
+	ponsruntime.Store
+	claimed chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *delayedClaimStore) ClaimRunnable(ctx context.Context) (*ponsruntime.ClaimedRun, error) {
+	claim, err := s.Store.ClaimRunnable(ctx)
+	if err != nil || claim == nil {
+		return claim, err
+	}
+	s.once.Do(func() { close(s.claimed) })
+	select {
+	case <-s.release:
+		return claim, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (s *observingStore) Conversation(ctx context.Context, id string) (ponsruntime.Conversation, error) {
+	s.conversationReads.Add(1)
+	return s.Store.Conversation(ctx, id)
+}
+
+func (s *observingStore) ClaimRunnable(ctx context.Context) (*ponsruntime.ClaimedRun, error) {
+	s.claimCalls.Add(1)
+	return s.Store.ClaimRunnable(ctx)
 }
 
 func testManager(t *testing.T, runner Runner) *Manager {
@@ -85,6 +123,316 @@ func waitForEvent(t *testing.T, m *Manager, conversationID, eventType string, co
 	}
 	t.Fatalf("timed out waiting for %d %s event(s)", count, eventType)
 	return nil
+}
+
+func waitUntil(t *testing.T, condition func() bool, message string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal(message)
+}
+
+func TestManagerDoesNotEagerlyHydrateDormantConversations(t *testing.T) {
+	base, err := runtimesqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	ctx := context.Background()
+	var first ponsruntime.Conversation
+	for range 50 {
+		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+		if err := base.CreateConversation(ctx, conversation); err != nil {
+			t.Fatal(err)
+		}
+		if first.ID == "" {
+			first = conversation
+		}
+	}
+	store := &observingStore{Store: base}
+	manager, err := New(Config{
+		Store: store, Workspace: t.TempDir(), RepairInterval: time.Hour,
+		Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
+			return RunResult{}, errors.New("unexpected run")
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	waitUntil(t, func() bool { return store.claimCalls.Load() > 0 }, "initial runnable check did not run")
+	if reads := store.conversationReads.Load(); reads != 0 {
+		t.Fatalf("startup hydrated %d dormant conversations", reads)
+	}
+	if _, err := manager.View(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if reads := store.conversationReads.Load(); reads != 1 {
+		t.Fatalf("lazy view reads = %d, want 1", reads)
+	}
+}
+
+func TestRepairScanFindsWorkAfterLostWake(t *testing.T) {
+	base, err := runtimesqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	store := &observingStore{Store: base}
+	ran := make(chan string, 1)
+	manager, err := New(Config{
+		Store: store, Workspace: t.TempDir(), RepairInterval: 10 * time.Millisecond,
+		Runner: RunnerFunc(func(_ context.Context, request RunRequest) (RunResult, error) {
+			ran <- request.Text
+			return RunResult{Answer: "done"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	waitUntil(t, func() bool { return store.claimCalls.Load() > 0 }, "initial runnable check did not run")
+	conversation, err := manager.CreateConversation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Write through the store to deliberately bypass Manager.Submit's wake.
+	if _, _, err := base.Accept(context.Background(), conversation.ID, "lost-wake", []TextPart{{Type: "text", Text: "repair me"}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case text := <-ran:
+		if text != "repair me" {
+			t.Fatalf("run text = %q", text)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("repair scan did not discover durable work")
+	}
+}
+
+func TestSchedulerBoundsActiveRunGoroutines(t *testing.T) {
+	store, err := runtimesqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	for i := range 4 {
+		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+		if err := store.CreateConversation(ctx, conversation); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.Accept(ctx, conversation.ID, fmt.Sprintf("key-%d", i), []TextPart{{Type: "text", Text: "go"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	started := make(chan struct{}, 4)
+	var active, maximum atomic.Int32
+	manager, err := New(Config{
+		Store: store, Workspace: t.TempDir(), MaxConcurrent: 2,
+		Runner: RunnerFunc(func(ctx context.Context, _ RunRequest) (RunResult, error) {
+			current := active.Add(1)
+			defer active.Add(-1)
+			for {
+				old := maximum.Load()
+				if current <= old || maximum.CompareAndSwap(old, current) {
+					break
+				}
+			}
+			started <- struct{}{}
+			<-ctx.Done()
+			return RunResult{}, ctx.Err()
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(3 * time.Second):
+			t.Fatal("scheduler did not fill its bounded capacity")
+		}
+	}
+	select {
+	case <-started:
+		t.Fatal("scheduler started more runs than MaxConcurrent")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if maximum.Load() != 2 {
+		t.Fatalf("maximum active runs = %d, want 2", maximum.Load())
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkspaceExclusionIsEnforcedByRunnableClaim(t *testing.T) {
+	store, err := runtimesqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	workspace := t.TempDir()
+	for i := range 2 {
+		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), Workspace: workspace, CreatedAt: time.Now().UTC().Add(time.Duration(i) * time.Nanosecond)}
+		if err := store.CreateConversation(ctx, conversation); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.Accept(ctx, conversation.ID, fmt.Sprintf("key-%d", i), []TextPart{{Type: "text", Text: "go"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	started := make(chan string, 2)
+	release := make(chan struct{}, 2)
+	manager, err := New(Config{
+		Store: store, Workspace: workspace, MaxConcurrent: 2,
+		Runner: RunnerFunc(func(_ context.Context, request RunRequest) (RunResult, error) {
+			started <- request.ConversationID
+			<-release
+			return RunResult{Answer: "done"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first workspace run did not start")
+	}
+	select {
+	case <-started:
+		t.Fatal("two runs owned the same workspace")
+	case <-time.After(100 * time.Millisecond):
+	}
+	release <- struct{}{}
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("second workspace run did not start after release")
+	}
+	release <- struct{}{}
+}
+
+func TestCompetingManagersDoNotDuplicateSQLiteClaim(t *testing.T) {
+	// SQLite remains a single-manager backend. This test only proves that its
+	// claim transaction does not hand one submission to two competing local
+	// workers; it does not imply leases, fencing, or supported process failover.
+	stateDir, workspace := t.TempDir(), t.TempDir()
+	storeA, err := runtimesqlite.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storeA.Close()
+	storeB, err := runtimesqlite.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storeB.Close()
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), Workspace: workspace, CreatedAt: time.Now().UTC()}
+	if err := storeA.CreateConversation(context.Background(), conversation); err != nil {
+		t.Fatal(err)
+	}
+	var executions atomic.Int32
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	runner := RunnerFunc(func(_ context.Context, _ RunRequest) (RunResult, error) {
+		executions.Add(1)
+		started <- struct{}{}
+		<-release
+		return RunResult{Answer: "done"}, nil
+	})
+	managerA, err := New(Config{Store: storeA, Workspace: workspace, Runner: runner, RepairInterval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer managerA.Close()
+	managerB, err := New(Config{Store: storeB, Workspace: workspace, Runner: runner, RepairInterval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer managerB.Close()
+	if _, _, err := storeA.Accept(context.Background(), conversation.ID, "once", []TextPart{{Type: "text", Text: "go"}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("neither manager claimed durable work")
+	}
+	select {
+	case <-started:
+		t.Fatal("submission was claimed by both managers")
+	case <-time.After(150 * time.Millisecond):
+	}
+	if executions.Load() != 1 {
+		t.Fatalf("executions = %d, want 1", executions.Load())
+	}
+	close(release)
+}
+
+func TestSubscribeDuringClaimBroadcastDoesNotDuplicateDurableEvents(t *testing.T) {
+	base, err := runtimesqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	if err := base.CreateConversation(context.Background(), conversation); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := base.Accept(context.Background(), conversation.ID, "key", []TextPart{{Type: "text", Text: "go"}}); err != nil {
+		t.Fatal(err)
+	}
+	store := &delayedClaimStore{Store: base, claimed: make(chan struct{}), release: make(chan struct{})}
+	manager, err := New(Config{
+		Store: store, Workspace: conversation.Workspace,
+		Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
+			return RunResult{Answer: "done"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	select {
+	case <-store.claimed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("claim did not commit")
+	}
+	stream, err := manager.Subscribe(t.Context(), conversation.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(store.release)
+	var cursors []uint64
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case event := <-stream:
+			if event.ID != 0 {
+				cursors = append(cursors, event.ID)
+			}
+			if event.Type == EventMessageUpserted && event.Message != nil && event.Message.Final {
+				for i, cursor := range cursors {
+					if cursor != uint64(i+1) {
+						t.Fatalf("durable cursors = %v", cursors)
+					}
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for final event; cursors = %v", cursors)
+		}
+	}
 }
 
 func TestConversationSerializesMessagesAndDeduplicates(t *testing.T) {
@@ -366,21 +714,15 @@ func TestRestartMarksRequestedToolInterruptedWithoutRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	first, err := New(Config{Store: store, Workspace: workspace, Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
-		return RunResult{}, errors.New("unexpected run")
-	})})
-	if err != nil {
-		t.Fatal(err)
-	}
-	conversation, err := first.CreateConversation(context.Background())
-	if err != nil {
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), Workspace: workspace, CreatedAt: time.Now().UTC()}
+	if err := store.CreateConversation(context.Background(), conversation); err != nil {
 		t.Fatal(err)
 	}
 	accepted, _, err := store.Accept(context.Background(), conversation.ID, "stable", []TextPart{{Type: "text", Text: "do it"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	claim, err := store.ClaimNext(context.Background(), conversation.ID)
+	claim, err := store.ClaimRunnable(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,10 +731,6 @@ func TestRestartMarksRequestedToolInterruptedWithoutRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := first.Close(); err != nil {
-		t.Fatal(err)
-	}
-
 	var executions atomic.Int32
 	second, err := New(Config{Store: store, Workspace: workspace, Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
 		executions.Add(1)
@@ -440,7 +778,7 @@ func TestClaimHistoryExcludesLaterQueuedMessages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimA, err := store.ClaimNext(ctx, conversation.ID)
+	claimA, err := store.ClaimRunnable(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,7 +788,7 @@ func TestClaimHistoryExcludesLaterQueuedMessages(t *testing.T) {
 	if _, _, err := store.FinishRun(ctx, claimA.Run, "answer A"); err != nil {
 		t.Fatal(err)
 	}
-	claimB, err := store.ClaimNext(ctx, conversation.ID)
+	claimB, err := store.ClaimRunnable(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +817,7 @@ func TestAssistantToolTurnsRemainOrderedAndComplete(t *testing.T) {
 	if _, _, err := store.Accept(ctx, conversation.ID, "one", []TextPart{{Type: "text", Text: "go"}}); err != nil {
 		t.Fatal(err)
 	}
-	claim, err := store.ClaimNext(ctx, conversation.ID)
+	claim, err := store.ClaimRunnable(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,23 +869,13 @@ func TestRestartRunsDurablyQueuedSubmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	first, err := New(Config{Store: store, Workspace: workspace, Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
-		return RunResult{}, errors.New("unexpected run")
-	})})
-	if err != nil {
-		t.Fatal(err)
-	}
-	conversation, err := first.CreateConversation(context.Background())
-	if err != nil {
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), Workspace: workspace, CreatedAt: time.Now().UTC()}
+	if err := store.CreateConversation(context.Background(), conversation); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := store.Accept(context.Background(), conversation.ID, "queued", []TextPart{{Type: "text", Text: "resume me"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := first.Close(); err != nil {
-		t.Fatal(err)
-	}
-
 	ran := make(chan string, 1)
 	second, err := New(Config{Store: store, Workspace: workspace, Runner: RunnerFunc(func(_ context.Context, request RunRequest) (RunResult, error) {
 		ran <- request.Text
