@@ -180,7 +180,9 @@ Useful flags: `--workspace` (jail root; default: current directory),
 `--state-dir`, `--max-turns`, `--compact-chars`, `--plugin MANIFEST` (explicit
 repeatable hands-side external plugin), `--plugin-path PATH` (safe PATH for
 interpreted plugin runtimes), `--sandbox seatbelt`, `--hands-command`, and
-`--debug` (raw tool inputs/outputs and provider turn details). Tool output caps
+`--debug` (runtime/provider/model settings, effective sandbox and network
+policy, hands startup, raw tool inputs/outputs, and provider turn details).
+Tool output caps
 are tunable at the composition: `--fs-read-bytes`
 (read_file cap; 0 = 256 KiB, negative = unlimited), `--bash-timeout`,
 `--bash-max-lines`, `--bash-max-bytes`, and `--plugin-max-result-bytes`

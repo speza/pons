@@ -24,6 +24,7 @@ go run ./cmd/pons \
 	-sandbox seatbelt \
 	-hands-command "$repo_root/.build/pons-hands" \
 	-state-dir "$state_dir" \
+	-debug \
 	-message "$prompt" | tee "$output_file"
 
 answer="$(awk 'NF { answer=$0 } END { print answer }' "$output_file")"

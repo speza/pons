@@ -65,9 +65,11 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 	defer provider.Close()
 	workspace := t.TempDir()
 	execution := &recordingEnvironment{specs: make(chan environment.Spec, 2)}
+	var debugLog bytes.Buffer
 	runner := &agentRunner{opts: serverOptions{
 		Workspace:   workspace,
 		MaxTurns:    3,
+		Debug:       true,
 		Environment: execution,
 		EnvironmentSpec: environment.Spec{
 			Command: []string{"/test/pons-hands"},
@@ -75,7 +77,7 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 		Brain: llm.Config{
 			Provider: "openai", Model: "test", APIKey: "test", BaseURL: provider.URL + "/v1",
 		},
-	}}
+	}, logger: log.New(&debugLog, "", 0)}
 	requestNumber := 0
 	var history []ponsruntime.Message
 	request := func(text string) ponsruntime.RunRequest {
@@ -107,9 +109,37 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 	if execution.starts.Load() != 2 || execution.closes.Load() != 2 {
 		t.Fatalf("environment lifecycle: starts=%d closes=%d", execution.starts.Load(), execution.closes.Load())
 	}
+	if got := debugLog.String(); !strings.Contains(got, "sandbox=recording") || !strings.Contains(got, "workspace="+fmt.Sprintf("%q", workspace)) {
+		t.Fatalf("debug log omits effective environment: %s", got)
+	}
 	for range 2 {
 		if spec := <-execution.specs; spec.Workspace != workspace {
 			t.Fatalf("environment workspace = %q, want %q", spec.Workspace, workspace)
+		}
+	}
+}
+
+func TestDebugConfigurationIncludesSandboxPolicy(t *testing.T) {
+	var output bytes.Buffer
+	logDebugConfiguration(log.New(&output, "", 0), serverOptions{
+		Debug: true, Sandbox: "seatbelt", Workspace: "/workspace", MaxTurns: 12, MaxConcurrent: 4,
+		Brain:       llm.Config{Provider: "codex", Model: "gpt-5.6-luna"},
+		Environment: &recordingEnvironment{},
+		EnvironmentSpec: environment.Spec{
+			Command:  []string{"/usr/local/bin/pons-hands"},
+			Network:  environment.NetworkDisabled,
+			ReadOnly: []string{"/plugins"},
+		},
+		PluginPaths: []string{"plugin.json"},
+	})
+	got := output.String()
+	for _, want := range []string{
+		"provider=codex", "model=gpt-5.6-luna", `workspace="/workspace"`,
+		"sandbox=seatbelt", "network=disabled", `hands="/usr/local/bin/pons-hands"`,
+		"external_plugins=1", "read_only_paths=1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("debug configuration missing %q: %s", want, got)
 		}
 	}
 }

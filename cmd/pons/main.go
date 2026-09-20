@@ -71,7 +71,7 @@ func main() {
 	flag.Parse()
 
 	if mode == "client" {
-		if err := runClient(rootCtx, *serverURL, *conversationID, *idempotencyKey, *message, *interactive); err != nil && !errors.Is(err, context.Canceled) {
+		if err := runClient(rootCtx, *serverURL, *conversationID, *idempotencyKey, *message, *interactive, *debug); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Printf("client: %v", err)
 			os.Exit(1)
 		}
@@ -174,6 +174,7 @@ func main() {
 		MaxConcurrent: *runtimeConcurrency, MaxTurns: *maxTurns, Brain: brainConfig,
 		FSReadBytes: *fsReadBytes, BashTimeout: *bashTimeout, BashMaxLines: *bashMaxLines, BashMaxBytes: *bashMaxBytes,
 		PluginPaths: pluginPaths, PluginPath: *pluginPath, PluginMaxResultBytes: *pluginMaxResultBytes, Debug: *debug,
+		Sandbox: *sandbox,
 	}
 	serverOpts.Environment, serverOpts.EnvironmentSpec, err = executionEnvironment(*sandbox, *handsCommand, *sandboxNetwork, serverOpts)
 	if err != nil {
@@ -250,7 +251,7 @@ func firstLine(s string, n int) string {
 
 // showResult prints a tool result indented under its call, capped so a
 // huge output doesn't drown the transcript; --debug shows everything.
-func showResult(obs string) {
+func showResult(obs string, debug bool) {
 	if strings.TrimSpace(obs) == "" {
 		fmt.Printf("  ⇢ (no output)\n")
 		return
@@ -259,7 +260,7 @@ func showResult(obs string) {
 	lines := strings.Split(strings.TrimRight(obs, "\n"), "\n")
 	shown, used := 0, 0
 	for _, l := range lines {
-		if shown >= maxLines || used+len(l) > maxChars {
+		if !debug && (shown >= maxLines || used+len(l) > maxChars) {
 			fmt.Printf("  ⇢ … %d more line(s) — run with --debug for the full output\n", len(lines)-shown)
 			return
 		}

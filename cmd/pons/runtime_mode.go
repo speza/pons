@@ -46,6 +46,7 @@ type serverOptions struct {
 	PluginPath           string
 	PluginMaxResultBytes int
 	Debug                bool
+	Sandbox              string
 	Environment          environment.Provider
 	EnvironmentSpec      environment.Spec
 }
@@ -58,6 +59,7 @@ func runServerReady(ctx context.Context, logger *log.Logger, opts serverOptions,
 	if err := validateLoopbackAddress(opts.Address); err != nil {
 		return err
 	}
+	logDebugConfiguration(logger, opts)
 	store, err := runtimesqlite.Open(opts.StateDir)
 	if err != nil {
 		return err
@@ -125,6 +127,38 @@ func runServerReady(ctx context.Context, logger *log.Logger, opts serverOptions,
 	}
 }
 
+func logDebugConfiguration(logger *log.Logger, opts serverOptions) {
+	if !opts.Debug {
+		return
+	}
+	model := opts.Brain.Model
+	if model == "" {
+		model = "provider-default"
+	}
+	logger.Printf("[debug] runtime config: provider=%s model=%s workspace=%q max_turns=%d max_concurrent=%d",
+		opts.Brain.Provider, model, opts.Workspace, opts.MaxTurns, opts.MaxConcurrent)
+
+	sandbox, network, hands := opts.Sandbox, "host", "in-process"
+	if sandbox == "" {
+		if opts.Environment == nil {
+			sandbox = "none"
+		} else {
+			sandbox = "custom"
+		}
+	}
+	if opts.Environment != nil {
+		network = string(opts.EnvironmentSpec.Network)
+		if network == "" {
+			network = "unspecified"
+		}
+		if len(opts.EnvironmentSpec.Command) > 0 {
+			hands = opts.EnvironmentSpec.Command[0]
+		}
+	}
+	logger.Printf("[debug] hands config: sandbox=%s network=%s hands=%q external_plugins=%d read_only_paths=%d",
+		sandbox, network, hands, len(opts.PluginPaths), len(opts.EnvironmentSpec.ReadOnly))
+}
+
 func runBundled(ctx context.Context, logger *log.Logger, opts serverOptions, conversationID, idempotencyKey, message string, interactive bool) error {
 	serverCtx, stopServer := context.WithCancel(ctx)
 	defer stopServer()
@@ -140,7 +174,7 @@ func runBundled(ctx context.Context, logger *log.Logger, opts serverOptions, con
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	clientErr := runClient(ctx, serverURL, conversationID, idempotencyKey, message, interactive)
+	clientErr := runClient(ctx, serverURL, conversationID, idempotencyKey, message, interactive, opts.Debug)
 	stopServer()
 	serverErr := <-done
 	if errors.Is(serverErr, context.Canceled) {
@@ -271,6 +305,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		}
 	}()
 	plugins := make([]pons.Plugin, 0, 4+len(r.opts.PluginPaths))
+	effectiveSandbox, effectiveNetwork := "none", "host"
 	if r.opts.Environment != nil {
 		spec := r.opts.EnvironmentSpec
 		spec.Workspace = request.Workspace
@@ -279,6 +314,15 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 			return result, fmt.Errorf("start execution environment: %w", startErr)
 		}
 		defer func() { err = errors.Join(err, session.Close()) }()
+		metadata := session.Metadata()
+		effectiveSandbox = metadata.Provider
+		effectiveNetwork = string(metadata.Network)
+		if effectiveSandbox == "" {
+			effectiveSandbox = r.opts.Sandbox
+		}
+		if effectiveNetwork == "" {
+			effectiveNetwork = string(spec.Network)
+		}
 		plugins = append(plugins, environment.Proxy(session))
 	} else {
 		fsTools, fsErr := fs.New(fs.Config{Root: request.Workspace, MaxReadBytes: r.opts.FSReadBytes})
@@ -306,6 +350,10 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	plugins = append(plugins, brain)
 	if err := core.Use(plugins...); err != nil {
 		return result, err
+	}
+	if r.opts.Debug {
+		r.logger.Printf("[debug] run %s: hands ready: sandbox=%s network=%s workspace=%q tools=%d",
+			request.RunID, effectiveSandbox, effectiveNetwork, request.Workspace, len(core.ToolSpecs()))
 	}
 	core.OnEventError(func(event pons.Event) error {
 		switch event.Type {
@@ -387,7 +435,7 @@ func runtimeTurns(messages []ponsruntime.Message) ([]llm.Turn, error) {
 	return turns, nil
 }
 
-func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, message string, interactive bool) error {
+func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, message string, interactive, debug bool) error {
 	client := httptransport.Client{BaseURL: serverURL}
 	sendCount := 0
 	send := func(text string) error {
@@ -398,7 +446,9 @@ func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, m
 		wasNew := conversationID == ""
 		var onSnapshot func(ponsruntime.ConversationView)
 		if sendCount == 0 && conversationID != "" {
-			onSnapshot = renderConversationSnapshot
+			onSnapshot = func(view ponsruntime.ConversationView) {
+				renderConversationSnapshot(view, debug)
+			}
 		}
 		result, err := client.Send(ctx, conversationID, key, text, onSnapshot, func(event ponsruntime.Event) {
 			switch event.Type {
@@ -408,7 +458,7 @@ func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, m
 					fmt.Printf("▸ %s: %s\n", action.Kind, primaryArg(action))
 				}
 				if event.ToolCall != nil && event.ToolCall.Result != nil {
-					showResult(event.ToolCall.Result.Observation())
+					showResult(event.ToolCall.Result.Observation(), debug)
 				}
 			}
 		})
@@ -456,7 +506,7 @@ func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, m
 	return ctx.Err()
 }
 
-func renderConversationSnapshot(view ponsruntime.ConversationView) {
+func renderConversationSnapshot(view ponsruntime.ConversationView, debug bool) {
 	for _, message := range view.Messages {
 		switch message.Role {
 		case "user":
@@ -478,7 +528,7 @@ func renderConversationSnapshot(view ponsruntime.ConversationView) {
 		case "tool":
 			for _, part := range message.Parts {
 				if part.Type == "tool_result" && part.Result != nil {
-					showResult(part.Result.Observation())
+					showResult(part.Result.Observation(), debug)
 				}
 			}
 		}
