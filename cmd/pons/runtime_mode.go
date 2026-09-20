@@ -119,11 +119,18 @@ func runServerReady(ctx context.Context, logger *log.Logger, opts serverOptions,
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			return err
+		shutdownDone := make(chan error, 1)
+		go func() { shutdownDone <- server.Shutdown(shutdownCtx) }()
+		// Shutdown stops accepting connections but waits for active handlers.
+		// Close the runtime concurrently so SSE subscriptions terminate instead
+		// of holding graceful shutdown open until its deadline.
+		managerErr := manager.Close()
+		shutdownErr := <-shutdownDone
+		serveErr := <-done
+		if errors.Is(serveErr, http.ErrServerClosed) {
+			serveErr = nil
 		}
-		<-done
-		return nil
+		return errors.Join(managerErr, shutdownErr, serveErr)
 	}
 }
 

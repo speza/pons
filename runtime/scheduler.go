@@ -61,12 +61,6 @@ func (c *liveConversation) work(ctx context.Context, cancel context.CancelFunc, 
 	// shutdown or runner cancellation we still need to durably resolve the run
 	// and mark any requested tool outcome as unknown rather than strand it.
 	if runErr != nil {
-		toolEvents, interruptErr := c.manager.store.InterruptRequestedTools(context.Background(), claim.Run)
-		if interruptErr == nil {
-			c.broadcastLocked(toolEvents...)
-		} else {
-			runErr = errors.Join(runErr, interruptErr)
-		}
 		events, persistErr := c.manager.store.FailRun(context.Background(), claim.Run, runErr.Error())
 		if persistErr == nil {
 			c.broadcastLocked(events...)

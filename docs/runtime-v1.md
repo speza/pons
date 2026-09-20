@@ -84,9 +84,11 @@ an inbound submission.
 
 ### Tool result
 
-The observation for one tool call. It is correlated by the tool-call ID and is
-persisted separately from the assistant message. A provider adapter may group
-several results into the provider-specific request shape.
+The observation for one tool call. It is correlated by the tool-call ID within
+its run and is persisted separately from the assistant message. Provider IDs
+need not be globally unique; durable and client identity is the pair of run ID
+and tool-call ID. A provider adapter may group several results into the
+provider-specific request shape.
 
 ## Conversation lifecycle
 

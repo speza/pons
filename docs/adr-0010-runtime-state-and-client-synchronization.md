@@ -81,6 +81,10 @@ call without a committed result is resolved as interrupted with an unknown
 outcome; the runtime does not infer that state by folding presentation events
 and does not automatically repeat the side effect.
 
+Provider tool-call IDs are correlation values scoped to one run, not globally
+unique entity IDs. Durable storage and clients identify a tool call by
+`(run_id, tool_call_id)`.
+
 Runnable claims and workspace exclusion are store-owned coordination under
 ADR-0012. Local capacity counters, cancellation functions, wake hints, and
 live subscriber lists remain in-memory acceleration. None is conversation
@@ -180,10 +184,16 @@ complete tool call:
   insert ToolResult
   update tool-call outcome and result-message identity
   append tool-call/message events
+
+fail run:
+  resolve every requested tool as interrupted with outcome unknown
+  update run and submission to failed
+  append tool/message/run/submission events
 ```
 
 No tool executes until its complete assistant turn and requested tool-call
-state have committed.
+state have committed. Run failure and interruption of its remaining requested
+tools commit atomically, so terminal runs cannot strand requested tools.
 
 ## Relationship to legacy session storage
 

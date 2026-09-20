@@ -119,7 +119,7 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE INDEX IF NOT EXISTS runs_conversation_status
   ON runs(conversation_id, status, started_at);
 CREATE TABLE IF NOT EXISTS tool_calls (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL,
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   run_id TEXT NOT NULL REFERENCES runs(id),
   inbound_message_id TEXT NOT NULL,
@@ -129,7 +129,8 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   status TEXT NOT NULL,
   result BLOB,
   result_message_id TEXT,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(run_id, id)
 );
 CREATE INDEX IF NOT EXISTS tool_calls_conversation
   ON tool_calls(conversation_id, run_id, updated_at);
@@ -585,14 +586,32 @@ func (s *Store) toolFinished(ctx context.Context, run ponsruntime.Run, result pr
 		return nil, err
 	}
 	defer tx.Rollback()
+	events, err := toolFinishedTx(ctx, tx, run, result, status, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func toolFinishedTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	run ponsruntime.Run,
+	result protocol.ToolResult,
+	status string,
+	now time.Time,
+) ([]ponsruntime.Event, error) {
 	var args []byte
 	var kindText string
 	if err := tx.QueryRowContext(ctx,
-		`SELECT kind, arguments FROM tool_calls WHERE id = ? AND run_id = ?`, result.ActionID, run.ID,
+		`SELECT kind, arguments FROM tool_calls WHERE id = ? AND run_id = ? AND status = ?`,
+		result.ActionID, run.ID, ponsruntime.ToolRequested,
 	).Scan(&kindText, &args); err != nil {
 		return nil, err
 	}
-	now := time.Now().UTC()
 	message := ponsruntime.Message{
 		ID: newID(), ConversationID: run.ConversationID, InboundMessageID: run.InboundMessageID,
 		RunID: run.ID, Role: "tool", Complete: true, CreatedAt: now,
@@ -605,10 +624,19 @@ func (s *Store) toolFinished(ctx context.Context, run ponsruntime.Run, result pr
 	if err != nil {
 		return nil, err
 	}
-	if _, err := tx.ExecContext(ctx, `
+	updated, err := tx.ExecContext(ctx, `
 UPDATE tool_calls SET status = ?, result = ?, result_message_id = ?, updated_at = ?
-WHERE id = ? AND run_id = ?`, status, encoded, message.ID, encodeTime(now), result.ActionID, run.ID); err != nil {
+WHERE id = ? AND run_id = ? AND status = ?`, status, encoded, message.ID, encodeTime(now),
+		result.ActionID, run.ID, ponsruntime.ToolRequested)
+	if err != nil {
 		return nil, err
+	}
+	count, err := updated.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if count != 1 {
+		return nil, fmt.Errorf("runtime: requested tool %q lost its completion race", result.ActionID)
 	}
 	tool := ponsruntime.ToolCall{
 		ID: result.ActionID, ConversationID: run.ConversationID, RunID: run.ID,
@@ -624,9 +652,6 @@ WHERE id = ? AND run_id = ?`, status, encoded, message.ID, encodeTime(now), resu
 	}
 	messageEvent, err := updateMessageEventTx(ctx, tx, message)
 	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return []ponsruntime.Event{toolEvent, messageEvent}, nil
@@ -714,6 +739,10 @@ func (s *Store) FailRun(ctx context.Context, run ponsruntime.Run, message string
 	}
 	defer tx.Rollback()
 	now := time.Now().UTC()
+	events, err := interruptRequestedToolsTx(ctx, tx, run, now)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE submissions SET status = ?, error = ? WHERE id = ?`, ponsruntime.RunFailed, message, run.InboundMessageID); err != nil {
 		return nil, err
 	}
@@ -748,7 +777,53 @@ func (s *Store) FailRun(ctx context.Context, run ponsruntime.Run, message string
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return []ponsruntime.Event{runEvent, submissionEvent}, nil
+	return append(events, runEvent, submissionEvent), nil
+}
+
+func interruptRequestedToolsTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	run ponsruntime.Run,
+	now time.Time,
+) ([]ponsruntime.Event, error) {
+	rows, err := tx.QueryContext(ctx, `
+SELECT id, kind FROM tool_calls
+WHERE run_id = ? AND status = ? ORDER BY rowid`, run.ID, ponsruntime.ToolRequested)
+	if err != nil {
+		return nil, err
+	}
+	type requestedTool struct {
+		id   string
+		kind string
+	}
+	var tools []requestedTool
+	for rows.Next() {
+		var tool requestedTool
+		if err := rows.Scan(&tool.id, &tool.kind); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		tools = append(tools, tool)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	events := make([]ponsruntime.Event, 0, len(tools)*2)
+	for _, tool := range tools {
+		result := protocol.ToolResult{
+			ActionID: tool.id,
+			Kind:     tool.kind,
+			OK:       false,
+			Error:    "execution was interrupted; outcome unknown",
+		}
+		finished, err := toolFinishedTx(ctx, tx, run, result, ponsruntime.ToolInterrupted, now)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, finished...)
+	}
+	return events, nil
 }
 
 func (s *Store) RecoverRunning(ctx context.Context) error {
@@ -777,42 +852,11 @@ WHERE status = ? ORDER BY started_at`, ponsruntime.RunRunning)
 			return err
 		}
 		run := ponsruntime.Run{ID: value.id, ConversationID: value.conversation, InboundMessageID: value.inbound, Status: ponsruntime.RunRunning, StartedAt: started}
-		if _, err := s.InterruptRequestedTools(ctx, run); err != nil {
-			return err
-		}
 		if _, err := s.FailRun(ctx, run, "execution was interrupted; outcome unknown"); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-func (s *Store) InterruptRequestedTools(ctx context.Context, run ponsruntime.Run) ([]ponsruntime.Event, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, kind FROM tool_calls WHERE run_id = ? AND status = ?`, run.ID, ponsruntime.ToolRequested)
-	if err != nil {
-		return nil, err
-	}
-	var results []protocol.ToolResult
-	for rows.Next() {
-		var id, kind string
-		if err := rows.Scan(&id, &kind); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		results = append(results, protocol.ToolResult{ActionID: id, Kind: kind, OK: false, Error: "execution was interrupted; outcome unknown"})
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	var events []ponsruntime.Event
-	for _, result := range results {
-		finished, err := s.toolFinished(ctx, run, result, ponsruntime.ToolInterrupted)
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, finished...)
-	}
-	return events, nil
 }
 
 func (s *Store) Events(ctx context.Context, conversationID string, after uint64) ([]ponsruntime.Event, error) {

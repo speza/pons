@@ -155,6 +155,49 @@ func TestRuntimeServerRejectsPublicBind(t *testing.T) {
 	}
 }
 
+func TestRuntimeServerShutdownClosesActiveSSE(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan string, 1)
+	done := make(chan error, 1)
+	stateDir, workspace := t.TempDir(), t.TempDir()
+	go func() {
+		done <- runServerReady(ctx, log.New(io.Discard, "", 0), serverOptions{
+			Address: "127.0.0.1:0", StateDir: stateDir, Workspace: workspace, MaxConcurrent: 1,
+		}, started)
+	}()
+	serverURL := <-started
+	response, err := http.Post(serverURL+"/v1/conversations", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %s", response.Status)
+	}
+	var conversation ponsruntime.Conversation
+	if err := json.NewDecoder(response.Body).Decode(&conversation); err != nil {
+		t.Fatal(err)
+	}
+	stream, err := http.Get(serverURL + "/v1/conversations/" + conversation.ID + "/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+	if stream.StatusCode != http.StatusOK {
+		t.Fatalf("stream status = %s", stream.Status)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server shutdown waited on active SSE subscription")
+	}
+}
+
 func TestRuntimeTurnsPreserveJSONNumberPrecision(t *testing.T) {
 	turns, err := runtimeTurns([]ponsruntime.Message{{
 		ID: "assistant", Role: "assistant", Complete: true,
