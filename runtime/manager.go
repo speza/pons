@@ -29,24 +29,10 @@ type Manager struct {
 	cancel context.CancelFunc
 	wake   chan struct{}
 	mu     sync.Mutex
-	convs  map[string]*managedConversation
+	convs  map[string]*liveConversation
 	active int
 	closed bool
 	wg     sync.WaitGroup
-}
-
-type subscriber struct {
-	ch         chan Event
-	lastCursor uint64
-}
-
-type managedConversation struct {
-	manager      *Manager
-	conversation Conversation
-	mu           sync.Mutex
-	subscribers  map[uint64]*subscriber
-	nextSubID    uint64
-	cancel       context.CancelFunc
 }
 
 func New(cfg Config) (*Manager, error) {
@@ -71,16 +57,12 @@ func New(cfg Config) (*Manager, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
 		cfg: cfg, store: cfg.Store, ctx: ctx, cancel: cancel,
-		wake: make(chan struct{}, 1), convs: make(map[string]*managedConversation),
+		wake: make(chan struct{}, 1), convs: make(map[string]*liveConversation),
 	}
 	m.wg.Add(1)
 	go m.schedule()
 	m.notify()
 	return m, nil
-}
-
-func (m *Manager) newManaged(value Conversation) *managedConversation {
-	return &managedConversation{manager: m, conversation: value, subscribers: make(map[uint64]*subscriber)}
 }
 
 func (m *Manager) CreateConversation(ctx context.Context) (Conversation, error) {
@@ -145,131 +127,13 @@ func messageText(parts []TextPart) string {
 	return strings.Join(values, "\n")
 }
 
-func (m *Manager) schedule() {
-	defer m.wg.Done()
-	ticker := time.NewTicker(m.cfg.RepairInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-m.ctx.Done():
-			return
-		case <-m.wake:
-		case <-ticker.C:
-		}
-		m.dispatch()
-	}
-}
-
-func (m *Manager) dispatch() {
-	for m.reserveSlot() {
-		claim, err := m.store.ClaimRunnable(m.ctx)
-		if err != nil {
-			m.releaseSlot(false)
-			if !errors.Is(err, context.Canceled) {
-				m.report(fmt.Errorf("runtime: claim runnable work: %w", err))
-			}
-			return
-		}
-		if claim == nil {
-			m.releaseSlot(false)
-			return
-		}
-		c := m.managed(claim.Conversation)
-		ctx, cancel := context.WithCancel(m.ctx)
-		c.mu.Lock()
-		c.cancel = cancel
-		c.broadcastLocked(claim.Events...)
-		c.mu.Unlock()
-		m.wg.Add(1)
-		go c.work(ctx, cancel, claim)
-	}
-}
-
-func (c *managedConversation) work(ctx context.Context, cancel context.CancelFunc, claim *ClaimedRun) {
-	defer c.manager.wg.Done()
-	defer c.manager.releaseSlot(true)
-	result, runErr := c.execute(ctx, claim.Message, claim.History, claim.Run)
-	cancel()
-	c.mu.Lock()
-	c.cancel = nil
-	var backgroundErr error
-	if runErr != nil {
-		toolEvents, interruptErr := c.manager.store.InterruptRequestedTools(context.Background(), claim.Run)
-		if interruptErr == nil {
-			c.broadcastLocked(toolEvents...)
-		} else {
-			runErr = errors.Join(runErr, interruptErr)
-		}
-		events, persistErr := c.manager.store.FailRun(context.Background(), claim.Run, runErr.Error())
-		if persistErr == nil {
-			c.broadcastLocked(events...)
-		} else {
-			backgroundErr = fmt.Errorf("runtime: persist failed run %s: %w", claim.Run.ID, persistErr)
-		}
-	} else {
-		_, events, persistErr := c.manager.store.FinishRun(context.Background(), claim.Run, result.Answer)
-		if persistErr == nil {
-			c.broadcastLocked(events...)
-		} else {
-			backgroundErr = fmt.Errorf("runtime: persist completed run %s: %w", claim.Run.ID, persistErr)
-		}
-	}
-	c.mu.Unlock()
-	c.manager.report(backgroundErr)
-}
-
 func (m *Manager) report(err error) {
 	if err != nil && m.cfg.OnError != nil {
 		m.cfg.OnError(err)
 	}
 }
 
-func (c *managedConversation) execute(ctx context.Context, message InboundMessage, history []Message, run Run) (RunResult, error) {
-	m := c.manager
-	return m.cfg.Runner.Run(ctx, RunRequest{ConversationID: c.conversation.ID, RunID: run.ID, InboundMessageID: message.ID, Workspace: c.conversation.Workspace, Text: messageText(message.Parts), Messages: history, Emit: func(event RunEvent) error { return c.emitRunEvent(run, event) }})
-}
-
-func (c *managedConversation) emitRunEvent(run Run, source RunEvent) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	switch source.Type {
-	case EventAssistantDelta:
-		messageID, partID := source.MessageID, source.PartID
-		if messageID == "" {
-			messageID = run.ID + ":draft"
-		}
-		if partID == "" {
-			partID = "text"
-		}
-		c.broadcastLocked(Event{Type: EventAssistantDelta, ConversationID: run.ConversationID, RunID: run.ID, InboundMessageID: run.InboundMessageID, Delta: &TextDelta{MessageID: messageID, PartID: partID, Text: source.Text}, CreatedAt: time.Now().UTC()})
-		return nil
-	case EventToolProgress:
-		c.broadcastLocked(Event{Type: EventToolProgress, ConversationID: run.ConversationID, RunID: run.ID, InboundMessageID: run.InboundMessageID, Progress: &ToolProgress{ToolCallID: source.ToolCallID, Text: source.Text}, CreatedAt: time.Now().UTC()})
-		return nil
-	case RunEventAssistantTurn:
-		if len(source.Parts) == 0 {
-			return errors.New("runtime: assistant turn is missing its parts")
-		}
-		events, err := c.manager.store.CommitAssistantTurn(context.Background(), run, source.Parts)
-		if err == nil {
-			c.broadcastLocked(events...)
-		}
-		return err
-	case RunEventToolCompleted:
-		if source.Result == nil {
-			return errors.New("runtime: tool completion is missing its result")
-		}
-		events, err := c.manager.store.ToolCompleted(context.Background(), run, *source.Result)
-		if err == nil {
-			c.broadcastLocked(events...)
-		}
-		return err
-	default:
-		return fmt.Errorf("runtime: unsupported runner event %q", source.Type)
-	}
-}
-
-func (m *Manager) conversation(ctx context.Context, id string) (*managedConversation, error) {
+func (m *Manager) conversation(ctx context.Context, id string) (*liveConversation, error) {
 	if id == "" || strings.ContainsAny(id, `/\\`) {
 		return nil, ErrNotFound
 	}
@@ -286,10 +150,10 @@ func (m *Manager) conversation(ctx context.Context, id string) (*managedConversa
 	if err != nil {
 		return nil, err
 	}
-	return m.managedOpen(value)
+	return m.openLiveConversation(value)
 }
 
-func (m *Manager) managedOpen(value Conversation) (*managedConversation, error) {
+func (m *Manager) openLiveConversation(value Conversation) (*liveConversation, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
@@ -298,46 +162,20 @@ func (m *Manager) managedOpen(value Conversation) (*managedConversation, error) 
 	if existing := m.convs[value.ID]; existing != nil {
 		return existing, nil
 	}
-	managed := m.newManaged(value)
-	m.convs[value.ID] = managed
-	return managed, nil
+	live := newLiveConversation(m, value)
+	m.convs[value.ID] = live
+	return live, nil
 }
 
-func (m *Manager) managed(value Conversation) *managedConversation {
+func (m *Manager) ensureLiveConversation(value Conversation) *liveConversation {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if existing := m.convs[value.ID]; existing != nil {
 		return existing
 	}
-	managed := m.newManaged(value)
-	m.convs[value.ID] = managed
-	return managed
-}
-
-func (m *Manager) reserveSlot() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.closed || m.active >= m.cfg.MaxConcurrent {
-		return false
-	}
-	m.active++
-	return true
-}
-
-func (m *Manager) releaseSlot(wake bool) {
-	m.mu.Lock()
-	m.active--
-	m.mu.Unlock()
-	if wake {
-		m.notify()
-	}
-}
-
-func (m *Manager) notify() {
-	select {
-	case m.wake <- struct{}{}:
-	default:
-	}
+	live := newLiveConversation(m, value)
+	m.convs[value.ID] = live
+	return live
 }
 
 func (m *Manager) checkOpen() error {
@@ -349,83 +187,6 @@ func (m *Manager) checkOpen() error {
 	return nil
 }
 
-// View returns a coherent UI snapshot and its durable cursor.
-func (m *Manager) View(ctx context.Context, conversationID string) (ConversationView, error) {
-	c, err := m.conversation(ctx, conversationID)
-	if err != nil {
-		return ConversationView{}, err
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return m.store.View(ctx, conversationID)
-}
-
-// Subscribe loads catch-up events and registers the live subscriber under one
-// local lock. Per-subscriber cursors suppress a claim event already observed
-// in catch-up before its process-local broadcast arrives.
-func (m *Manager) Subscribe(ctx context.Context, conversationID string, after uint64) (<-chan Event, error) {
-	c, err := m.conversation(ctx, conversationID)
-	if err != nil {
-		return nil, err
-	}
-	c.mu.Lock()
-	backlog, err := m.store.Events(ctx, conversationID, after)
-	if err != nil {
-		c.mu.Unlock()
-		return nil, err
-	}
-	ch := make(chan Event, len(backlog)+64)
-	for _, event := range backlog {
-		ch <- event
-	}
-	c.nextSubID++
-	id := c.nextSubID
-	c.subscribers[id] = &subscriber{ch: ch, lastCursor: after}
-	if len(backlog) > 0 {
-		c.subscribers[id].lastCursor = backlog[len(backlog)-1].ID
-	}
-	c.mu.Unlock()
-	go func() {
-		<-ctx.Done()
-		c.mu.Lock()
-		if current, ok := c.subscribers[id]; ok {
-			delete(c.subscribers, id)
-			close(current.ch)
-		}
-		c.mu.Unlock()
-	}()
-	return ch, nil
-}
-
-func (c *managedConversation) broadcastLocked(events ...Event) {
-	for _, event := range events {
-		for id, subscriber := range c.subscribers {
-			if event.ID != 0 && event.ID <= subscriber.lastCursor {
-				continue
-			}
-			select {
-			case subscriber.ch <- event:
-				if event.ID != 0 {
-					subscriber.lastCursor = event.ID
-				}
-			default:
-				delete(c.subscribers, id)
-				close(subscriber.ch)
-			}
-		}
-	}
-}
-
-func (m *Manager) Events(ctx context.Context, conversationID string, after uint64) ([]Event, error) {
-	c, err := m.conversation(ctx, conversationID)
-	if err != nil {
-		return nil, err
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return m.store.Events(ctx, conversationID, after)
-}
-
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	if m.closed {
@@ -434,16 +195,13 @@ func (m *Manager) Close() error {
 	}
 	m.closed = true
 	m.cancel()
-	conversations := make([]*managedConversation, 0, len(m.convs))
+	conversations := make([]*liveConversation, 0, len(m.convs))
 	for _, c := range m.convs {
 		conversations = append(conversations, c)
 	}
 	m.mu.Unlock()
 	for _, c := range conversations {
 		c.mu.Lock()
-		if c.cancel != nil {
-			c.cancel()
-		}
 		for id, subscriber := range c.subscribers {
 			delete(c.subscribers, id)
 			close(subscriber.ch)
