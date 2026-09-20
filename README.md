@@ -149,6 +149,7 @@ excluded explicitly in [`.golangci.yml`](.golangci.yml).
 
 ```sh
 go test ./...            # everything; no API keys needed
+make smoke-runtime       # live Codex + Luna + server/client + Seatbelt smoke test
 
 go run ./cmd/pons-demo     # scripted brain
 
@@ -207,6 +208,14 @@ refuses non-loopback listen addresses. There is no separate direct execution
 or JSONL persistence path. With no subcommand, pons starts a server on an
 ephemeral loopback port, uses the same HTTP/SSE client path, and shuts the
 server down when the invocation or interactive session ends.
+
+`make smoke-runtime` runs a consistent end-to-end check with
+`gpt-5.6-luna`. It builds `pons-hands`, starts the bundled server/client path
+with a fresh temporary SQLite database and Seatbelt environment, asks the
+agent to verify the module path through `read_file`, and requires the final
+answer `SMOKE_OK`. It uses the saved Codex login and is intentionally excluded
+from `make check` because it calls a live model. Set `PONS_SMOKE_MODEL` to
+override the model when diagnosing provider-specific behavior.
 
 Durable settings live in `~/.pons/config.json` (global defaults) and
 `.pons.json` in the workspace (project overrides); explicit flags win over
