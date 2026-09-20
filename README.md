@@ -198,7 +198,7 @@ for development and platforms without the Seatbelt backend.
 
 `pons serve` runs the v1 orchestration server on `127.0.0.1:7337` by default.
 It durably accepts messages, serializes each conversation, enforces a global
-run limit and an exclusive lease for the workspace, hydrates a fresh brain for
+run limit and transactional workspace exclusion, hydrates a fresh brain for
 each active run, and streams events over SSE. Runtime state lives in
 `<state-dir>/runtime.db`. Runnable work is claimed lazily, active run
 goroutines are bounded by `--runtime-concurrency`, and SQLite transactionally
@@ -288,15 +288,13 @@ capabilities follow the same path after hands-side discovery.
 
 ## Architecture decisions
 
-The reasoning behind the big choices is recorded as ADRs in [`docs/`](docs/):
+The current architectural decisions are recorded as ADRs in [`docs/`](docs/):
 
 | ADR | Decision | Status |
 |---|---|---|
 | [ADR-0001](docs/adr-0001-pluggable-minimal-harness.md) | Minimal pluggable harness, brain/hands separation | Accepted |
-| [ADR-0002](docs/adr-0002-tree-sessions-sqlite.md) | Earlier finite-harness JSONL session storage | Superseded by ADR-0010/0011 |
 | [ADR-0003](docs/adr-0003-tool-result-contract.md) | ToolResult: status envelope / canonical observation / typed plugin payloads | Accepted |
 | [ADR-0004](docs/adr-0004-sandboxed-hands-boundary.md) | Hands are the execution boundary; isolation is deployment policy | Accepted |
-| [ADR-0005](docs/adr-0005-transcript-model-vs-engine.md) | Earlier finite-harness transcript/storage separation | Superseded by ADR-0010 |
 | [ADR-0006](docs/adr-0006-concurrent-tool-execution.md) | Tool execution concurrent within a turn; record in call order | Accepted |
 | [ADR-0007](docs/adr-0007-language-neutral-plugin-runtime.md) | Language-neutral persistent external tool plugins | Accepted |
 | [ADR-0008](docs/adr-0008-runtime-orchestration-layer.md) | Long-lived orchestration runtime above the core; built-in chat/message path | Accepted |
@@ -304,6 +302,15 @@ The reasoning behind the big choices is recorded as ADRs in [`docs/`](docs/):
 | [ADR-0010](docs/adr-0010-runtime-state-and-client-synchronization.md) | Transactional runtime messages/state, client snapshots, durable event outbox, transient token deltas | Accepted |
 | [ADR-0011](docs/adr-0011-server-centred-runtime-storage.md) | Server-centred execution; injected runtime store; legacy session stack removed | Accepted |
 | [ADR-0012](docs/adr-0012-scalable-runtime-coordination.md) | Lazy bounded scheduling; durable claims, leases, fencing, and distributed-worker migration | Accepted |
+| [ADR-0013](docs/adr-0013-named-provider-slots.md) | Named provider slots, failover, and shared auth storage | Accepted |
+| [ADR-0014](docs/adr-0014-native-action-authorization.md) | Native action authorization and classifier-backed auto mode | Proposed |
+
+Superseded records are retained for rationale, but are not current guidance:
+
+| ADR | Earlier decision | Superseded by |
+|---|---|---|
+| [ADR-0002](docs/adr-0002-tree-sessions-sqlite.md) | Finite-harness JSONL session storage | ADR-0010 and ADR-0011 |
+| [ADR-0005](docs/adr-0005-transcript-model-vs-engine.md) | Finite-harness transcript/storage separation | ADR-0010 and ADR-0011 |
 
 The concrete first-runtime shape and client synchronization contract are
 described in [`docs/runtime-v1.md`](docs/runtime-v1.md), and the hands

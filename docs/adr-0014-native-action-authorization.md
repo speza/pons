@@ -1,4 +1,4 @@
-# ADR-0009: Native action authorization and classifier-backed auto mode
+# ADR-0014: Native action authorization and classifier-backed auto mode
 
 **Status:** Proposed
 **Date:** 2026-09-18

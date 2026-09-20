@@ -43,11 +43,11 @@ and the native network client belong to `runtime/httptransport`. Future AG-UI,
 ACP, or channel adapters project the same canonical state and events without
 changing runtime persistence or scheduling.
 
-The baseline queues a message arriving during an active run as the next fresh
-burst. Injecting it at the next safe turn boundary requires the planned
-`MessageSource`/provider-neutral assistant-turn change and remains follow-up
-work. Likewise, v1 currently streams lifecycle and tool events; token-level
-`assistant.delta` emission depends on provider streaming support.
+The runtime queues a message arriving during an active run as the next fresh
+burst. It deliberately does not inject later submissions into an active run;
+doing so would require a separate safe-boundary steering contract. Likewise,
+v1 currently streams lifecycle and tool events; token-level `assistant.delta`
+emission depends on provider streaming support.
 
 ## Out of scope
 
@@ -65,9 +65,9 @@ The first runtime does not include:
 
 ### Conversation
 
-The public HTTP resource and the logical interaction. In v1 its opaque ID is
-the same value as the underlying pons session ID. A conversation is scoped to
-the HTTP channel's conversation key.
+The public HTTP resource and logical interaction. Its opaque server-generated
+ID identifies the canonical messages, submissions, runs, tools, and events in
+the runtime store.
 
 ### Inbound message
 
@@ -127,20 +127,13 @@ checked event sink before emitting any action-start event. The runtime commits
 the assistant message and every requested tool-call record atomically at that
 boundary.
 
-## Planned steering seam
+## Active-run steering
 
-Injecting messages into an already-active run remains follow-up work. The
-planned abstraction is:
-
-```go
-type MessageSource interface {
-    GetMessages(ctx context.Context) ([]protocol.UserMessage, error)
-}
-```
-
-The method would return currently pending messages in arrival order and claim
-them atomically. The current runtime instead claims one durable submission per
-fresh run.
+Injecting messages into an already-active run remains follow-up work. No
+steering interface is part of the current contract: the runtime claims one
+durable submission per fresh run. A future design must define the safe model
+boundary, durable claim semantics, and provider-neutral message shape before
+introducing such an interface.
 
 The native CLI submits through the same runtime API; there is no separate
 one-shot persistence or execution path.
@@ -312,8 +305,8 @@ Response:
 }
 ```
 
-The server creates the conversation and its underlying pons session. The
-agent is the single configured agent, `pons`.
+The server creates the canonical conversation in the runtime store. The agent
+is the single configured agent, `pons`.
 
 ### Hydrate a conversation
 

@@ -1,4 +1,4 @@
-# ADR-0008: Named provider slots with a single auth store
+# ADR-0013: Named provider slots with a single auth store
 
 **Status:** Accepted
 **Date:** 2026-09-17

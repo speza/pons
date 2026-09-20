@@ -38,10 +38,11 @@ The runtime manager consumes the domain-level `runtime.Store` interface.
 SQLite lives in the child adapter package `runtime/sqlite`, which imports the
 runtime contract; the runtime package does not import its implementation. The
 composing process imports both packages, constructs the concrete store, and
-closes it. Store operations
-represent atomic runtime transitions rather than exposing SQL, allowing a
-future PostgreSQL implementation without changes to the manager, transports,
-or runner.
+closes it. Store operations represent atomic runtime transitions rather than
+exposing SQL. This isolates persistence adapters from transports and runners.
+A distributed PostgreSQL implementation will deliberately extend the store and
+manager contract with leases and fencing as specified by ADR-0012; swapping
+the backend alone does not imply distributed safety.
 
 The storage backend is an infrastructure adapter, not a `pons.Plugin`.
 `pons.Plugin` remains the finite brain/hands capability seam. Database
@@ -81,5 +82,6 @@ update to the governing ADR.
 
 - `runtime/store.go` — backend-independent runtime store contract
 - `runtime/sqlite/store.go` — SQLite implementation
-- `runtime/manager.go` — storage consumer and run coordinator
+- `runtime/manager.go` — runtime lifecycle and store consumer
+- `runtime/scheduler.go` — bounded runnable-work coordinator
 - `cmd/pons/runtime_mode.go` — server composition and HTTP/SSE client

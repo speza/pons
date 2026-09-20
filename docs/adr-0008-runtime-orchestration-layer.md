@@ -1,8 +1,8 @@
 # ADR-0008: Long-lived orchestration is a pluggable runtime above the pons kernel
 
-**Status:** Accepted; persistence and client synchronization refined by ADR-0010
+**Status:** Accepted; state, storage, and coordination refined by ADR-0010 through ADR-0012
 **Date:** 2026-09-18
-**Related:** ADR-0001, ADR-0002, ADR-0005, ADR-0007, ADR-0010
+**Related:** ADR-0001, ADR-0007, ADR-0009, ADR-0010, ADR-0011, ADR-0012
 
 ## Context
 
@@ -119,9 +119,8 @@ The first runtime composition is:
   by ADR-0010.
 
 The public API calls the resource a **conversation**. Its opaque identifier is
-also the underlying pons session identifier in v1; the storage package may
-continue to call it a session. The internal distinction is not exposed as a
-second public identifier.
+the canonical runtime-store identity; there is no separate session identifier
+or legacy session store.
 
 The first HTTP shape is:
 
@@ -149,41 +148,30 @@ surface exposes conversation creation, submission, coherent snapshots, and
 event subscriptions using provider-neutral types. Native HTTP/SSE lives in
 `runtime/httptransport`; future protocols translate at the same boundary.
 
-### 5. Messages steer only at safe turn boundaries
+### 5. Messages arriving during a run queue the next run
 
-Messages arriving while tools are executing are held in a per-conversation
-mailbox. The runtime waits for the complete tool batch, records results in
-planned call order, then the next agent decision receives the pending messages
-as separate user messages.
+Each accepted inbound message creates one durable queued submission. A message
+arriving while another run owns the conversation remains queued; it is not
+injected into the active core. When the current run commits its terminal state,
+the scheduler may claim the next submission and hydrate a fresh core and brain
+from canonical messages through that submission.
 
-A text-only assistant response is a response boundary: it is streamed to the
-channel, persisted as an assistant message, and the active core is torn down.
-The runtime then waits for another inbound message and creates a fresh core
-and brain from the durable conversation. It does not make an autonomous model
-call with no new input.
+This preserves a clear response boundary and prevents later queued messages
+from leaking into an earlier run's provider context. Active-run steering at a
+safe model boundary would require a separate runner contract and is not part of
+the current runtime.
 
-The generic input seam is intentionally small:
+### 6. Runtime output is semantic even though the finite core has a finish signal
 
-```go
-type MessageSource interface {
-    GetMessages(ctx context.Context) ([]protocol.UserMessage, error)
-}
-```
+The finite core retains its internal `finish` action as the signal that a
+bounded `Core.Run` has produced its answer. The runtime projects that answer as
+a final semantic `AssistantMessage`; clients and durable history do not consume
+the core action.
 
-`GetMessages` returns and claims currently pending messages in arrival order;
-an empty result is valid after a tool batch. The runtime seeds the source with
-the first message, so initial and steering input use the same path.
-
-### 6. Assistant output is not a `finish` action
-
-An assistant response is an `AssistantMessage`, not a core `finish` action.
-An assistant message may contain ordered text and tool-call blocks. Text may be
-streamed while a complete provider response is being assembled; tool calls are
-not executed until the complete assistant message is durable.
-
-The core/runtime lifecycle determines whether that assistant message ends a
-one-shot run or yields to an idle continuous conversation. Runtime shutdown
-and cancellation are separate lifecycle controls.
+Non-final assistant turns may contain ordered text and tool-call blocks. Tool
+calls are not executed until the complete assistant turn and requested tool
+intent are durable. Runtime shutdown and cancellation remain separate
+lifecycle controls.
 
 ### 7. Persistence and crash recovery are explicit
 
@@ -255,11 +243,10 @@ effects.
 - Durable inbox recovery must distinguish incomplete agent processing from
   tool execution; arbitrary tool side effects cannot be made exactly once by
   the runtime.
-- A provider-neutral assistant turn is richer than the current action-only
-  control interface and will require a deliberate breaking API change when
-  implemented.
+- The runtime runner adapts the finite action-based core into provider-neutral
+  assistant turns without adding transport or persistence concerns to `Core`.
 - The HTTP API exposes a conversation resource rather than storage internals,
-  leaving future session backends and conversation forks possible.
+  leaving future store adapters and conversation forks possible.
 
 ## References
 

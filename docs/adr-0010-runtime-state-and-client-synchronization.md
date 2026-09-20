@@ -1,8 +1,8 @@
 # ADR-0010: Runtime conversations use transactional state and an event outbox
 
-**Status:** Accepted
+**Status:** Accepted; runtime coordination refined by ADR-0012
 **Date:** 2026-09-19
-**Related:** ADR-0002, ADR-0005, ADR-0008
+**Related:** ADR-0008, ADR-0011, ADR-0012
 
 ## Context
 
@@ -81,8 +81,10 @@ call without a committed result is resolved as interrupted with an unknown
 outcome; the runtime does not infer that state by folding presentation events
 and does not automatically repeat the side effect.
 
-Ephemeral leases, semaphore occupancy, and live subscriber lists remain
-in-memory coordination. They are not conversation history.
+Runnable claims and workspace exclusion are store-owned coordination under
+ADR-0012. Local capacity counters, cancellation functions, wake hints, and
+live subscriber lists remain in-memory acceleration. None is conversation
+history or distributed proof of ownership.
 
 Message parts and event envelopes retain opaque metadata maps. Adapters may
 preserve protocol-specific annotations there without making those protocols
@@ -96,7 +98,6 @@ transaction as the authoritative state change. Examples include:
 
 ```text
 message.upserted
-message.removed
 submission.updated
 tool_call.updated
 run.updated
@@ -201,18 +202,16 @@ finite brain/hands loop. Persistence must wrap message acceptance, run claims,
 tool intent/results, and outbox events in transactions outside that loop; a
 turn observer such as `sessionrecorder` cannot provide those guarantees.
 
-This decision supersedes ADR-0008's v1 choice of a separate mutable JSON state
-snapshot for the target runtime architecture. The implemented snapshot-based
-baseline remains a migration source until the transactional store replaces it.
+This decision supersedes ADR-0008's original separate mutable JSON state
+snapshot. The server now uses the transactional runtime store exclusively.
 
 ## Alternatives considered
 
 - **Rebuild all state from one event journal:** not selected. It makes LLM and
   UI hydration depend on replay and projection-version compatibility in the
   hot path.
-- **Persist transcript and runtime JSON independently:** used by the baseline
-  but not selected as the target. Cross-store updates cannot be atomic and need
-  reconciliation.
+- **Persist transcript and runtime JSON independently:** not selected.
+  Cross-store updates cannot be atomic and need reconciliation.
 - **Use SSE history as the UI snapshot:** not selected. Event retention and UI
   hydration have different lifecycles, and transient deltas must remain
   discardable.
@@ -234,6 +233,6 @@ baseline remains a migration source until the transactional store replaces it.
 ## References
 
 - `docs/adr-0008-runtime-orchestration-layer.md` — runtime ownership and API
-- `docs/runtime-v1.md` — concrete runtime design and migration status
+- `docs/runtime-v1.md` — concrete implemented runtime design
 - `docs/adr-0005-transcript-model-vs-engine.md` — session model and engines
 - `runtime/` — transactional state, snapshot API, and durable/transient stream

@@ -256,21 +256,23 @@ SQL transactions.
 
 ### 8. Keep dormant and historical data out of process memory
 
-Dormant conversations remain rows, not actors. Normal manager memory should
-scale approximately with:
+Dormant conversations remain rows, not eagerly created actors. The target
+manager memory model scales approximately with:
 
 ```text
 active runs + connected subscribers + bounded hot API entries
 ```
 
-not total conversations or queued submissions.
+not total conversations or queued submissions. The implemented local manager
+creates `liveConversation` delivery state lazily, but does not yet evict an
+entry after it has been accessed; eviction remains a bounded-cache
+optimization rather than a correctness mechanism.
 
-Canonical messages remain durable and directly queryable. An active run gets a
-bounded context view assembled from recent complete messages plus durable
-summary/checkpoint state. Full history remains available for audit and UI
-pagination. Provider-side compaction alone is not the final memory boundary,
-because the current implementation materializes history before the LLM brain
-compacts it.
+Canonical messages remain durable and directly queryable. Today an active run
+materializes its complete eligible history before the LLM brain applies
+provider-side compaction. A future bounded context view will instead assemble
+recent complete messages plus durable summary/checkpoint state while retaining
+full history for audit and UI pagination.
 
 Bounded context hydration requires its own semantic policy and durable summary
 contract. The first scheduler refactor stops eager dormant-conversation loading
@@ -302,8 +304,8 @@ distributed contract:
 2. Goroutine-per-pending-conversation scheduling is replaced by a coalesced wake
    channel, a low-frequency bounded repair scan, and at most `MaxConcurrent`
    active run goroutines.
-3. Managed conversation state is created lazily for API access, subscribers, and
-   claimed runs.
+3. Process-local `liveConversation` delivery state is created lazily for API
+   access, subscribers, and claimed runs.
 4. SQLite's claim transaction rejects work when either its conversation or
    workspace already has a running submission.
 5. Abandoned SQLite runs are recovered once during exclusive manager startup,
@@ -393,7 +395,9 @@ without transferring canonical state ownership into them.
 
 ## References
 
-- `runtime/manager.go` — current local scheduler and live subscriber state
+- `runtime/manager.go` — runtime lifecycle and lazy live-state lookup
+- `runtime/scheduler.go` — current bounded local scheduler
+- `runtime/subscriptions.go` — process-local subscriber delivery state
 - `runtime/store.go` — durable domain transition contract
 - `runtime/sqlite/store.go` — current local transactional adapter
 - `docs/adr-0010-runtime-state-and-client-synchronization.md` — canonical state
