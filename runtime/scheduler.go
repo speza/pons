@@ -85,9 +85,24 @@ func (c *liveConversation) work(ctx context.Context, cancel context.CancelFunc, 
 	c.manager.report(backgroundErr)
 }
 
-func (c *liveConversation) execute(ctx context.Context, message InboundMessage, history []Message, run Run) (RunResult, error) {
+func (c *liveConversation) execute(
+	ctx context.Context,
+	message InboundMessage,
+	history []Message,
+	run Run,
+) (RunResult, error) {
 	m := c.manager
-	return m.cfg.Runner.Run(ctx, RunRequest{ConversationID: c.conversation.ID, RunID: run.ID, InboundMessageID: message.ID, Workspace: c.conversation.Workspace, Text: messageText(message.Parts), Messages: history, Emit: func(event RunEvent) error { return c.emitRunEvent(run, event) }})
+	return m.cfg.Runner.Run(ctx, RunRequest{
+		ConversationID:   c.conversation.ID,
+		RunID:            run.ID,
+		InboundMessageID: message.ID,
+		Workspace:        c.conversation.Workspace,
+		Text:             messageText(message.Parts),
+		Messages:         history,
+		Emit: func(event RunEvent) error {
+			return c.emitRunEvent(run, event)
+		},
+	})
 }
 
 func (c *liveConversation) emitRunEvent(run Run, source RunEvent) error {
@@ -102,10 +117,31 @@ func (c *liveConversation) emitRunEvent(run Run, source RunEvent) error {
 		if partID == "" {
 			partID = "text"
 		}
-		c.broadcastLocked(Event{Type: EventAssistantDelta, ConversationID: run.ConversationID, RunID: run.ID, InboundMessageID: run.InboundMessageID, Delta: &TextDelta{MessageID: messageID, PartID: partID, Text: source.Text}, CreatedAt: time.Now().UTC()})
+		c.broadcastLocked(Event{
+			Type:             EventAssistantDelta,
+			ConversationID:   run.ConversationID,
+			RunID:            run.ID,
+			InboundMessageID: run.InboundMessageID,
+			Delta: &TextDelta{
+				MessageID: messageID,
+				PartID:    partID,
+				Text:      source.Text,
+			},
+			CreatedAt: time.Now().UTC(),
+		})
 		return nil
 	case EventToolProgress:
-		c.broadcastLocked(Event{Type: EventToolProgress, ConversationID: run.ConversationID, RunID: run.ID, InboundMessageID: run.InboundMessageID, Progress: &ToolProgress{ToolCallID: source.ToolCallID, Text: source.Text}, CreatedAt: time.Now().UTC()})
+		c.broadcastLocked(Event{
+			Type:             EventToolProgress,
+			ConversationID:   run.ConversationID,
+			RunID:            run.ID,
+			InboundMessageID: run.InboundMessageID,
+			Progress: &ToolProgress{
+				ToolCallID: source.ToolCallID,
+				Text:       source.Text,
+			},
+			CreatedAt: time.Now().UTC(),
+		})
 		return nil
 	case RunEventAssistantTurn:
 		if len(source.Parts) == 0 {
