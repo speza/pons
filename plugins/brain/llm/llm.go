@@ -2,7 +2,7 @@
 //
 // Architecture (mirrors how pi's agent loop works):
 //
-//   - ONE model call per turn. NextActions sends the conversation and the
+//   - ONE model call per turn. Respond sends the conversation and the
 //     tool schemas; tool_use blocks in the response become protocol.Actions.
 //   - Interpret is bookkeeping, not a second model call: tool results are
 //     queued and sent back as tool_result blocks with the next call.
@@ -314,15 +314,10 @@ func (b *Brain) Setup(c *pons.Core) error {
 	return c.SetBrain(b)
 }
 
-func (b *Brain) NextActions(ctx context.Context, obs protocol.Observation) ([]protocol.Action, error) {
-	plan, err := b.NextPlan(ctx, obs)
-	return plan.Actions, err
-}
-
-// NextPlan preserves the ordered assistant blocks alongside the actions the
-// core executes. Runtimes use this richer form to commit a complete semantic
-// assistant turn before tools begin.
-func (b *Brain) NextPlan(ctx context.Context, obs protocol.Observation) (pons.Plan, error) {
+// Respond preserves the ordered assistant blocks alongside the actions the
+// core executes. Runtimes use this response to commit a complete semantic
+// assistant message before tools begin.
+func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.AssistantResponse, error) {
 	// Fold queued tool results into the conversation before the next call.
 	if len(b.pending) > 0 {
 		blocks := make([]Block, 0, len(b.pending))
@@ -354,7 +349,7 @@ func (b *Brain) NextPlan(ctx context.Context, obs protocol.Observation) (pons.Pl
 
 	assistant, err := b.client.Complete(ctx, b.systemPrompt(), b.turns, b.core.ToolSpecs())
 	if err != nil {
-		return pons.Plan{}, fmt.Errorf("llm: %w", err)
+		return pons.AssistantResponse{}, fmt.Errorf("llm: %w", err)
 	}
 	b.turns = append(b.turns, assistant)
 
@@ -378,9 +373,9 @@ func (b *Brain) NextPlan(ctx context.Context, obs protocol.Observation) (pons.Pl
 		// degenerate response (vague instruction, provider hiccup). Surface
 		// it as an error instead of a silent no-op answer.
 		if summary == "" {
-			return pons.Plan{}, fmt.Errorf("llm: model returned an empty response (no tool calls, no text) — rephrase or retry")
+			return pons.AssistantResponse{}, fmt.Errorf("llm: model returned an empty response (no tool calls, no text) — rephrase or retry")
 		}
-		return pons.Plan{Actions: []protocol.Action{pons.Finish(summary)}}, nil
+		return pons.AssistantResponse{Actions: []protocol.Action{pons.Finish(summary)}}, nil
 	}
 	actions := make([]protocol.Action, 0, len(calls))
 	for _, c := range calls {
@@ -405,7 +400,7 @@ func (b *Brain) NextPlan(ctx context.Context, obs protocol.Observation) (pons.Pl
 			parts = append(parts, pons.AssistantPart{Type: pons.AssistantPartToolCall, Action: byID[block.ID]})
 		}
 	}
-	return pons.Plan{Parts: parts, Actions: actions}, nil
+	return pons.AssistantResponse{Parts: parts, Actions: actions}, nil
 }
 
 func (b *Brain) Interpret(ctx context.Context, obs protocol.Observation, tr protocol.ToolResult) (protocol.Interpretation, error) {

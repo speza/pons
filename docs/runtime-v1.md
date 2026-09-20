@@ -115,16 +115,14 @@ semantic messages produced by the preceding run.
 A message arriving after a text-only response starts the next run. It loads
 the same semantic conversation but uses a newly constructed Core and Brain.
 
-## Core planning seam
+## Core response seam
 
-Brains may implement `PlanningControlPort` to return a `Plan` containing both
-the executable actions and the ordered provider-neutral assistant parts which
-produced them. The core emits that complete plan through its checked event
-sink before emitting any action-start event. The runtime commits the assistant
-message and every requested tool-call record atomically at that boundary.
-
-Brains which only implement `ControlPort` remain valid: the core derives a
-tool-call-only plan from their actions.
+Brains implement `ControlPort.Respond` and return an `AssistantResponse`
+containing both executable actions and the ordered provider-neutral assistant
+parts which produced them. The core emits that complete response through its
+checked event sink before emitting any action-start event. The runtime commits
+the assistant message and every requested tool-call record atomically at that
+boundary.
 
 ## Planned steering seam
 

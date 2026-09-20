@@ -32,24 +32,15 @@ import (
 	"github.com/samperrin/pons/protocol"
 )
 
-// ControlPort is what a brain must speak. It sees Observations, emits
-// Actions; it never executes anything.
+// ControlPort is what a brain must speak. It sees Observations, produces
+// assistant responses, and never executes actions itself.
 type ControlPort interface {
-	// NextActions plans the next round of actions for this observation.
-	NextActions(ctx context.Context, obs protocol.Observation) ([]protocol.Action, error)
+	// Respond produces the assistant response for this observation.
+	Respond(ctx context.Context, obs protocol.Observation) (AssistantResponse, error)
 	// Interpret reflects on a completed tool result.
 	Interpret(ctx context.Context, obs protocol.Observation, tr protocol.ToolResult) (protocol.Interpretation, error)
 	// Close releases brain resources.
 	Close(ctx context.Context) error
-}
-
-// PlanningControlPort is an optional richer brain contract. It preserves the
-// provider-neutral assistant content that produced a set of actions so a
-// runtime can durably commit the complete assistant turn before any tool is
-// executed. Brains which only implement ControlPort are adapted to a plan
-// containing their actions.
-type PlanningControlPort interface {
-	NextPlan(ctx context.Context, obs protocol.Observation) (Plan, error)
 }
 
 type AssistantPartType string
@@ -59,7 +50,7 @@ const (
 	AssistantPartToolCall AssistantPartType = "tool_call"
 )
 
-// AssistantPart is one ordered provider-neutral block in an assistant plan.
+// AssistantPart is one ordered provider-neutral block in an assistant response.
 // Action is populated for AssistantPartToolCall.
 type AssistantPart struct {
 	Type   AssistantPartType
@@ -67,9 +58,10 @@ type AssistantPart struct {
 	Action protocol.Action
 }
 
-// Plan is the complete assistant output for one planning turn and the actions
-// the core should execute from it.
-type Plan struct {
+// AssistantResponse is the complete output produced by a brain for one step.
+// Parts preserve its provider-neutral content; Actions are the tool calls the
+// core should execute.
+type AssistantResponse struct {
 	Parts   []AssistantPart
 	Actions []protocol.Action
 }
@@ -93,7 +85,7 @@ func (c *Core) Execute(ctx context.Context, a protocol.Action) (protocol.ToolRes
 // ToolHandler executes one action kind. Tool plugins provide these.
 type ToolHandler func(ctx context.Context, a protocol.Action) (protocol.ToolResult, error)
 
-// TurnHook observes one completed turn (plan + results). Observational hooks
+// TurnHook observes one completed turn (response + results). Observational hooks
 // cannot fail the run; use TurnErrorHook for persistence that must be checked.
 type TurnHook func(obs protocol.Observation, turn protocol.TurnLog)
 
@@ -274,15 +266,15 @@ func (c *Core) OnTurnError(h TurnErrorHook) {
 type EventType string
 
 const (
-	EventAgentStart  EventType = "agent_start"
-	EventTurnStart   EventType = "turn_start"
-	EventPlan        EventType = "plan"
-	EventActionStart EventType = "action_start"
-	EventActionEnd   EventType = "action_end"
-	EventTurnEnd     EventType = "turn_end"
-	EventFinish      EventType = "finish"
-	EventStopped     EventType = "stopped"
-	EventExhausted   EventType = "exhausted"
+	EventAgentStart        EventType = "agent_start"
+	EventTurnStart         EventType = "turn_start"
+	EventAssistantResponse EventType = "assistant_response"
+	EventActionStart       EventType = "action_start"
+	EventActionEnd         EventType = "action_end"
+	EventTurnEnd           EventType = "turn_end"
+	EventFinish            EventType = "finish"
+	EventStopped           EventType = "stopped"
+	EventExhausted         EventType = "exhausted"
 )
 
 // Event is one observable step of the loop.
@@ -293,9 +285,9 @@ type Event struct {
 	Action  *protocol.Action     // set on action_start / action_end
 	Result  *protocol.ToolResult // set on action_end
 	Tool    *ToolSpec            // registered tool metadata on action_start / action_end
-	Actions []protocol.Action    // set on plan and turn_end
+	Actions []protocol.Action    // set on assistant_response and turn_end
 	Results []protocol.ToolResult
-	Parts   []AssistantPart // set on plan (ordered assistant content)
+	Parts   []AssistantPart // set on assistant_response (ordered assistant content)
 }
 
 // OnEvent subscribes to the loop's event stream. Multiple subscribers
@@ -336,7 +328,7 @@ type RunResult struct {
 	History []protocol.TurnLog
 }
 
-// Run executes one full task: plan → act → reflect → repeat, until the
+// Run executes one full task: respond → act → reflect → repeat, until the
 // brain finishes (text-only / finish action) or MaxTurns is exhausted.
 func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 	if c.brain == nil {
@@ -361,11 +353,11 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 			return result, fmt.Errorf("event turn_start: %w", err)
 		}
 
-		plan, err := nextPlan(ctx, brain, obs)
+		response, err := brain.Respond(ctx, obs)
 		if err != nil {
-			return result, fmt.Errorf("brain plan (turn %d): %w", turn, err)
+			return result, fmt.Errorf("brain response (turn %d): %w", turn, err)
 		}
-		actions := plan.Actions
+		actions := response.Actions
 		if len(actions) == 0 {
 			return result, fmt.Errorf("brain returned no actions at turn %d", turn)
 		}
@@ -392,12 +384,12 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 			c.logf("[turn %d] brain signalled finish: %s", turn, answer)
 		}
 		if len(run) > 0 {
-			parts, err := normalizePlanParts(plan.Parts, run)
+			parts, err := normalizeAssistantParts(response.Parts, run)
 			if err != nil {
-				return result, fmt.Errorf("brain plan (turn %d): %w", turn, err)
+				return result, fmt.Errorf("brain response (turn %d): %w", turn, err)
 			}
-			if err := c.emit(Event{Type: EventPlan, Turn: turn, Actions: slices.Clone(run), Parts: parts}); err != nil {
-				return result, fmt.Errorf("event plan: %w", err)
+			if err := c.emit(Event{Type: EventAssistantResponse, Turn: turn, Actions: slices.Clone(run), Parts: parts}); err != nil {
+				return result, fmt.Errorf("event assistant_response: %w", err)
 			}
 		}
 
@@ -480,15 +472,7 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 	return result, nil
 }
 
-func nextPlan(ctx context.Context, brain ControlPort, obs protocol.Observation) (Plan, error) {
-	if planner, ok := brain.(PlanningControlPort); ok {
-		return planner.NextPlan(ctx, obs)
-	}
-	actions, err := brain.NextActions(ctx, obs)
-	return Plan{Actions: actions}, err
-}
-
-func normalizePlanParts(parts []AssistantPart, actions []protocol.Action) ([]AssistantPart, error) {
+func normalizeAssistantParts(parts []AssistantPart, actions []protocol.Action) ([]AssistantPart, error) {
 	if len(parts) == 0 {
 		parts = make([]AssistantPart, 0, len(actions))
 		for _, action := range actions {
@@ -525,7 +509,7 @@ func normalizePlanParts(parts []AssistantPart, actions []protocol.Action) ([]Ass
 		}
 	}
 	if len(remaining) != 0 {
-		return nil, errors.New("assistant plan omits an executable action")
+		return nil, errors.New("assistant response omits an executable action")
 	}
 	return out, nil
 }

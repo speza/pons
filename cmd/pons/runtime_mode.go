@@ -309,7 +309,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}
 	core.OnEventError(func(event pons.Event) error {
 		switch event.Type {
-		case pons.EventPlan:
+		case pons.EventAssistantResponse:
 			parts := make([]ponsruntime.MessagePart, 0, len(event.Parts))
 			for _, part := range event.Parts {
 				switch part.Type {

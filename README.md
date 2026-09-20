@@ -31,7 +31,7 @@ schedulers, or other runtime components.
 │ emits Actions. Owns NO execution, NO direct I/O.          │
 │ Link-depends only on: protocol.                           │
 └──────────────┬─────────────────────────────────────────────┘
-               │ ControlPort (NextActions / Interpret / Close)
+               │ ControlPort (Respond / Interpret / Close)
                │ ToolPort (Execute)
 ┌──────────────┴───────────── harness ──────────────────────┐
 │ The referee: turn loop, events, plugin registry.          │
@@ -91,7 +91,7 @@ startup instead of silently last-wins.
 ## The agent loop
 
 ```go
-result, err := core.Run(ctx, message)   // plan → act → reflect → repeat
+result, err := core.Run(ctx, message)   // respond → act → reflect → repeat
 ```
 
 - **`RunResult`** carries the final `Answer` (text-only reply or finish

@@ -13,16 +13,16 @@ import (
 
 // fakeBrain is a minimal ControlPort for core tests.
 type fakeBrain struct {
-	turns [][]protocol.Action // actions per turn; empty plan = finish
+	turns [][]protocol.Action // actions per turn; empty response is invalid
 	i     int
 }
 
-func (b *fakeBrain) NextActions(ctx context.Context, obs protocol.Observation) ([]protocol.Action, error) {
+func (b *fakeBrain) Respond(ctx context.Context, obs protocol.Observation) (AssistantResponse, error) {
 	if b.i >= len(b.turns) {
-		return nil, nil
+		return AssistantResponse{}, nil
 	}
 	b.i++
-	return b.turns[b.i-1], nil
+	return AssistantResponse{Actions: b.turns[b.i-1]}, nil
 }
 
 func (b *fakeBrain) Interpret(ctx context.Context, obs protocol.Observation, tr protocol.ToolResult) (protocol.Interpretation, error) {
@@ -127,11 +127,11 @@ func TestFinishStopsLoop(t *testing.T) {
 	}
 }
 
-func TestEmptyPlanErrors(t *testing.T) {
+func TestEmptyResponseErrors(t *testing.T) {
 	c := New()
-	setBrain(t, c, &fakeBrain{}) // zero turns → NextActions returns nil
+	setBrain(t, c, &fakeBrain{}) // zero turns → Respond returns no actions
 	if _, err := c.Run(context.Background(), "test goal"); err == nil {
-		t.Fatal("empty plan should error")
+		t.Fatal("empty response should error")
 	}
 }
 
@@ -180,7 +180,7 @@ func TestOnTurnAndWraps(t *testing.T) {
 	}
 }
 
-func TestCheckedPlanFailurePreventsToolExecution(t *testing.T) {
+func TestCheckedAssistantResponseFailurePreventsToolExecution(t *testing.T) {
 	c := New()
 	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{{ID: "call", Kind: "tool"}}}})
 	executed := false
@@ -191,7 +191,7 @@ func TestCheckedPlanFailurePreventsToolExecution(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.OnEventError(func(event Event) error {
-		if event.Type == EventPlan {
+		if event.Type == EventAssistantResponse {
 			return errors.New("durable event write failed")
 		}
 		return nil
@@ -200,7 +200,7 @@ func TestCheckedPlanFailurePreventsToolExecution(t *testing.T) {
 		t.Fatalf("run error = %v", err)
 	}
 	if executed {
-		t.Fatal("tool executed after checked plan event failed")
+		t.Fatal("tool executed after checked assistant response event failed")
 	}
 }
 
@@ -247,11 +247,11 @@ func TestAllResultsAreInterpretedBeforeStopping(t *testing.T) {
 
 type interpretRecordingBrain struct{ seen []string }
 
-func (b *interpretRecordingBrain) NextActions(context.Context, protocol.Observation) ([]protocol.Action, error) {
+func (b *interpretRecordingBrain) Respond(context.Context, protocol.Observation) (AssistantResponse, error) {
 	if len(b.seen) == 0 {
-		return []protocol.Action{{ID: "a", Kind: "a"}, {ID: "b", Kind: "b"}}, nil
+		return AssistantResponse{Actions: []protocol.Action{{ID: "a", Kind: "a"}, {ID: "b", Kind: "b"}}}, nil
 	}
-	return []protocol.Action{Finish("not reached")}, nil
+	return AssistantResponse{Actions: []protocol.Action{Finish("not reached")}}, nil
 }
 func (b *interpretRecordingBrain) Interpret(_ context.Context, _ protocol.Observation, tr protocol.ToolResult) (protocol.Interpretation, error) {
 	b.seen = append(b.seen, tr.ActionID)
@@ -337,7 +337,7 @@ func TestRunResultAndEvents(t *testing.T) {
 	}
 	want := []EventType{
 		EventAgentStart, EventTurnStart,
-		EventPlan, EventActionStart, EventActionEnd, EventTurnEnd,
+		EventAssistantResponse, EventActionStart, EventActionEnd, EventTurnEnd,
 		EventTurnStart, EventTurnEnd, EventFinish, // finish turn is recorded too
 	}
 	if len(types) != len(want) {
@@ -367,11 +367,11 @@ func TestExhaustedIsResultNotError(t *testing.T) {
 	}
 }
 
-// endlessBrain plans one tool action every turn, never finishing.
+// endlessBrain requests one tool action every turn, never finishing.
 type endlessBrain struct{}
 
-func (endlessBrain) NextActions(ctx context.Context, obs protocol.Observation) ([]protocol.Action, error) {
-	return []protocol.Action{{ID: "p", Kind: "ping"}}, nil
+func (endlessBrain) Respond(ctx context.Context, obs protocol.Observation) (AssistantResponse, error) {
+	return AssistantResponse{Actions: []protocol.Action{{ID: "p", Kind: "ping"}}}, nil
 }
 func (endlessBrain) Interpret(ctx context.Context, obs protocol.Observation, tr protocol.ToolResult) (protocol.Interpretation, error) {
 	return protocol.Interpretation{Continue: true}, nil

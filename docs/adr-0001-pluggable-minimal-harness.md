@@ -29,13 +29,13 @@ three seams:
 - `protocol/` defines the JSON contract: `Action`, `ToolResult`,
   `Observation`, and `TurnLog`.
 - `ControlPort` is the brain interface:
-  `NextActions`, `Interpret`, and `Close`.
+  `Respond`, `Interpret`, and `Close`.
 - `ToolPort` is the hands interface: `Execute` for one action.
 
 `Core.Run` executes the fixed loop:
 
 ```text
-plan -> execute -> interpret -> repeat
+respond -> execute -> interpret -> repeat
 ```
 
 It supplies the turn budget, dispatches actions by kind, reserves the
