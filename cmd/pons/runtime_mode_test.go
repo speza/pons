@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -36,6 +37,31 @@ func (p *recordingEnvironment) Start(_ context.Context, spec environment.Spec) (
 	p.starts.Add(1)
 	p.specs <- spec
 	return recordingSession{closes: &p.closes}, nil
+}
+
+type lifecycleEnvironment struct {
+	store  environment.StateStore
+	closed chan error
+}
+
+func (p *lifecycleEnvironment) Start(context.Context, environment.Spec) (environment.HandsSession, error) {
+	return nil, errors.New("unexpected environment start")
+}
+
+func (p *lifecycleEnvironment) SetStateStore(store environment.StateStore) error {
+	p.store = store
+	return nil
+}
+
+func (p *lifecycleEnvironment) Close() error {
+	_, err := p.store.EnvironmentState(context.Background(), "missing")
+	if !errors.Is(err, environment.ErrStateNotFound) {
+		err = fmt.Errorf("state store unavailable during provider close: %w", err)
+	} else {
+		err = nil
+	}
+	p.closed <- err
+	return err
 }
 
 type recordingSession struct{ closes *atomic.Int32 }
@@ -85,7 +111,8 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 		requestNumber++
 		inboundID := fmt.Sprintf("inbound-%d", requestNumber)
 		return ponsruntime.RunRequest{
-			ConversationID: "conversation-1", InboundMessageID: inboundID, Workspace: workspace, Text: text,
+			ConversationID: "conversation-1", InboundMessageID: inboundID,
+			RunID: fmt.Sprintf("run-%d", requestNumber), Workspace: workspace, Text: text,
 			Messages: append([]ponsruntime.Message(nil), history...),
 			Emit:     func(ponsruntime.RunEvent) error { return nil },
 		}
@@ -113,10 +140,39 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 	if got := debugLog.String(); !strings.Contains(got, "sandbox=recording") || !strings.Contains(got, "workspace="+fmt.Sprintf("%q", workspace)) {
 		t.Fatalf("debug log omits effective environment: %s", got)
 	}
-	for range 2 {
-		if spec := <-execution.specs; spec.WorkspacePath != workspace {
+	for i := 1; i <= 2; i++ {
+		spec := <-execution.specs
+		if spec.WorkspacePath != workspace {
 			t.Fatalf("environment workspace = %q, want %q", spec.WorkspacePath, workspace)
 		}
+		if want := fmt.Sprintf("run-%d", i); spec.RunID != want {
+			t.Fatalf("environment run ID = %q, want %q", spec.RunID, want)
+		}
+	}
+}
+
+func TestRuntimeServerConfiguresAndClosesStatefulEnvironment(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	provider := &lifecycleEnvironment{closed: make(chan error, 1)}
+	started := make(chan string, 1)
+	done := make(chan error, 1)
+	stateDir, workspace := t.TempDir(), t.TempDir()
+	go func() {
+		done <- runServerReady(ctx, log.New(io.Discard, "", 0), serverOptions{
+			Address: "127.0.0.1:0", StateDir: stateDir, Workspace: workspace,
+			MaxConcurrent: 1, Environment: provider,
+		}, started)
+	}()
+	<-started
+	if provider.store == nil {
+		t.Fatal("environment state store was not configured")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-provider.closed; err != nil {
+		t.Fatal(err)
 	}
 }
 
