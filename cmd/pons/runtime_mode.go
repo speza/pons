@@ -20,6 +20,8 @@ import (
 
 	"github.com/samperrin/pons"
 	"github.com/samperrin/pons/environment"
+	"github.com/samperrin/pons/environment/e2b"
+	"github.com/samperrin/pons/environment/seatbelt"
 	"github.com/samperrin/pons/plugins/bash"
 	"github.com/samperrin/pons/plugins/brain/llm"
 	"github.com/samperrin/pons/plugins/edit"
@@ -47,6 +49,10 @@ type serverOptions struct {
 	PluginMaxResultBytes int
 	Debug                bool
 	Sandbox              string
+	E2BTemplate          string
+	E2BHandsPath         string
+	SandboxIdleTimeout   time.Duration
+	EnvironmentError     func(error)
 	Environment          environment.Provider
 	EnvironmentSpec      environment.Spec
 }
@@ -65,6 +71,18 @@ func runServerReady(ctx context.Context, logger *log.Logger, opts serverOptions,
 		return err
 	}
 	defer store.Close()
+	if stateful, ok := opts.Environment.(environment.StatefulProvider); ok {
+		if err := stateful.SetStateStore(store); err != nil {
+			return fmt.Errorf("configure environment state: %w", err)
+		}
+	}
+	if closer, ok := opts.Environment.(interface{ Close() error }); ok {
+		defer func() {
+			if err := closer.Close(); err != nil {
+				logger.Printf("environment shutdown: %v", err)
+			}
+		}()
+	}
 	runner := &agentRunner{opts: opts, logger: logger}
 	backgroundErrors := make(chan error, 1)
 	manager, err := ponsruntime.New(ponsruntime.Config{
@@ -162,8 +180,8 @@ func logDebugConfiguration(logger *log.Logger, opts serverOptions) {
 			hands = opts.EnvironmentSpec.Command[0]
 		}
 	}
-	logger.Printf("[debug] hands config: sandbox=%s network=%s hands=%q external_plugins=%d read_only_paths=%d",
-		sandbox, network, hands, len(opts.PluginPaths), len(opts.EnvironmentSpec.ReadOnly))
+	logger.Printf("[debug] hands config: sandbox=%s network=%s hands=%q idle_timeout=%s external_plugins=%d read_only_paths=%d",
+		sandbox, network, hands, opts.SandboxIdleTimeout, len(opts.PluginPaths), len(opts.EnvironmentSpec.ReadOnly))
 }
 
 func runBundled(ctx context.Context, logger *log.Logger, opts serverOptions, conversationID, idempotencyKey, message string, interactive bool) error {
@@ -212,8 +230,44 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 		}
 		return nil, environment.Spec{}, nil
 	}
-	if backend != "seatbelt" {
+	if backend != "seatbelt" && backend != "e2b" {
 		return nil, environment.Spec{}, fmt.Errorf("unknown backend %q", backend)
+	}
+	if backend == "e2b" {
+		if handsCommand != "" {
+			return nil, environment.Spec{}, errors.New("--hands-command is local-only; use --e2b-hands-path")
+		}
+		if len(opts.PluginPaths) != 0 || opts.PluginPath != "" {
+			return nil, environment.Spec{}, errors.New("E2B does not yet support external plugins")
+		}
+		handsPath := opts.E2BHandsPath
+		if handsPath == "" {
+			handsPath = "/usr/local/bin/pons-hands"
+		}
+		command := handsCommandArgs(handsPath, opts)
+		network := environment.NetworkDisabled
+		if allowNetwork {
+			network = environment.NetworkEnabled
+		}
+		if opts.SandboxIdleTimeout < 0 {
+			return nil, environment.Spec{}, errors.New("--sandbox-idle-timeout must not be negative")
+		}
+		return &e2b.Provider{
+			Template:    opts.E2BTemplate,
+			HandsPath:   handsPath,
+			IdleTimeout: opts.SandboxIdleTimeout,
+			OnError: func(err error) {
+				if opts.EnvironmentError != nil {
+					opts.EnvironmentError(err)
+				}
+			},
+		}, environment.Spec{
+			Command: command, Network: network,
+			Limits: environment.ResourceLimits{
+				CallTimeout:    60 * time.Second,
+				MaxResultBytes: opts.PluginMaxResultBytes,
+			},
+		}, nil
 	}
 	commandPath := handsCommand
 	var err error
@@ -227,14 +281,7 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 	if err != nil {
 		return nil, environment.Spec{}, fmt.Errorf("hands command: %w", err)
 	}
-	command := []string{
-		commandPath,
-		"--fs-read-bytes", fmt.Sprint(opts.FSReadBytes),
-		"--bash-timeout", fmt.Sprint(opts.BashTimeout),
-		"--bash-max-lines", fmt.Sprint(opts.BashMaxLines),
-		"--bash-max-bytes", fmt.Sprint(opts.BashMaxBytes),
-		"--plugin-max-result-bytes", fmt.Sprint(opts.PluginMaxResultBytes),
-	}
+	command := handsCommandArgs(commandPath, opts)
 	var readOnly []string
 	if opts.PluginPath != "" {
 		command = append(command, "--plugin-path", opts.PluginPath)
@@ -268,7 +315,7 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 	if allowNetwork {
 		network = environment.NetworkEnabled
 	}
-	return environment.Seatbelt{}, environment.Spec{
+	return seatbelt.Provider{}, environment.Spec{
 		Command: command, ReadOnly: readOnly,
 		Network: network,
 		Limits: environment.ResourceLimits{
@@ -276,6 +323,17 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 			MaxResultBytes: opts.PluginMaxResultBytes,
 		},
 	}, nil
+}
+
+func handsCommandArgs(commandPath string, opts serverOptions) []string {
+	return []string{
+		commandPath,
+		"--fs-read-bytes", fmt.Sprint(opts.FSReadBytes),
+		"--bash-timeout", fmt.Sprint(opts.BashTimeout),
+		"--bash-max-lines", fmt.Sprint(opts.BashMaxLines),
+		"--bash-max-bytes", fmt.Sprint(opts.BashMaxBytes),
+		"--plugin-max-result-bytes", fmt.Sprint(opts.PluginMaxResultBytes),
+	}
 }
 
 type agentRunner struct {
@@ -312,10 +370,11 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		}
 	}()
 	plugins := make([]pons.Plugin, 0, 4+len(r.opts.PluginPaths))
-	effectiveSandbox, effectiveNetwork := "none", "host"
+	effectiveSandbox, effectiveNetwork, effectiveEnvironmentID := "none", "host", ""
 	if r.opts.Environment != nil {
 		spec := r.opts.EnvironmentSpec
 		spec.Workspace = request.Workspace
+		spec.LeaseID = request.RunID
 		session, startErr := r.opts.Environment.Start(ctx, spec)
 		if startErr != nil {
 			return result, fmt.Errorf("start execution environment: %w", startErr)
@@ -324,6 +383,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		metadata := session.Metadata()
 		effectiveSandbox = metadata.Provider
 		effectiveNetwork = string(metadata.Network)
+		effectiveEnvironmentID = metadata.EnvironmentID
 		if effectiveSandbox == "" {
 			effectiveSandbox = r.opts.Sandbox
 		}
@@ -359,8 +419,8 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		return result, err
 	}
 	if r.opts.Debug {
-		r.logger.Printf("[debug] run %s: hands ready: sandbox=%s network=%s workspace=%q tools=%d",
-			request.RunID, effectiveSandbox, effectiveNetwork, request.Workspace, len(core.ToolSpecs()))
+		r.logger.Printf("[debug] run %s: hands ready: sandbox=%s environment_id=%q network=%s workspace=%q tools=%d",
+			request.RunID, effectiveSandbox, effectiveEnvironmentID, effectiveNetwork, request.Workspace, len(core.ToolSpecs()))
 	}
 	core.OnEventError(func(event pons.Event) error {
 		switch event.Type {

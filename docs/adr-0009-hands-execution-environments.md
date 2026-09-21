@@ -176,6 +176,7 @@ residency.
 - `docs/adr-0007-language-neutral-plugin-runtime.md` — external hands wire
   protocol
 - `plugins/external/` — current persistent tool-provider host
-- `environment/` — provider/session contract and Seatbelt implementation
+- `environment/` — provider/session contract
+- `environment/seatbelt/` and `environment/e2b/` — provider implementations
 - `internal/toolhost/` — built-in tool catalog served by `pons-hands`
 - `protocol/` — action and result types

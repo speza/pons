@@ -1,12 +1,12 @@
 # Hands execution environment v1 design
 
-**Status:** Local provider and per-run lifecycle implemented
+**Status:** Local Seatbelt and remote E2B per-run providers implemented
 **Related:** [ADR-0009](adr-0009-hands-execution-environments.md),
 [ADR-0007](adr-0007-language-neutral-plugin-runtime.md)
 
-This document sketches the first local backend and the shape of a future E2B
-backend. It does not add an E2B dependency or make remote execution part of
-the default test suite.
+This document describes the local Seatbelt backend and the initial E2B remote
+backend. E2B uses the standard library HTTP client rather than an SDK, and its
+credential-dependent checks remain outside the default test suite.
 
 ## Common shape
 
@@ -109,7 +109,7 @@ when the conversation becomes idle. Workspace changes remain on disk. Seatbelt
 is a baseline boundary and should not be described as a universal guarantee
 against a kernel-level escape.
 
-## E2B backend sketch
+## E2B backend
 
 E2B is a useful model for the remote provider because its sandbox is a
 provisioned Linux environment rather than a local container abstraction. Its
@@ -124,29 +124,29 @@ current SDK surface includes:
 - pause, resume, set a timeout, inspect, and kill; and
 - expose a sandbox port through an HTTP/WebSocket host address.
 
-The E2B adapter would conceptually do this:
+The E2B adapter does this:
 
 ```text
 1. Build a provider policy from EnvironmentSpec.
-2. Create or reconnect to an E2B sandbox from a pinned pons-hands template.
+2. Reconnect the workspace's sandbox, or create one from a pinned pons-hands template.
 3. Request allow_internet_access=false unless policy explicitly enables it.
 4. Pass only explicit environment values; keep the E2B API key on the host.
-5. Start pons-hands and an authenticated protocol bridge in the template.
-6. Wait for the bridge readiness signal.
-7. Connect the host hands session to the bridge.
+5. Upload and extract a bounded workspace archive when creating a sandbox.
+6. Start pons-hands through authenticated envd process APIs.
+7. Adapt envd stdin/stdout to the existing host hands session.
 8. Execute protocol actions and return ToolResults.
-9. Persist sandbox ID, template, expiry, and workspace metadata.
-10. Pause/retain or kill according to lifetime policy.
+9. Checkpoint the remote workspace after the run and mark the sandbox idle.
+10. Reuse it for later runs, or let the idle janitor kill it.
 ```
 
-The template would contain the tool host and bridge. The host should not
+The template contains the tool host; envd supplies the process transport. The host should not
 turn every `bash` call into a new E2B command request: that would duplicate
 command, filesystem, schema, cancellation, and result semantics outside
 pons. A persistent hands endpoint keeps those semantics in one place.
 
 ### E2B transport options
 
-There are two plausible transports:
+Two transports were considered:
 
 1. **Port bridge:** `pons-hands` listens on a sandbox-local HTTP/WebSocket
    port; the host uses the provider's exposed host address. The bridge carries
@@ -154,10 +154,10 @@ There are two plausible transports:
 2. **Provider adapter:** the host maps `protocol.Action` directly to E2B's
    command/files APIs and registers a fixed catalog of proxy tools.
 
-The port bridge is the preferred long-term shape because it preserves the
-tool host and tool-provider catalog across local and remote backends. The
-direct adapter is a useful prototype, but it would make E2B's API part of the
-hands implementation and would need a second implementation for every tool.
+The implementation uses a third, simpler option: E2B envd exposes the remote
+process's stdin and stdout directly. Those byte streams carry the unchanged
+stdio protocol, so no application port is exposed and no E2B-specific tool
+implementation is needed. See ADR-0015.
 
 ADR-0007 currently specifies stdio as the wire transport. A remote bridge can
 keep stdio inside the sandbox and use a host-side relay, or a future protocol
@@ -174,10 +174,14 @@ adapter therefore needs an explicit workspace transfer mode:
 - upload selected files before a run and download changed files afterward; or
 - retain a provider workspace by sandbox ID and periodically checkpoint it.
 
-The first remote proof should choose one mode rather than pretending that a
-local path and a remote workspace are identical. The conversation/session
-transcript remains on the host. The remote workspace is an execution copy and
-must have an explicit checkpoint/failure policy.
+The initial provider uploads a full tar archive when it creates a sandbox and
+downloads a full checkpoint after every run. The checkpoint is validated in a
+staging directory before replacing the local workspace, including remote
+deletions. SQLite persists the workspace-to-sandbox association, lifecycle
+state, run lease, idle deadline, and provider expiry, but no credentials. A
+later process reconnects with its host-side API key and receives a fresh envd
+access token. Transfer size is bounded, and incremental synchronization is
+left for later.
 
 If the E2B sandbox expires, the host treats the environment as failed. It does
 not automatically repeat a tool action. A later agent run may create a new
@@ -210,8 +214,8 @@ the result.
 - Unit-test environment policy construction without launching a sandbox.
 - Use a fake hands endpoint for core and runtime tests.
 - Add macOS Seatbelt integration tests behind an explicit build/run condition.
-- Keep E2B tests opt-in and credential-dependent; never add them to
-  `go test ./...`.
+- Keep live E2B tests opt-in and credential-dependent; fake API and archive
+  tests remain in `go test ./...`.
 - Test that no parent environment credentials or network policy accidentally
   enter the hands process.
 - Test provider expiry and endpoint failure as ordinary hands-boundary
@@ -222,6 +226,7 @@ the result.
 - [E2B Sandbox SDK reference](https://e2b.dev/docs/sdk-reference/js-sdk/v2.6.2/sandbox)
 - [E2B Python Sandbox reference](https://e2b.dev/docs/sdk-reference/python-sdk/v2.5.0/sandbox_sync)
 - [E2B template reference](https://e2b.dev/docs/sdk-reference/cli/v1.0.9/template)
+- [Remote workspace provisioning design](remote-workspace-provisioning.md)
 - [ADR-0004](adr-0004-sandboxed-hands-boundary.md)
 - [ADR-0007](adr-0007-language-neutral-plugin-runtime.md)
 - `plugins/external/` — current external hands host

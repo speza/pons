@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/samperrin/pons/environment"
+	"github.com/samperrin/pons/environment/e2b"
 	"github.com/samperrin/pons/plugins/brain/llm"
 	"github.com/samperrin/pons/plugins/external"
 	"github.com/samperrin/pons/protocol"
@@ -242,6 +243,36 @@ func TestRuntimeTurnsNormalizeEmptyToolArguments(t *testing.T) {
 		if tool.Input == nil || len(tool.Input) != 0 {
 			t.Fatalf("input = %#v", tool.Input)
 		}
+	}
+}
+
+func TestExecutionEnvironmentConfiguresE2B(t *testing.T) {
+	provider, spec, err := executionEnvironment("e2b", "", false, serverOptions{
+		E2BTemplate: "custom", E2BHandsPath: "/opt/pons-hands", BashTimeout: 9,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e2bProvider, ok := provider.(*e2b.Provider)
+	if !ok || e2bProvider.Template != "custom" || e2bProvider.HandsPath != "/opt/pons-hands" {
+		t.Fatalf("provider = %#v", provider)
+	}
+	if spec.Network != environment.NetworkDisabled || spec.Command[0] != "/opt/pons-hands" || !slices.Contains(spec.Command, "9") {
+		t.Fatalf("spec = %+v", spec)
+	}
+}
+
+func TestExecutionEnvironmentRejectsNegativeSandboxIdleTimeout(t *testing.T) {
+	_, _, err := executionEnvironment("e2b", "", false, serverOptions{SandboxIdleTimeout: -time.Second})
+	if err == nil || !strings.Contains(err.Error(), "must not be negative") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestExecutionEnvironmentRejectsE2BExternalPlugins(t *testing.T) {
+	_, _, err := executionEnvironment("e2b", "", false, serverOptions{PluginPaths: []string{"plugin.json"}})
+	if err == nil || !strings.Contains(err.Error(), "does not yet support external plugins") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

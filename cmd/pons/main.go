@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/samperrin/pons/plugins/brain/llm"
 	"github.com/samperrin/pons/protocol"
@@ -58,9 +59,12 @@ func main() {
 	flag.Var(&fallbackFlags, "fallback", "fallback provider as provider or provider:model (repeatable; tried in order when the primary fails)")
 	interactive := flag.Bool("i", false, "interactive runtime client: read tasks from stdin, one per line")
 	pluginPath := flag.String("plugin-path", "", "PATH supplied to external plugin children (credentials are not inherited by default)")
-	sandbox := flag.String("sandbox", "", `per-run execution environment: "seatbelt" (default: in-process)`)
+	sandbox := flag.String("sandbox", "", `per-run execution environment: "seatbelt" | "e2b" (default: in-process)`)
 	sandboxNetwork := flag.Bool("sandbox-network", false, "allow network access inside the per-run sandbox")
-	handsCommand := flag.String("hands-command", "", "pons-hands executable used by the sandbox (default: find pons-hands on PATH)")
+	handsCommand := flag.String("hands-command", "", "local pons-hands executable used by Seatbelt (default: find pons-hands on PATH)")
+	e2bTemplate := flag.String("e2b-template", "", `E2B template containing pons-hands (default: "pons-hands")`)
+	e2bHandsPath := flag.String("e2b-hands-path", "", "absolute pons-hands path inside the E2B template (default: /usr/local/bin/pons-hands)")
+	sandboxIdleTimeout := flag.Duration("sandbox-idle-timeout", 10*time.Minute, "idle time before a retained remote sandbox is deleted")
 	runtimeAddress := flag.String("addr", "127.0.0.1:7337", "runtime server listen address (serve mode; loopback only)")
 	serverURL := flag.String("server", "http://127.0.0.1:7337", "runtime server URL (client mode)")
 	conversationID := flag.String("conversation", "", "existing runtime conversation id (client mode)")
@@ -174,7 +178,11 @@ func main() {
 		MaxConcurrent: *runtimeConcurrency, MaxTurns: *maxTurns, Brain: brainConfig,
 		FSReadBytes: *fsReadBytes, BashTimeout: *bashTimeout, BashMaxLines: *bashMaxLines, BashMaxBytes: *bashMaxBytes,
 		PluginPaths: pluginPaths, PluginPath: *pluginPath, PluginMaxResultBytes: *pluginMaxResultBytes, Debug: *debug,
-		Sandbox: *sandbox,
+		Sandbox: *sandbox, E2BTemplate: *e2bTemplate, E2BHandsPath: *e2bHandsPath,
+		SandboxIdleTimeout: *sandboxIdleTimeout,
+		EnvironmentError: func(err error) {
+			logger.Printf("environment: %v", err)
+		},
 	}
 	serverOpts.Environment, serverOpts.EnvironmentSpec, err = executionEnvironment(*sandbox, *handsCommand, *sandboxNetwork, serverOpts)
 	if err != nil {

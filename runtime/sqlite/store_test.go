@@ -2,9 +2,11 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/samperrin/pons/environment"
 	"github.com/samperrin/pons/protocol"
 	ponsruntime "github.com/samperrin/pons/runtime"
 )
@@ -21,6 +23,72 @@ func TestOpenConfiguresBusyTimeout(t *testing.T) {
 	}
 	if timeout <= 0 {
 		t.Fatalf("busy_timeout = %d", timeout)
+	}
+}
+
+func TestEnvironmentStateRoundTripAndExpiry(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	state := environment.State{
+		Key: "/workspace", Provider: "e2b", EnvironmentID: "sandbox", Template: "pons-hands",
+		Network:            environment.NetworkDisabled,
+		WorkspaceStrategy:  environment.WorkspaceStrategyLocalArchive,
+		WorkspaceSourceRef: "source", WorkspaceRevision: "base", CheckpointRevision: "checkpoint",
+		SetupGeneration: 2, Status: environment.StateIdle, IdleUntil: now.Add(time.Minute),
+		ExpiresAt: now.Add(2 * time.Minute), UpdatedAt: now,
+	}
+	if err := store.SaveEnvironmentState(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.EnvironmentState(ctx, state.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.EnvironmentID != state.EnvironmentID || got.Network != state.Network ||
+		got.WorkspaceStrategy != state.WorkspaceStrategy || got.WorkspaceSourceRef != state.WorkspaceSourceRef ||
+		got.WorkspaceRevision != state.WorkspaceRevision || got.CheckpointRevision != state.CheckpointRevision ||
+		got.SetupGeneration != state.SetupGeneration || !got.IdleUntil.Equal(state.IdleUntil) {
+		t.Fatalf("state = %+v", got)
+	}
+	before, err := store.ExpiredEnvironmentStates(ctx, "e2b", now, 10)
+	if err != nil || len(before) != 0 {
+		t.Fatalf("before expiry = %+v, %v", before, err)
+	}
+	after, err := store.ExpiredEnvironmentStates(ctx, "e2b", now.Add(time.Minute), 10)
+	if err != nil || len(after) != 1 {
+		t.Fatalf("after expiry = %+v, %v", after, err)
+	}
+	if err := store.DeleteEnvironmentState(ctx, state.Key, "other"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnvironmentState(ctx, state.Key); err != nil {
+		t.Fatalf("stale delete removed state: %v", err)
+	}
+	invalidStatus := state
+	invalidStatus.Key, invalidStatus.EnvironmentID, invalidStatus.Status = "/invalid-status", "invalid-status", "unknown"
+	if err := store.SaveEnvironmentState(ctx, invalidStatus); err == nil {
+		t.Fatal("invalid environment status was accepted")
+	}
+	invalidNetwork := state
+	invalidNetwork.Key, invalidNetwork.EnvironmentID, invalidNetwork.Network = "/invalid-network", "invalid-network", "unknown"
+	if err := store.SaveEnvironmentState(ctx, invalidNetwork); err == nil {
+		t.Fatal("invalid network policy was accepted")
+	}
+	duplicate := state
+	duplicate.Key = "/other-workspace"
+	if err := store.SaveEnvironmentState(ctx, duplicate); err == nil {
+		t.Fatal("duplicate provider environment id was accepted")
+	}
+	if err := store.DeleteEnvironmentState(ctx, state.Key, state.EnvironmentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnvironmentState(ctx, state.Key); !errors.Is(err, environment.ErrStateNotFound) {
+		t.Fatalf("error = %v", err)
 	}
 }
 

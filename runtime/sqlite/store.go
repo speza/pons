@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ncruces/go-sqlite3/driver"
+	"github.com/samperrin/pons/environment"
 	"github.com/samperrin/pons/protocol"
 	ponsruntime "github.com/samperrin/pons/runtime"
 )
@@ -25,7 +26,10 @@ const runtimeDBName = "runtime.db"
 // but they are not renewable leases or a distributed fencing mechanism.
 type Store struct{ db *sql.DB }
 
-var _ ponsruntime.Store = (*Store)(nil)
+var (
+	_ ponsruntime.Store      = (*Store)(nil)
+	_ environment.StateStore = (*Store)(nil)
+)
 
 func newID() string { return ponsruntime.NewID() }
 
@@ -142,6 +146,30 @@ CREATE TABLE IF NOT EXISTS events (
   created_at TEXT NOT NULL,
   PRIMARY KEY(conversation_id, cursor)
 );
+CREATE TABLE IF NOT EXISTS execution_environments (
+  environment_key TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  environment_id TEXT NOT NULL,
+  template TEXT NOT NULL,
+  network_policy TEXT NOT NULL DEFAULT 'disabled'
+    CHECK (network_policy IN ('disabled', 'enabled')),
+  workspace_strategy TEXT NOT NULL DEFAULT 'local_archive',
+  workspace_source_ref TEXT NOT NULL DEFAULT '',
+  workspace_revision TEXT NOT NULL DEFAULT '',
+  checkpoint_revision TEXT NOT NULL DEFAULT '',
+  setup_generation INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL CHECK (status IN ('active', 'idle')),
+  lease_id TEXT NOT NULL DEFAULT '',
+  idle_until TEXT,
+  expires_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS execution_environments_expiry
+  ON execution_environments(provider, status, idle_until);
+CREATE INDEX IF NOT EXISTS execution_environments_provider_expiry
+  ON execution_environments(provider, expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS execution_environments_provider_id
+  ON execution_environments(provider, environment_id);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("runtime: migrate database: %w", err)
@@ -151,6 +179,50 @@ CREATE TABLE IF NOT EXISTS events (
 	}
 	if err := s.ensureColumn(ctx, "messages", "complete", "BOOLEAN NOT NULL DEFAULT TRUE"); err != nil {
 		return fmt.Errorf("runtime: migrate message completeness: %w", err)
+	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{"network_policy", "TEXT NOT NULL DEFAULT 'disabled'"},
+		{"workspace_strategy", "TEXT NOT NULL DEFAULT 'local_archive'"},
+		{"workspace_source_ref", "TEXT NOT NULL DEFAULT ''"},
+		{"workspace_revision", "TEXT NOT NULL DEFAULT ''"},
+		{"checkpoint_revision", "TEXT NOT NULL DEFAULT ''"},
+		{"setup_generation", "INTEGER NOT NULL DEFAULT 1"},
+	} {
+		if err := s.ensureColumn(ctx, "execution_environments", column.name, column.definition); err != nil {
+			return fmt.Errorf("runtime: migrate environment %s: %w", column.name, err)
+		}
+	}
+	var invalid int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM execution_environments
+WHERE status NOT IN ('active', 'idle')
+   OR network_policy NOT IN ('disabled', 'enabled')`).Scan(&invalid); err != nil {
+		return fmt.Errorf("runtime: validate environment lifecycle values: %w", err)
+	}
+	if invalid != 0 {
+		return fmt.Errorf("runtime: %d execution environment rows have invalid lifecycle values", invalid)
+	}
+	const environmentTriggers = `
+CREATE TRIGGER IF NOT EXISTS execution_environments_validate_insert
+BEFORE INSERT ON execution_environments
+WHEN NEW.status NOT IN ('active', 'idle')
+  OR NEW.network_policy NOT IN ('disabled', 'enabled')
+BEGIN
+  SELECT RAISE(ABORT, 'invalid execution environment lifecycle value');
+END;
+CREATE TRIGGER IF NOT EXISTS execution_environments_validate_update
+BEFORE UPDATE OF status, network_policy ON execution_environments
+WHEN NEW.status NOT IN ('active', 'idle')
+  OR NEW.network_policy NOT IN ('disabled', 'enabled')
+BEGIN
+  SELECT RAISE(ABORT, 'invalid execution environment lifecycle value');
+END;
+`
+	if _, err := s.db.ExecContext(ctx, environmentTriggers); err != nil {
+		return fmt.Errorf("runtime: constrain environment lifecycle values: %w", err)
 	}
 	return nil
 }
@@ -169,6 +241,177 @@ func (s *Store) ensureColumn(ctx context.Context, table, column, definition stri
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+func (s *Store) EnvironmentState(ctx context.Context, key string) (environment.State, error) {
+	var state environment.State
+	var idleUntil sql.NullString
+	var expiresAt, updatedAt string
+	err := s.db.QueryRowContext(ctx, `
+SELECT environment_key, provider, environment_id, template, network_policy,
+       workspace_strategy, workspace_source_ref, workspace_revision,
+       checkpoint_revision, setup_generation, status, lease_id,
+       idle_until, expires_at, updated_at
+FROM execution_environments WHERE environment_key = ?`, key).Scan(
+		&state.Key,
+		&state.Provider,
+		&state.EnvironmentID,
+		&state.Template,
+		&state.Network,
+		&state.WorkspaceStrategy,
+		&state.WorkspaceSourceRef,
+		&state.WorkspaceRevision,
+		&state.CheckpointRevision,
+		&state.SetupGeneration,
+		&state.Status,
+		&state.LeaseID,
+		&idleUntil,
+		&expiresAt,
+		&updatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return environment.State{}, environment.ErrStateNotFound
+	}
+	if err != nil {
+		return environment.State{}, fmt.Errorf("runtime: read environment state: %w", err)
+	}
+	if idleUntil.Valid {
+		state.IdleUntil, err = decodeTime(idleUntil.String)
+		if err != nil {
+			return environment.State{}, err
+		}
+	}
+	state.ExpiresAt, err = decodeTime(expiresAt)
+	if err != nil {
+		return environment.State{}, err
+	}
+	state.UpdatedAt, err = decodeTime(updatedAt)
+	if err != nil {
+		return environment.State{}, err
+	}
+	return state, nil
+}
+
+func (s *Store) SaveEnvironmentState(ctx context.Context, state environment.State) error {
+	var idleUntil any
+	if !state.IdleUntil.IsZero() {
+		idleUntil = encodeTime(state.IdleUntil)
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO execution_environments (
+  environment_key, provider, environment_id, template, network_policy,
+  workspace_strategy, workspace_source_ref, workspace_revision,
+  checkpoint_revision, setup_generation, status, lease_id,
+  idle_until, expires_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(environment_key) DO UPDATE SET
+  provider = excluded.provider,
+  environment_id = excluded.environment_id,
+  template = excluded.template,
+  network_policy = excluded.network_policy,
+  workspace_strategy = excluded.workspace_strategy,
+  workspace_source_ref = excluded.workspace_source_ref,
+  workspace_revision = excluded.workspace_revision,
+  checkpoint_revision = excluded.checkpoint_revision,
+  setup_generation = excluded.setup_generation,
+  status = excluded.status,
+  lease_id = excluded.lease_id,
+  idle_until = excluded.idle_until,
+  expires_at = excluded.expires_at,
+  updated_at = excluded.updated_at`,
+		state.Key,
+		state.Provider,
+		state.EnvironmentID,
+		state.Template,
+		state.Network,
+		state.WorkspaceStrategy,
+		state.WorkspaceSourceRef,
+		state.WorkspaceRevision,
+		state.CheckpointRevision,
+		state.SetupGeneration,
+		state.Status,
+		state.LeaseID,
+		idleUntil,
+		encodeTime(state.ExpiresAt),
+		encodeTime(state.UpdatedAt),
+	)
+	if err != nil {
+		return fmt.Errorf("runtime: save environment state: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteEnvironmentState(ctx context.Context, key, environmentID string) error {
+	_, err := s.db.ExecContext(ctx, `
+DELETE FROM execution_environments
+WHERE environment_key = ? AND environment_id = ?`, key, environmentID)
+	if err != nil {
+		return fmt.Errorf("runtime: delete environment state: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ExpiredEnvironmentStates(
+	ctx context.Context,
+	provider string,
+	now time.Time,
+	limit int,
+) ([]environment.State, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT environment_key, provider, environment_id, template, network_policy,
+       workspace_strategy, workspace_source_ref, workspace_revision,
+       checkpoint_revision, setup_generation, status, lease_id,
+       idle_until, expires_at, updated_at
+FROM execution_environments
+WHERE provider = ?
+  AND ((status = ? AND idle_until <= ?) OR expires_at <= ?)
+ORDER BY COALESCE(idle_until, expires_at), environment_key
+LIMIT ?`, provider, environment.StateIdle, encodeTime(now), encodeTime(now), limit)
+	if err != nil {
+		return nil, fmt.Errorf("runtime: list expired environment states: %w", err)
+	}
+	defer rows.Close()
+	var states []environment.State
+	for rows.Next() {
+		var state environment.State
+		var idleUntil, expiresAt, updatedAt string
+		if err := rows.Scan(
+			&state.Key,
+			&state.Provider,
+			&state.EnvironmentID,
+			&state.Template,
+			&state.Network,
+			&state.WorkspaceStrategy,
+			&state.WorkspaceSourceRef,
+			&state.WorkspaceRevision,
+			&state.CheckpointRevision,
+			&state.SetupGeneration,
+			&state.Status,
+			&state.LeaseID,
+			&idleUntil,
+			&expiresAt,
+			&updatedAt,
+		); err != nil {
+			return nil, err
+		}
+		state.IdleUntil, err = decodeTime(idleUntil)
+		if err != nil {
+			return nil, err
+		}
+		state.ExpiresAt, err = decodeTime(expiresAt)
+		if err != nil {
+			return nil, err
+		}
+		state.UpdatedAt, err = decodeTime(updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		states = append(states, state)
+	}
+	return states, rows.Err()
+}
 
 func encodeTime(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
 

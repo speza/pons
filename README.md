@@ -37,7 +37,8 @@ environments are explicit plugins or injected infrastructure.
 | `plugins/fs`, `edit`, `bash`, `shell` | Built-in hands-side tools |
 | `plugins/external` | Persistent external tool providers and Go/TypeScript SDKs |
 | `runtime/` | Durable SQLite runtime and HTTP/SSE transport |
-| `environment/` | Execution-environment and macOS Seatbelt integration |
+| `environment/` | Provider/session contracts and durable environment state |
+| `environment/seatbelt`, `environment/e2b` | Local and remote execution providers |
 | `cmd/` | `pons`, `pons-hands`, and demo binaries |
 
 Adding a tool plugin automatically adds its schema to the LLM brain. The core
@@ -116,6 +117,29 @@ go run ./cmd/pons -provider codex -sandbox seatbelt \
   -message "inspect this project"
 ```
 
+E2B can run the same hands protocol in a remote Linux sandbox. Build the
+pinned template once (requires `E2B_API_KEY` and Node/npm), then select it:
+
+```sh
+make e2b-template
+make smoke-e2b
+go run ./cmd/pons -provider codex -sandbox e2b \
+  -e2b-template pons-hands \
+  -message "inspect this project"
+```
+
+To remove retained pons sandboxes manually, run `make cleanup-e2b`; use
+`./scripts/cleanup-e2b.sh --dry-run` to inspect matches first. The default is
+scoped to the `pons-hands` template; `make cleanup-e2b-all` explicitly targets
+all running and paused sandboxes visible to the API key.
+
+The E2B API key remains on the host, internet access is disabled unless
+`-sandbox-network` is set, and the bounded workspace copy is checkpointed back
+after every run. Sandbox IDs and lifecycle state are persisted in SQLite, so a
+workspace reuses its sandbox across messages and server restarts. Idle
+sandboxes are deleted after `-sandbox-idle-timeout` (10 minutes by default).
+The initial E2B backend does not support external plugin manifests.
+
 External tools are enabled explicitly with a manifest; they are never
 discovered implicitly. Example providers are in
 [`examples/external-echo`](examples/external-echo) and
@@ -125,7 +149,8 @@ discovered implicitly. Example providers are in
 
 Useful flags include `-workspace`, `-state-dir`, `-max-turns`,
 `-compact-chars`, repeatable `-plugin`, `-plugin-path`, `-sandbox`,
-`-hands-command`, `-fallback`, and `-debug`.
+`-hands-command`, `-e2b-template`, `-e2b-hands-path`,
+`-sandbox-idle-timeout`, `-fallback`, and `-debug`.
 
 ## Configuration
 
@@ -163,6 +188,6 @@ driver, and the standard-library HTTP stack.
 ## Roadmap
 
 - Stream text and partial tool-output observations through `OnEvent`.
-- Add Linux and remote execution-environment providers.
+- Add a local Linux execution-environment provider and incremental remote workspace sync.
 - Support per-run environments in the long-lived runtime.
 - Add branching and `go install`-able releases.

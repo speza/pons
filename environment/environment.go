@@ -43,6 +43,7 @@ type ResourceLimits struct {
 // inherited.
 type Spec struct {
 	Workspace   string
+	LeaseID     string
 	Command     []string
 	ReadOnly    []string
 	Network     NetworkPolicy
@@ -52,9 +53,10 @@ type Spec struct {
 
 // Metadata identifies the effective backend and policy for audit and UI use.
 type Metadata struct {
-	Provider  string
-	Workspace string
-	Network   NetworkPolicy
+	Provider      string
+	EnvironmentID string
+	Workspace     string
+	Network       NetworkPolicy
 }
 
 // Provider provisions a hands environment and establishes its endpoint.
