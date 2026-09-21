@@ -18,11 +18,16 @@ import (
 )
 
 const (
-	defaultE2BAPIURL         = "https://api.e2b.app"
-	defaultE2BEnvdURL        = "https://sandbox.e2b.app"
-	defaultE2BTemplate       = "pons-hands"
-	defaultE2BHandsPath      = "/usr/local/bin/pons-hands"
-	defaultE2BWorkspace      = "/home/user/pons-workspace"
+	defaultE2BAPIURL        = "https://api.e2b.app"
+	defaultE2BEnvdURL       = "https://sandbox.e2b.app"
+	defaultE2BTemplate      = "pons-hands"
+	defaultE2BHandsPath     = "/usr/local/bin/pons-hands"
+	defaultE2BWorkspace     = "/home/user/pons-workspace"
+	workspaceUploadPath     = "/tmp/pons-workspace.tar"
+	workspaceCheckpointPath = "/tmp/pons-workspace-out.tar"
+	prepareWorkspaceScript  = "rm -rf " + defaultE2BWorkspace +
+		" && mkdir -p " + defaultE2BWorkspace +
+		" && tar -xf " + workspaceUploadPath + " -C " + defaultE2BWorkspace
 	defaultE2BTimeout        = 15 * time.Minute
 	defaultE2BWorkspaceBytes = 256 << 20
 	e2bSetupGeneration       = 1
@@ -67,7 +72,6 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 	p.lifecycleMu.Lock()
 	defer p.lifecycleMu.Unlock()
 	store := p.stateStore
-	retained := store != nil
 	leaseID := spec.LeaseID
 	if p.active == nil {
 		p.active = make(map[string]string)
@@ -75,7 +79,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 	if activeLease := p.active[workspace]; activeLease != "" {
 		return nil, fmt.Errorf("environment: workspace %q already has active E2B lease %q", workspace, activeLease)
 	}
-	if retained && leaseID == "" {
+	if store != nil && leaseID == "" {
 		return nil, errors.New("environment: durable E2B session requires a lease ID")
 	}
 	sandbox, resumed, err := p.acquireSandbox(ctx, client, cfg, workspace, leaseID, network)
@@ -96,22 +100,28 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 		if archiveErr != nil {
 			return nil, errors.Join(archiveErr, cleanup())
 		}
-		if err := client.upload(ctx, sandbox, "/tmp/pons-workspace.tar", bytes.NewReader(archive)); err != nil {
+		if err := client.upload(ctx, sandbox, workspaceUploadPath, bytes.NewReader(archive)); err != nil {
 			return nil, errors.Join(err, cleanup())
 		}
 		if _, _, err := client.run(ctx, sandbox, "/bin/sh", []string{
-			"-c", "rm -rf " + defaultE2BWorkspace + " && mkdir -p " + defaultE2BWorkspace + " && tar -xf /tmp/pons-workspace.tar -C " + defaultE2BWorkspace,
+			"-c", prepareWorkspaceScript,
 		}, "/home/user", nil); err != nil {
 			return nil, errors.Join(fmt.Errorf("environment: prepare E2B workspace: %w", err), cleanup())
 		}
 		if store != nil {
 			now := time.Now().UTC()
 			if err := store.SaveEnvironmentState(ctx, environment.State{
-				Key: workspace, Provider: "e2b", EnvironmentID: sandbox.ID,
-				Template: cfg.template, Network: network,
-				WorkspaceStrategy: environment.WorkspaceStrategyLocalArchive, SetupGeneration: e2bSetupGeneration,
-				Status: environment.StateActive, LeaseID: leaseID,
-				ExpiresAt: now.Add(cfg.timeout), UpdatedAt: now,
+				Key:               workspace,
+				Provider:          "e2b",
+				EnvironmentID:     sandbox.ID,
+				Template:          cfg.template,
+				Network:           network,
+				WorkspaceStrategy: environment.WorkspaceStrategyLocalArchive,
+				SetupGeneration:   e2bSetupGeneration,
+				Status:            environment.StateActive,
+				LeaseID:           leaseID,
+				ExpiresAt:         now.Add(cfg.timeout),
+				UpdatedAt:         now,
 			}); err != nil {
 				return nil, errors.Join(err, cleanup())
 			}
@@ -158,8 +168,15 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 	}
 	p.active[workspace] = leaseID
 	return &e2bSession{
-		host: host, client: client, sandbox: sandbox, workspace: workspace,
-		owner: p, store: store, leaseID: leaseID, template: cfg.template, idleTimeout: cfg.idleTimeout,
+		host:              host,
+		client:            client,
+		sandbox:           sandbox,
+		workspace:         workspace,
+		owner:             p,
+		store:             store,
+		leaseID:           leaseID,
+		template:          cfg.template,
+		idleTimeout:       cfg.idleTimeout,
 		maxWorkspaceBytes: cfg.maxWorkspaceBytes,
 		metadata: environment.Metadata{
 			Provider:      "e2b",
@@ -180,11 +197,17 @@ type e2bConfig struct {
 
 func (p *Provider) config() (e2bConfig, error) {
 	cfg := e2bConfig{
-		apiKey: p.APIKey, template: p.Template, handsPath: p.HandsPath,
-		timeout: p.Timeout, idleTimeout: p.IdleTimeout, cleanupInterval: p.CleanupInterval,
+		apiKey:            p.APIKey,
+		template:          p.Template,
+		handsPath:         p.HandsPath,
+		timeout:           p.Timeout,
+		idleTimeout:       p.IdleTimeout,
+		cleanupInterval:   p.CleanupInterval,
 		maxWorkspaceBytes: p.MaxWorkspaceBytes,
-		apiURL:            strings.TrimRight(p.APIURL, "/"), envdURL: strings.TrimRight(p.EnvdURL, "/"), http: p.HTTPClient,
-		onError: p.OnError,
+		apiURL:            strings.TrimRight(p.APIURL, "/"),
+		envdURL:           strings.TrimRight(p.EnvdURL, "/"),
+		http:              p.HTTPClient,
+		onError:           p.OnError,
 	}
 	if cfg.apiKey == "" {
 		cfg.apiKey = os.Getenv("E2B_API_KEY")
@@ -258,13 +281,14 @@ func (p *Provider) Close() error {
 	p.lifecycleMu.Lock()
 	cancel, done := p.stopJanitor, p.janitorDone
 	p.lifecycleMu.Unlock()
-	if cancel != nil {
-		cancel()
-		<-done
-		p.lifecycleMu.Lock()
-		p.stopJanitor, p.janitorDone = nil, nil
-		p.lifecycleMu.Unlock()
+	if cancel == nil {
+		return nil
 	}
+	cancel()
+	<-done
+	p.lifecycleMu.Lock()
+	p.stopJanitor, p.janitorDone = nil, nil
+	p.lifecycleMu.Unlock()
 	return nil
 }
 
@@ -279,8 +303,7 @@ func (p *Provider) acquireSandbox(
 	if store != nil {
 		state, err := store.EnvironmentState(ctx, key)
 		switch {
-		case err == nil && state.Provider == "e2b" && state.Template == cfg.template && state.Network == network &&
-			state.WorkspaceStrategy == environment.WorkspaceStrategyLocalArchive && state.SetupGeneration == e2bSetupGeneration:
+		case err == nil && reusableState(state, cfg, network):
 			sandbox, connectErr := client.connectSandbox(ctx, state.EnvironmentID, cfg.timeout)
 			if connectErr == nil {
 				state.Status = environment.StateActive
@@ -321,6 +344,14 @@ func (p *Provider) acquireSandbox(
 		return e2bSandbox{}, false, err
 	}
 	return sandbox, false, nil
+}
+
+func reusableState(state environment.State, cfg e2bConfig, network environment.NetworkPolicy) bool {
+	return state.Provider == "e2b" &&
+		state.Template == cfg.template &&
+		state.Network == network &&
+		state.WorkspaceStrategy == environment.WorkspaceStrategyLocalArchive &&
+		state.SetupGeneration == e2bSetupGeneration
 }
 
 func (p *Provider) janitor(ctx context.Context, cfg e2bConfig) {
@@ -440,10 +471,10 @@ func (s *e2bSession) Close() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		if _, _, err := s.client.run(ctx, s.sandbox, "/bin/tar", []string{
-			"--hard-dereference", "-cf", "/tmp/pons-workspace-out.tar", "-C", defaultE2BWorkspace, ".",
+			"--hard-dereference", "-cf", workspaceCheckpointPath, "-C", defaultE2BWorkspace, ".",
 		}, "/home/user", nil); err != nil {
 			s.closeErr = errors.Join(s.closeErr, fmt.Errorf("environment: checkpoint E2B workspace: %w", err))
-		} else if body, err := s.client.download(ctx, s.sandbox, "/tmp/pons-workspace-out.tar", s.maxWorkspaceBytes); err != nil {
+		} else if body, err := s.client.download(ctx, s.sandbox, workspaceCheckpointPath, s.maxWorkspaceBytes); err != nil {
 			s.closeErr = errors.Join(s.closeErr, err)
 		} else if err := restoreWorkspace(s.workspace, body, s.maxWorkspaceBytes); err != nil {
 			s.closeErr = errors.Join(s.closeErr, err)
@@ -455,11 +486,17 @@ func (s *e2bSession) Close() error {
 				s.closeErr = err
 			} else {
 				s.closeErr = s.store.SaveEnvironmentState(ctx, environment.State{
-					Key: s.workspace, Provider: "e2b", EnvironmentID: s.sandbox.ID,
-					Template: s.template, Network: s.metadata.Network,
-					WorkspaceStrategy: environment.WorkspaceStrategyLocalArchive, SetupGeneration: e2bSetupGeneration,
-					Status: environment.StateIdle, IdleUntil: idleUntil,
-					ExpiresAt: idleUntil.Add(time.Minute), UpdatedAt: now,
+					Key:               s.workspace,
+					Provider:          "e2b",
+					EnvironmentID:     s.sandbox.ID,
+					Template:          s.template,
+					Network:           s.metadata.Network,
+					WorkspaceStrategy: environment.WorkspaceStrategyLocalArchive,
+					SetupGeneration:   e2bSetupGeneration,
+					Status:            environment.StateIdle,
+					IdleUntil:         idleUntil,
+					ExpiresAt:         idleUntil.Add(time.Minute),
+					UpdatedAt:         now,
 				})
 			}
 		}

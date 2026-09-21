@@ -340,7 +340,11 @@ func (h *Host) connect(ctx context.Context) (Connection, error) {
 		if err != nil {
 			return Connection{}, fmt.Errorf("external: connect %q: %w", h.manifest.Name, err)
 		}
-		if connection.Stdin == nil || connection.Stdout == nil || connection.Stderr == nil || connection.Wait == nil || connection.Kill == nil {
+		if connection.Stdin == nil ||
+			connection.Stdout == nil ||
+			connection.Stderr == nil ||
+			connection.Wait == nil ||
+			connection.Kill == nil {
 			incompleteErr := errors.New("external: connector returned an incomplete connection")
 			if connection.Kill != nil {
 				incompleteErr = errors.Join(incompleteErr, connection.Kill())

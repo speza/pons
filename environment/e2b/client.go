@@ -59,14 +59,26 @@ func (c *e2bClient) connectSandbox(ctx context.Context, id string, timeout time.
 	return sandbox, nil
 }
 
-func (c *e2bClient) createSandbox(ctx context.Context, template string, timeout time.Duration, network environment.NetworkPolicy, env map[string]string) (e2bSandbox, error) {
+func (c *e2bClient) createSandbox(
+	ctx context.Context,
+	template string,
+	timeout time.Duration,
+	network environment.NetworkPolicy,
+	env map[string]string,
+) (e2bSandbox, error) {
 	payload := struct {
 		Template string            `json:"templateID"`
 		Timeout  int               `json:"timeout"`
 		Secure   bool              `json:"secure"`
 		Internet bool              `json:"allow_internet_access"`
 		Env      map[string]string `json:"envVars,omitempty"`
-	}{template, max(1, int(timeout.Seconds())), true, network == environment.NetworkEnabled, env}
+	}{
+		Template: template,
+		Timeout:  max(1, int(timeout.Seconds())),
+		Secure:   true,
+		Internet: network == environment.NetworkEnabled,
+		Env:      env,
+	}
 	var sandbox e2bSandbox
 	if err := c.jsonRequest(ctx, http.MethodPost, c.apiURL+"/sandboxes", payload, &sandbox, http.StatusCreated, false, e2bSandbox{}); err != nil {
 		return sandbox, fmt.Errorf("environment: create E2B sandbox: %w", err)
@@ -179,21 +191,8 @@ func (c *e2bClient) run(ctx context.Context, sandbox e2bSandbox, command string,
 		if err != nil {
 			return stdout.Bytes(), stderr.Bytes(), err
 		}
-		if event.Event.Data != nil {
-			if event.Event.Data.Stdout != "" {
-				data, decodeErr := base64.StdEncoding.DecodeString(event.Event.Data.Stdout)
-				if decodeErr != nil {
-					return nil, nil, decodeErr
-				}
-				stdout.Write(data)
-			}
-			if event.Event.Data.Stderr != "" {
-				data, decodeErr := base64.StdEncoding.DecodeString(event.Event.Data.Stderr)
-				if decodeErr != nil {
-					return nil, nil, decodeErr
-				}
-				stderr.Write(data)
-			}
+		if err := writeProcessData(event.Event.Data, &stdout, &stderr); err != nil {
+			return nil, nil, err
 		}
 		if event.Event.End != nil {
 			if err := e2bProcessEndError(event.Event.End, stderr.String()); err != nil {
@@ -233,29 +232,9 @@ func (c *e2bClient) startConnection(ctx context.Context, sandbox e2bSandbox, com
 				done <- nextErr
 				return
 			}
-			if event.Event.Data != nil {
-				if event.Event.Data.Stdout != "" {
-					data, decodeErr := base64.StdEncoding.DecodeString(event.Event.Data.Stdout)
-					if decodeErr != nil {
-						done <- decodeErr
-						return
-					}
-					if _, writeErr := stdoutW.Write(data); writeErr != nil {
-						done <- writeErr
-						return
-					}
-				}
-				if event.Event.Data.Stderr != "" {
-					data, decodeErr := base64.StdEncoding.DecodeString(event.Event.Data.Stderr)
-					if decodeErr != nil {
-						done <- decodeErr
-						return
-					}
-					if _, writeErr := stderrW.Write(data); writeErr != nil {
-						done <- writeErr
-						return
-					}
-				}
+			if err := writeProcessData(event.Event.Data, stdoutW, stderrW); err != nil {
+				done <- err
+				return
 			}
 			if event.Event.End != nil {
 				done <- e2bProcessEndError(event.Event.End, "")
@@ -381,20 +360,53 @@ func e2bProcessEndError(end *e2bProcessEnd, stderr string) error {
 	return nil
 }
 
+type e2bProcessData struct {
+	Stdout string `json:"stdout,omitempty"`
+	Stderr string `json:"stderr,omitempty"`
+}
+
+func writeProcessData(data *e2bProcessData, stdout, stderr io.Writer) error {
+	if data == nil {
+		return nil
+	}
+	if err := writeEncodedProcessData(data.Stdout, stdout); err != nil {
+		return err
+	}
+	return writeEncodedProcessData(data.Stderr, stderr)
+}
+
+func writeEncodedProcessData(encoded string, writer io.Writer) error {
+	if encoded == "" {
+		return nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return err
+	}
+	_, err = writer.Write(decoded)
+	return err
+}
+
 type e2bProcessResponse struct {
 	Event struct {
 		Start *struct {
 			PID int `json:"pid"`
 		} `json:"start,omitempty"`
-		Data *struct {
-			Stdout string `json:"stdout,omitempty"`
-			Stderr string `json:"stderr,omitempty"`
-		} `json:"data,omitempty"`
-		End *e2bProcessEnd `json:"end,omitempty"`
+		Data *e2bProcessData `json:"data,omitempty"`
+		End  *e2bProcessEnd  `json:"end,omitempty"`
 	} `json:"event"`
 }
 
-func (c *e2bClient) startProcess(ctx context.Context, sandbox e2bSandbox, command string, args []string, cwd string, env map[string]string, stdin bool, tag string) (*e2bProcessStream, error) {
+func (c *e2bClient) startProcess(
+	ctx context.Context,
+	sandbox e2bSandbox,
+	command string,
+	args []string,
+	cwd string,
+	env map[string]string,
+	stdin bool,
+	tag string,
+) (*e2bProcessStream, error) {
 	payload := map[string]any{
 		"process": map[string]any{
 			"cmd":  command,

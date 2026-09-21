@@ -74,10 +74,10 @@ CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   inbound_message_id TEXT NOT NULL DEFAULT '',
-	  run_id TEXT NOT NULL DEFAULT '',
-	  role TEXT NOT NULL,
-	  complete BOOLEAN NOT NULL DEFAULT TRUE,
-	  final BOOLEAN NOT NULL DEFAULT FALSE,
+  run_id TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL,
+  complete BOOLEAN NOT NULL DEFAULT TRUE,
+  final BOOLEAN NOT NULL DEFAULT FALSE,
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_conversation_order
@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS message_parts (
   tool_kind TEXT NOT NULL DEFAULT '',
   arguments BLOB,
   result BLOB,
-	metadata BLOB,
+  metadata BLOB,
   PRIMARY KEY(message_id, position)
 );
 CREATE TABLE IF NOT EXISTS submissions (
@@ -242,16 +242,15 @@ func (s *Store) ensureColumn(ctx context.Context, table, column, definition stri
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) EnvironmentState(ctx context.Context, key string) (environment.State, error) {
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func scanEnvironmentState(row rowScanner) (environment.State, error) {
 	var state environment.State
 	var idleUntil sql.NullInt64
 	var expiresAt, updatedAt int64
-	err := s.db.QueryRowContext(ctx, `
-SELECT environment_key, provider, environment_id, template, network_policy,
-       workspace_strategy, workspace_source_ref, workspace_revision,
-       checkpoint_revision, setup_generation, status, lease_id,
-       idle_until, expires_at, updated_at
-FROM execution_environments WHERE environment_key = ?`, key).Scan(
+	if err := row.Scan(
 		&state.Key,
 		&state.Provider,
 		&state.EnvironmentID,
@@ -267,18 +266,30 @@ FROM execution_environments WHERE environment_key = ?`, key).Scan(
 		&idleUntil,
 		&expiresAt,
 		&updatedAt,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return environment.State{}, environment.ErrStateNotFound
-	}
-	if err != nil {
-		return environment.State{}, fmt.Errorf("runtime: read environment state: %w", err)
+	); err != nil {
+		return environment.State{}, err
 	}
 	if idleUntil.Valid {
 		state.IdleUntil = decodeTime(idleUntil.Int64)
 	}
 	state.ExpiresAt = decodeTime(expiresAt)
 	state.UpdatedAt = decodeTime(updatedAt)
+	return state, nil
+}
+
+func (s *Store) EnvironmentState(ctx context.Context, key string) (environment.State, error) {
+	state, err := scanEnvironmentState(s.db.QueryRowContext(ctx, `
+SELECT environment_key, provider, environment_id, template, network_policy,
+       workspace_strategy, workspace_source_ref, workspace_revision,
+       checkpoint_revision, setup_generation, status, lease_id,
+       idle_until, expires_at, updated_at
+FROM execution_environments WHERE environment_key = ?`, key))
+	if errors.Is(err, sql.ErrNoRows) {
+		return environment.State{}, environment.ErrStateNotFound
+	}
+	if err != nil {
+		return environment.State{}, fmt.Errorf("runtime: read environment state: %w", err)
+	}
 	return state, nil
 }
 
@@ -366,33 +377,10 @@ LIMIT ?`, provider, environment.StateIdle, encodeTime(now), encodeTime(now), lim
 	defer rows.Close()
 	var states []environment.State
 	for rows.Next() {
-		var state environment.State
-		var idleUntil sql.NullInt64
-		var expiresAt, updatedAt int64
-		if err := rows.Scan(
-			&state.Key,
-			&state.Provider,
-			&state.EnvironmentID,
-			&state.Template,
-			&state.Network,
-			&state.WorkspaceStrategy,
-			&state.WorkspaceSourceRef,
-			&state.WorkspaceRevision,
-			&state.CheckpointRevision,
-			&state.SetupGeneration,
-			&state.Status,
-			&state.LeaseID,
-			&idleUntil,
-			&expiresAt,
-			&updatedAt,
-		); err != nil {
+		state, err := scanEnvironmentState(rows)
+		if err != nil {
 			return nil, err
 		}
-		if idleUntil.Valid {
-			state.IdleUntil = decodeTime(idleUntil.Int64)
-		}
-		state.ExpiresAt = decodeTime(expiresAt)
-		state.UpdatedAt = decodeTime(updatedAt)
 		states = append(states, state)
 	}
 	return states, rows.Err()
