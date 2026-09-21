@@ -153,7 +153,7 @@ CREATE TABLE IF NOT EXISTS execution_environments (
   template TEXT NOT NULL,
   network_policy TEXT NOT NULL DEFAULT 'disabled'
     CHECK (network_policy IN ('disabled', 'enabled')),
-  workspace_strategy TEXT NOT NULL DEFAULT 'local_archive',
+  workspace_strategy TEXT NOT NULL DEFAULT 'archive/v1',
   workspace_source_ref TEXT NOT NULL DEFAULT '',
   workspace_revision TEXT NOT NULL DEFAULT '',
   checkpoint_revision TEXT NOT NULL DEFAULT '',
@@ -185,7 +185,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS execution_environments_provider_id
 		definition string
 	}{
 		{"network_policy", "TEXT NOT NULL DEFAULT 'disabled'"},
-		{"workspace_strategy", "TEXT NOT NULL DEFAULT 'local_archive'"},
+		{"workspace_strategy", "TEXT NOT NULL DEFAULT 'archive/v1'"},
 		{"workspace_source_ref", "TEXT NOT NULL DEFAULT ''"},
 		{"workspace_revision", "TEXT NOT NULL DEFAULT ''"},
 		{"checkpoint_revision", "TEXT NOT NULL DEFAULT ''"},

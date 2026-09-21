@@ -116,7 +116,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 				EnvironmentID:     sandbox.ID,
 				Template:          cfg.template,
 				Network:           network,
-				WorkspaceStrategy: environment.WorkspaceStrategyLocalArchive,
+				WorkspaceStrategy: environment.WorkspaceStrategyArchive,
 				SetupGeneration:   e2bSetupGeneration,
 				Status:            environment.StateActive,
 				LeaseID:           leaseID,
@@ -350,7 +350,7 @@ func reusableState(state environment.State, cfg e2bConfig, network environment.N
 	return state.Provider == "e2b" &&
 		state.Template == cfg.template &&
 		state.Network == network &&
-		state.WorkspaceStrategy == environment.WorkspaceStrategyLocalArchive &&
+		state.WorkspaceStrategy == environment.WorkspaceStrategyArchive &&
 		state.SetupGeneration == e2bSetupGeneration
 }
 
@@ -491,7 +491,7 @@ func (s *e2bSession) Close() error {
 					EnvironmentID:     s.sandbox.ID,
 					Template:          s.template,
 					Network:           s.metadata.Network,
-					WorkspaceStrategy: environment.WorkspaceStrategyLocalArchive,
+					WorkspaceStrategy: environment.WorkspaceStrategyArchive,
 					SetupGeneration:   e2bSetupGeneration,
 					Status:            environment.StateIdle,
 					IdleUntil:         idleUntil,

@@ -78,7 +78,7 @@ func TestEnvironmentStateRoundTripAndExpiry(t *testing.T) {
 	state := environment.State{
 		Key: "/workspace", Provider: "e2b", EnvironmentID: "sandbox", Template: "pons-hands",
 		Network:            environment.NetworkDisabled,
-		WorkspaceStrategy:  environment.WorkspaceStrategyLocalArchive,
+		WorkspaceStrategy:  environment.WorkspaceStrategyArchive,
 		WorkspaceSourceRef: "source", WorkspaceRevision: "base", CheckpointRevision: "checkpoint",
 		SetupGeneration: 2, Status: environment.StateIdle, IdleUntil: now.Add(time.Minute),
 		ExpiresAt: now.Add(2 * time.Minute), UpdatedAt: now,
@@ -142,7 +142,7 @@ func TestExpiredActiveEnvironmentHasNoIdleDeadline(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	state := environment.State{
 		Key: "/workspace", Provider: "e2b", EnvironmentID: "sandbox", Template: "pons-hands",
-		Network: environment.NetworkDisabled, WorkspaceStrategy: environment.WorkspaceStrategyLocalArchive,
+		Network: environment.NetworkDisabled, WorkspaceStrategy: environment.WorkspaceStrategyArchive,
 		SetupGeneration: 1, Status: environment.StateActive, LeaseID: "run",
 		ExpiresAt: now.Add(-time.Second), UpdatedAt: now.Add(-time.Minute),
 	}

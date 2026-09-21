@@ -13,7 +13,7 @@ const (
 	StateActive = "active"
 	StateIdle   = "idle"
 
-	WorkspaceStrategyLocalArchive = "local_archive"
+	WorkspaceStrategyArchive = "archive/v1"
 )
 
 // State is non-secret durable placement metadata. Provider access tokens and
