@@ -922,7 +922,7 @@ func (h *Host) Close() error {
 		select {
 		case <-processDone:
 		case <-time.After(wait):
-			_ = h.terminate()
+			h.closeErr = errors.Join(h.closeErr, h.terminate())
 			<-processDone
 		}
 		// cmd.Wait closes the child pipes. Drain both readers before exposing

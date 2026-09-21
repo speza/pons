@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"io"
@@ -14,9 +15,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/samperrin/pons/environment"
-	"time"
 )
 
 func TestE2BConfigUsesRestrictiveDefaults(t *testing.T) {
@@ -146,6 +147,92 @@ func TestProcessStreamDecodesConnectFrames(t *testing.T) {
 	if response.Event.Start == nil || response.Event.Start.PID != 42 {
 		t.Fatalf("response = %+v", response)
 	}
+}
+
+func TestE2BConnectionKillUnblocksWait(t *testing.T) {
+	release := make(chan struct{})
+	var signals atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/process.Process/Start":
+			w.Header().Set("Content-Type", "application/connect+json")
+			if err := writeConnectFrame(w, map[string]any{
+				"event": map[string]any{"start": map[string]int{"pid": 42}},
+			}); err != nil {
+				t.Error(err)
+				return
+			}
+			w.(http.Flusher).Flush()
+			if err := writeConnectFrame(w, map[string]any{
+				"event": map[string]any{"data": map[string]string{
+					"stdout": base64.StdEncoding.EncodeToString([]byte("blocked output")),
+				}},
+			}); err != nil {
+				t.Error(err)
+				return
+			}
+			w.(http.Flusher).Flush()
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		case "/process.Process/SendSignal":
+			signals.Add(1)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		server.Close()
+	})
+
+	client := &e2bClient{envdURL: server.URL, http: server.Client()}
+	connection, err := client.startConnection(
+		context.Background(),
+		e2bSandbox{ID: "sandbox", AccessToken: "access"},
+		"/usr/local/bin/pons-hands",
+		nil,
+		"/workspace",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := connection.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	waited := make(chan struct{})
+	go func() {
+		_ = connection.Wait()
+		close(waited)
+	}()
+	select {
+	case <-waited:
+	case <-time.After(time.Second):
+		t.Fatal("connection Wait did not unblock after Kill")
+	}
+	if err := connection.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if got := signals.Load(); got != 1 {
+		t.Fatalf("signals = %d, want 1", got)
+	}
+}
+
+func writeConnectFrame(w io.Writer, value any) error {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	var header [5]byte
+	binary.BigEndian.PutUint32(header[1:], uint32(len(body)))
+	if _, err := w.Write(header[:]); err != nil {
+		return err
+	}
+	_, err = w.Write(body)
+	return err
 }
 
 func TestWorkspaceArchiveRestoreReconcilesDeletions(t *testing.T) {

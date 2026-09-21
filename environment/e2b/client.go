@@ -221,9 +221,13 @@ func (c *e2bClient) startConnection(ctx context.Context, sandbox e2bSandbox, com
 	}
 	stdoutR, stdoutW := io.Pipe()
 	stderrR, stderrW := io.Pipe()
+	var streamCloseOnce sync.Once
+	closeStream := func() {
+		streamCloseOnce.Do(func() { _ = stream.body.Close() })
+	}
 	done := make(chan error, 1)
 	go func() {
-		defer stream.body.Close()
+		defer closeStream()
 		defer stdoutW.Close()
 		defer stderrW.Close()
 		for {
@@ -243,13 +247,23 @@ func (c *e2bClient) startConnection(ctx context.Context, sandbox e2bSandbox, com
 		}
 	}()
 	stdin := &e2bProcessWriter{client: c, sandbox: sandbox, pid: pid}
+	var killOnce sync.Once
+	var killErr error
 	return external.Connection{
 		Stdin: stdin, Stdout: stdoutR, Stderr: stderrR,
 		Wait: func() error { return <-done },
 		Kill: func() error {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			return c.signal(ctx, sandbox, pid, "SIGNAL_SIGKILL")
+			killOnce.Do(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				killErr = c.signal(ctx, sandbox, pid, "SIGNAL_SIGKILL")
+				cancel()
+				// Unblock the local stream pump even if envd never reports the
+				// process end after accepting the signal.
+				_ = stdoutR.Close()
+				_ = stderrR.Close()
+				closeStream()
+			})
+			return killErr
 		},
 	}, nil
 }

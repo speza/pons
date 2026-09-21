@@ -52,7 +52,7 @@ sandbox is discarded rather than reused.
 
 Sandbox affinity is durable operational state. SQLite stores the workspace
 key, provider, sandbox ID, template, workspace strategy/source/revisions/setup
-generation, status, run lease, idle deadline, and provider expiry. It never
+generation, status, active run ID, idle deadline, and provider expiry. It never
 stores the E2B API key or temporary envd access token. Reconnection obtains a
 fresh token from E2B using the host-side secret. The strategy-neutral workspace
 fields support the future control-plane provisioning contract described in
