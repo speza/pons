@@ -36,8 +36,8 @@ func TestE2BConfigUsesRestrictiveDefaults(t *testing.T) {
 func TestValidateE2BSpecDoesNotRequireLocalRemoteCommand(t *testing.T) {
 	workspace := t.TempDir()
 	gotWorkspace, args, network, env, err := validateE2BSpec(environment.Spec{
-		Workspace: workspace,
-		Command:   []string{"/usr/local/bin/pons-hands", "--bash-timeout", "7"},
+		WorkspacePath: workspace,
+		Command:       []string{"/usr/local/bin/pons-hands", "--bash-timeout", "7"},
 		Environment: []string{
 			"EXPLICIT=value",
 		},
@@ -82,7 +82,7 @@ func TestE2BDoesNotPersistSandboxBeforeWorkspaceSetup(t *testing.T) {
 	}
 	defer provider.Close()
 	_, err := provider.Start(context.Background(), environment.Spec{
-		Workspace: t.TempDir(), LeaseID: "run", Command: []string{"/usr/local/bin/pons-hands"},
+		WorkspacePath: t.TempDir(), RunID: "run", Command: []string{"/usr/local/bin/pons-hands"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "upload failed") {
 		t.Fatalf("error = %v", err)

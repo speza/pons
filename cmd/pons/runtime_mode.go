@@ -373,8 +373,8 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	effectiveSandbox, effectiveNetwork, effectiveEnvironmentID := "none", "host", ""
 	if r.opts.Environment != nil {
 		spec := r.opts.EnvironmentSpec
-		spec.Workspace = request.Workspace
-		spec.LeaseID = request.RunID
+		spec.WorkspacePath = request.Workspace
+		spec.RunID = request.RunID
 		session, startErr := r.opts.Environment.Start(ctx, spec)
 		if startErr != nil {
 			return result, fmt.Errorf("start execution environment: %w", startErr)

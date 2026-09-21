@@ -71,9 +71,9 @@ func TestSeatbeltIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	session, err := (Provider{}).Start(context.Background(), environment.Spec{
-		Workspace:   workspace,
-		Command:     []string{helper},
-		Environment: []string{"PONS_HANDS_TEST_HELPER=1"},
+		WorkspacePath: workspace,
+		Command:       []string{helper},
+		Environment:   []string{"PONS_HANDS_TEST_HELPER=1"},
 	})
 	if err != nil {
 		t.Fatal(err)

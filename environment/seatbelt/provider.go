@@ -109,7 +109,7 @@ func (p Provider) Start(ctx context.Context, spec environment.Spec) (environment
 	return &seatbeltSession{
 		host:     host,
 		scratch:  scratch,
-		metadata: environment.Metadata{Provider: "seatbelt", Workspace: workspace, Network: network},
+		metadata: environment.Metadata{Provider: "seatbelt", WorkspacePath: workspace, Network: network},
 	}, nil
 }
 
@@ -137,10 +137,10 @@ func (s *seatbeltSession) Close() error {
 }
 
 func validateSpec(spec environment.Spec) (string, []string, []string, environment.NetworkPolicy, error) {
-	if spec.Workspace == "" {
+	if spec.WorkspacePath == "" {
 		return "", nil, nil, "", errors.New("environment: workspace is required")
 	}
-	workspace, err := filepath.Abs(spec.Workspace)
+	workspace, err := filepath.Abs(spec.WorkspacePath)
 	if err != nil {
 		return "", nil, nil, "", fmt.Errorf("environment: workspace: %w", err)
 	}

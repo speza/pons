@@ -72,17 +72,17 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 	p.lifecycleMu.Lock()
 	defer p.lifecycleMu.Unlock()
 	store := p.stateStore
-	leaseID := spec.LeaseID
+	runID := spec.RunID
 	if p.active == nil {
 		p.active = make(map[string]string)
 	}
-	if activeLease := p.active[workspace]; activeLease != "" {
-		return nil, fmt.Errorf("environment: workspace %q already has active E2B lease %q", workspace, activeLease)
+	if activeRun := p.active[workspace]; activeRun != "" {
+		return nil, fmt.Errorf("environment: workspace %q already has active E2B run %q", workspace, activeRun)
 	}
-	if store != nil && leaseID == "" {
-		return nil, errors.New("environment: durable E2B session requires a lease ID")
+	if store != nil && runID == "" {
+		return nil, errors.New("environment: durable E2B session requires a run ID")
 	}
-	sandbox, resumed, err := p.acquireSandbox(ctx, client, cfg, workspace, leaseID, network)
+	sandbox, resumed, err := p.acquireSandbox(ctx, client, cfg, workspace, runID, network)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +119,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 				WorkspaceStrategy: environment.WorkspaceStrategyArchive,
 				SetupGeneration:   e2bSetupGeneration,
 				Status:            environment.StateActive,
-				LeaseID:           leaseID,
+				RunID:             runID,
 				ExpiresAt:         now.Add(cfg.timeout),
 				UpdatedAt:         now,
 			}); err != nil {
@@ -163,10 +163,10 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 	if err := host.Start(ctx); err != nil {
 		return nil, errors.Join(err, host.Close(), cleanup())
 	}
-	if leaseID == "" {
-		leaseID = sandbox.ID
+	if runID == "" {
+		runID = sandbox.ID
 	}
-	p.active[workspace] = leaseID
+	p.active[workspace] = runID
 	return &e2bSession{
 		host:              host,
 		client:            client,
@@ -174,14 +174,14 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 		workspace:         workspace,
 		owner:             p,
 		store:             store,
-		leaseID:           leaseID,
+		runID:             runID,
 		template:          cfg.template,
 		idleTimeout:       cfg.idleTimeout,
 		maxWorkspaceBytes: cfg.maxWorkspaceBytes,
 		metadata: environment.Metadata{
 			Provider:      "e2b",
 			EnvironmentID: sandbox.ID,
-			Workspace:     workspace,
+			WorkspacePath: workspace,
 			Network:       network,
 		},
 	}, nil
@@ -296,7 +296,7 @@ func (p *Provider) acquireSandbox(
 	ctx context.Context,
 	client *e2bClient,
 	cfg e2bConfig,
-	key, leaseID string,
+	key, runID string,
 	network environment.NetworkPolicy,
 ) (e2bSandbox, bool, error) {
 	store := p.stateStore
@@ -307,7 +307,7 @@ func (p *Provider) acquireSandbox(
 			sandbox, connectErr := client.connectSandbox(ctx, state.EnvironmentID, cfg.timeout)
 			if connectErr == nil {
 				state.Status = environment.StateActive
-				state.LeaseID = leaseID
+				state.RunID = runID
 				state.IdleUntil = time.Time{}
 				state.ExpiresAt = time.Now().UTC().Add(cfg.timeout)
 				state.UpdatedAt = time.Now().UTC()
@@ -402,10 +402,10 @@ func (p *Provider) report(cfg e2bConfig, err error) {
 }
 
 func validateE2BSpec(spec environment.Spec) (string, []string, environment.NetworkPolicy, map[string]string, error) {
-	if spec.Workspace == "" {
+	if spec.WorkspacePath == "" {
 		return "", nil, "", nil, errors.New("environment: workspace is required")
 	}
-	workspace, err := filepath.Abs(spec.Workspace)
+	workspace, err := filepath.Abs(spec.WorkspacePath)
 	if err != nil {
 		return "", nil, "", nil, fmt.Errorf("environment: workspace: %w", err)
 	}
@@ -451,7 +451,7 @@ type e2bSession struct {
 	workspace         string
 	owner             *Provider
 	store             environment.StateStore
-	leaseID           string
+	runID             string
 	template          string
 	idleTimeout       time.Duration
 	maxWorkspaceBytes int64
@@ -510,7 +510,7 @@ func (s *e2bSession) Close() error {
 		}
 		if s.owner != nil {
 			s.owner.lifecycleMu.Lock()
-			if s.owner.active[s.workspace] == s.leaseID {
+			if s.owner.active[s.workspace] == s.runID {
 				delete(s.owner.active, s.workspace)
 			}
 			s.owner.lifecycleMu.Unlock()

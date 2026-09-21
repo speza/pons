@@ -43,10 +43,10 @@ func TestE2BHandsRoundTrip(t *testing.T) {
 	}
 	defer provider.Close()
 	spec := environment.Spec{
-		Workspace: workspace,
-		LeaseID:   "first-run",
-		Command:   []string{"/usr/local/bin/pons-hands", "--bash-timeout", "30"},
-		Network:   environment.NetworkDisabled,
+		WorkspacePath: workspace,
+		RunID:         "first-run",
+		Command:       []string{"/usr/local/bin/pons-hands", "--bash-timeout", "30"},
+		Network:       environment.NetworkDisabled,
 		Limits: environment.ResourceLimits{
 			CallTimeout: 45 * time.Second,
 		},
@@ -71,7 +71,7 @@ func TestE2BHandsRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	firstID := session.Metadata().EnvironmentID
-	stateKey := session.Metadata().Workspace
+	stateKey := session.Metadata().WorkspacePath
 	if err := provider.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestE2BHandsRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer provider.Close()
-	spec.LeaseID = "second-run"
+	spec.RunID = "second-run"
 	second, err := provider.Start(ctx, spec)
 	if err != nil {
 		t.Fatal(err)

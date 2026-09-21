@@ -143,7 +143,7 @@ func TestExpiredActiveEnvironmentHasNoIdleDeadline(t *testing.T) {
 	state := environment.State{
 		Key: "/workspace", Provider: "e2b", EnvironmentID: "sandbox", Template: "pons-hands",
 		Network: environment.NetworkDisabled, WorkspaceStrategy: environment.WorkspaceStrategyArchive,
-		SetupGeneration: 1, Status: environment.StateActive, LeaseID: "run",
+		SetupGeneration: 1, Status: environment.StateActive, RunID: "run",
 		ExpiresAt: now.Add(-time.Second), UpdatedAt: now.Add(-time.Minute),
 	}
 	if err := store.SaveEnvironmentState(context.Background(), state); err != nil {
@@ -153,7 +153,7 @@ func TestExpiredActiveEnvironmentHasNoIdleDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(expired) != 1 || !expired[0].IdleUntil.IsZero() {
+	if len(expired) != 1 || expired[0].RunID != state.RunID || !expired[0].IdleUntil.IsZero() {
 		t.Fatalf("expired states = %+v", expired)
 	}
 }

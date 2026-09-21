@@ -38,24 +38,25 @@ type ResourceLimits struct {
 }
 
 // Spec is the explicit policy and launch input for one hands environment.
-// Command[0] must be an absolute pons-hands executable path. Environment is a
-// clean, explicit list of KEY=VALUE entries; the parent environment is never
-// inherited.
+// WorkspacePath is the host-local path used by local and archive-backed
+// providers. Command[0] must be an absolute pons-hands executable path.
+// Environment is a clean, explicit list of KEY=VALUE entries; the parent
+// environment is never inherited.
 type Spec struct {
-	Workspace   string
-	LeaseID     string
-	Command     []string
-	ReadOnly    []string
-	Network     NetworkPolicy
-	Environment []string
-	Limits      ResourceLimits
+	WorkspacePath string
+	RunID         string
+	Command       []string
+	ReadOnly      []string
+	Network       NetworkPolicy
+	Environment   []string
+	Limits        ResourceLimits
 }
 
 // Metadata identifies the effective backend and policy for audit and UI use.
 type Metadata struct {
 	Provider      string
 	EnvironmentID string
-	Workspace     string
+	WorkspacePath string
 	Network       NetworkPolicy
 }
 

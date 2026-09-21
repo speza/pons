@@ -230,6 +230,13 @@ A provider must discard or re-provision an idle environment when its strategy,
 source, requested revision, network policy, template, or setup generation is
 incompatible. It must not silently merge independent workspace histories.
 
+The single table remains appropriate for `archive/v1`, where workspace affinity
+and retained placement have the same lifetime. When `git/v1` introduces a
+logical workspace that can survive without a VM, promote its source and
+checkpoint fields into a `workspaces` table and have
+`execution_environments.workspace_id` reference it. Defer that split until the
+workspace lifecycle exists rather than inventing retention semantics now.
+
 ## Network policy
 
 Archive hands retain the existing default-deny network policy. A Git-capable
@@ -258,7 +265,7 @@ No new public Go interface is required for `git/v1` in the current PR:
   execution;
 - `StateStore` already persists strategy-neutral workspace metadata;
 - `environment.State.Key` can become the remote workspace ID; and
-- the current `Spec.Workspace` remains the local path required by
+- `Spec.WorkspacePath` is explicitly the host-local path required by
   `archive/v1` and Seatbelt.
 
 When Git support is implemented, add an explicit workspace plan or source

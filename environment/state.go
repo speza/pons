@@ -9,12 +9,18 @@ import (
 // ErrStateNotFound reports that no durable environment exists for a key.
 var ErrStateNotFound = errors.New("environment: state not found")
 
-const (
-	StateActive = "active"
-	StateIdle   = "idle"
+// LifecycleStatus is the persisted lifecycle of a retained environment.
+type LifecycleStatus string
 
-	WorkspaceStrategyArchive = "archive/v1"
+const (
+	StateActive LifecycleStatus = "active"
+	StateIdle   LifecycleStatus = "idle"
 )
+
+// WorkspaceStrategy identifies versioned workspace provisioning behavior.
+type WorkspaceStrategy string
+
+const WorkspaceStrategyArchive WorkspaceStrategy = "archive/v1"
 
 // State is non-secret durable placement metadata. Provider access tokens and
 // API keys must never be stored here.
@@ -24,13 +30,13 @@ type State struct {
 	EnvironmentID      string
 	Template           string
 	Network            NetworkPolicy
-	WorkspaceStrategy  string
+	WorkspaceStrategy  WorkspaceStrategy
 	WorkspaceSourceRef string
 	WorkspaceRevision  string
 	CheckpointRevision string
 	SetupGeneration    int
-	Status             string
-	LeaseID            string
+	Status             LifecycleStatus
+	RunID              string
 	IdleUntil          time.Time
 	ExpiresAt          time.Time
 	UpdatedAt          time.Time

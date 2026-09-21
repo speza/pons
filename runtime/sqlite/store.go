@@ -159,7 +159,7 @@ CREATE TABLE IF NOT EXISTS execution_environments (
   checkpoint_revision TEXT NOT NULL DEFAULT '',
   setup_generation INTEGER NOT NULL DEFAULT 1,
   status TEXT NOT NULL CHECK (status IN ('active', 'idle')),
-  lease_id TEXT NOT NULL DEFAULT '',
+  run_id TEXT NOT NULL DEFAULT '',
   idle_until INTEGER,
   expires_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -262,7 +262,7 @@ func scanEnvironmentState(row rowScanner) (environment.State, error) {
 		&state.CheckpointRevision,
 		&state.SetupGeneration,
 		&state.Status,
-		&state.LeaseID,
+		&state.RunID,
 		&idleUntil,
 		&expiresAt,
 		&updatedAt,
@@ -281,7 +281,7 @@ func (s *Store) EnvironmentState(ctx context.Context, key string) (environment.S
 	state, err := scanEnvironmentState(s.db.QueryRowContext(ctx, `
 SELECT environment_key, provider, environment_id, template, network_policy,
        workspace_strategy, workspace_source_ref, workspace_revision,
-       checkpoint_revision, setup_generation, status, lease_id,
+       checkpoint_revision, setup_generation, status, run_id,
        idle_until, expires_at, updated_at
 FROM execution_environments WHERE environment_key = ?`, key))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -302,7 +302,7 @@ func (s *Store) SaveEnvironmentState(ctx context.Context, state environment.Stat
 INSERT INTO execution_environments (
   environment_key, provider, environment_id, template, network_policy,
   workspace_strategy, workspace_source_ref, workspace_revision,
-  checkpoint_revision, setup_generation, status, lease_id,
+  checkpoint_revision, setup_generation, status, run_id,
   idle_until, expires_at, updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(environment_key) DO UPDATE SET
@@ -316,7 +316,7 @@ ON CONFLICT(environment_key) DO UPDATE SET
   checkpoint_revision = excluded.checkpoint_revision,
   setup_generation = excluded.setup_generation,
   status = excluded.status,
-  lease_id = excluded.lease_id,
+  run_id = excluded.run_id,
   idle_until = excluded.idle_until,
   expires_at = excluded.expires_at,
   updated_at = excluded.updated_at`,
@@ -331,7 +331,7 @@ ON CONFLICT(environment_key) DO UPDATE SET
 		state.CheckpointRevision,
 		state.SetupGeneration,
 		state.Status,
-		state.LeaseID,
+		state.RunID,
 		idleUntil,
 		encodeTime(state.ExpiresAt),
 		encodeTime(state.UpdatedAt),
@@ -364,7 +364,7 @@ func (s *Store) ExpiredEnvironmentStates(
 	rows, err := s.db.QueryContext(ctx, `
 SELECT environment_key, provider, environment_id, template, network_policy,
        workspace_strategy, workspace_source_ref, workspace_revision,
-       checkpoint_revision, setup_generation, status, lease_id,
+       checkpoint_revision, setup_generation, status, run_id,
        idle_until, expires_at, updated_at
 FROM execution_environments
 WHERE provider = ?

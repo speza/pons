@@ -114,8 +114,8 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 		t.Fatalf("debug log omits effective environment: %s", got)
 	}
 	for range 2 {
-		if spec := <-execution.specs; spec.Workspace != workspace {
-			t.Fatalf("environment workspace = %q, want %q", spec.Workspace, workspace)
+		if spec := <-execution.specs; spec.WorkspacePath != workspace {
+			t.Fatalf("environment workspace = %q, want %q", spec.WorkspacePath, workspace)
 		}
 	}
 }
