@@ -51,6 +51,7 @@ func TestTimestampColumnsUseIntegerStorage(t *testing.T) {
 		"runs":                   {"started_at", "completed_at"},
 		"tool_calls":             {"updated_at"},
 		"events":                 {"created_at"},
+		"workspaces":             {"created_at", "updated_at"},
 		"execution_environments": {"idle_until", "expires_at", "updated_at"},
 	} {
 		for _, column := range columns {
@@ -75,25 +76,45 @@ func TestEnvironmentStateRoundTripAndExpiry(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Microsecond)
+	checkpointRef, err := store.PutWorkspaceCheckpoint(ctx, "workspace", []byte("checkpoint"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := environment.WorkspaceState{
+		ID: "workspace", Strategy: environment.WorkspaceStrategyArchive, SourceRef: "/source",
+		BaseRevision: checkpointRef, CheckpointRef: checkpointRef, SetupGeneration: 2,
+		CreatedAt: now.Add(-time.Minute), UpdatedAt: now,
+	}
+	if err := store.SaveWorkspaceState(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	gotWorkspace, err := store.WorkspaceState(ctx, workspace.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotWorkspace.Strategy != workspace.Strategy || gotWorkspace.SourceRef != workspace.SourceRef ||
+		gotWorkspace.BaseRevision != workspace.BaseRevision || gotWorkspace.CheckpointRef != workspace.CheckpointRef ||
+		gotWorkspace.SetupGeneration != workspace.SetupGeneration || !gotWorkspace.CreatedAt.Equal(workspace.CreatedAt) {
+		t.Fatalf("workspace = %+v", gotWorkspace)
+	}
+	checkpoint, err := store.WorkspaceCheckpoint(ctx, workspace.ID, checkpointRef, 1<<20)
+	if err != nil || string(checkpoint) != "checkpoint" {
+		t.Fatalf("checkpoint = %q, %v", checkpoint, err)
+	}
 	state := environment.State{
-		Key: "/workspace", Provider: "e2b", EnvironmentID: "sandbox", Template: "pons-hands",
-		Network:            environment.NetworkDisabled,
-		WorkspaceStrategy:  environment.WorkspaceStrategyArchive,
-		WorkspaceSourceRef: "source", WorkspaceRevision: "base", CheckpointRevision: "checkpoint",
-		SetupGeneration: 2, Status: environment.StateIdle, IdleUntil: now.Add(time.Minute),
+		WorkspaceID: "workspace", Provider: "e2b", EnvironmentID: "sandbox", Template: "pons-hands",
+		Network: environment.NetworkDisabled, Status: environment.StateIdle, IdleUntil: now.Add(time.Minute),
 		ExpiresAt: now.Add(2 * time.Minute), UpdatedAt: now,
 	}
 	if err := store.SaveEnvironmentState(ctx, state); err != nil {
 		t.Fatal(err)
 	}
-	got, err := store.EnvironmentState(ctx, state.Key)
+	got, err := store.EnvironmentState(ctx, state.WorkspaceID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.EnvironmentID != state.EnvironmentID || got.Network != state.Network ||
-		got.WorkspaceStrategy != state.WorkspaceStrategy || got.WorkspaceSourceRef != state.WorkspaceSourceRef ||
-		got.WorkspaceRevision != state.WorkspaceRevision || got.CheckpointRevision != state.CheckpointRevision ||
-		got.SetupGeneration != state.SetupGeneration || !got.IdleUntil.Equal(state.IdleUntil) {
+		got.Status != state.Status || !got.IdleUntil.Equal(state.IdleUntil) {
 		t.Fatalf("state = %+v", got)
 	}
 	before, err := store.ExpiredEnvironmentStates(ctx, "e2b", now, 10)
@@ -104,49 +125,55 @@ func TestEnvironmentStateRoundTripAndExpiry(t *testing.T) {
 	if err != nil || len(after) != 1 {
 		t.Fatalf("after expiry = %+v, %v", after, err)
 	}
-	if err := store.DeleteEnvironmentState(ctx, state.Key, "other"); err != nil {
+	if err := store.DeleteEnvironmentState(ctx, state.WorkspaceID, "other"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.EnvironmentState(ctx, state.Key); err != nil {
+	if _, err := store.EnvironmentState(ctx, state.WorkspaceID); err != nil {
 		t.Fatalf("stale delete removed state: %v", err)
 	}
 	invalidStatus := state
-	invalidStatus.Key, invalidStatus.EnvironmentID, invalidStatus.Status = "/invalid-status", "invalid-status", "unknown"
+	invalidStatus.Status = "unknown"
 	if err := store.SaveEnvironmentState(ctx, invalidStatus); err == nil {
 		t.Fatal("invalid environment status was accepted")
 	}
 	invalidNetwork := state
-	invalidNetwork.Key, invalidNetwork.EnvironmentID, invalidNetwork.Network = "/invalid-network", "invalid-network", "unknown"
+	invalidNetwork.Network = "unknown"
 	if err := store.SaveEnvironmentState(ctx, invalidNetwork); err == nil {
 		t.Fatal("invalid network policy was accepted")
 	}
 	activeWithoutRun := state
-	activeWithoutRun.Key, activeWithoutRun.EnvironmentID = "/active-without-run", "active-without-run"
 	activeWithoutRun.Status, activeWithoutRun.IdleUntil = environment.StateActive, time.Time{}
 	if err := store.SaveEnvironmentState(ctx, activeWithoutRun); err == nil {
 		t.Fatal("active environment without run ID was accepted")
 	}
 	idleWithRun := state
-	idleWithRun.Key, idleWithRun.EnvironmentID, idleWithRun.RunID = "/idle-with-run", "idle-with-run", "run"
+	idleWithRun.RunID = "run"
 	if err := store.SaveEnvironmentState(ctx, idleWithRun); err == nil {
 		t.Fatal("idle environment with run ID was accepted")
 	}
 	idleWithoutDeadline := state
-	idleWithoutDeadline.Key, idleWithoutDeadline.EnvironmentID = "/idle-without-deadline", "idle-without-deadline"
 	idleWithoutDeadline.IdleUntil = time.Time{}
 	if err := store.SaveEnvironmentState(ctx, idleWithoutDeadline); err == nil {
 		t.Fatal("idle environment without deadline was accepted")
 	}
+	otherWorkspace := workspace
+	otherWorkspace.ID = "other-workspace"
+	if err := store.SaveWorkspaceState(ctx, otherWorkspace); err != nil {
+		t.Fatal(err)
+	}
 	duplicate := state
-	duplicate.Key = "/other-workspace"
+	duplicate.WorkspaceID = otherWorkspace.ID
 	if err := store.SaveEnvironmentState(ctx, duplicate); err == nil {
 		t.Fatal("duplicate provider environment id was accepted")
 	}
-	if err := store.DeleteEnvironmentState(ctx, state.Key, state.EnvironmentID); err != nil {
+	if err := store.DeleteEnvironmentState(ctx, state.WorkspaceID, state.EnvironmentID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.EnvironmentState(ctx, state.Key); !errors.Is(err, environment.ErrStateNotFound) {
+	if _, err := store.EnvironmentState(ctx, state.WorkspaceID); !errors.Is(err, environment.ErrStateNotFound) {
 		t.Fatalf("error = %v", err)
+	}
+	if _, err := store.WorkspaceState(ctx, workspace.ID); err != nil {
+		t.Fatalf("environment deletion removed logical workspace: %v", err)
 	}
 }
 
@@ -157,10 +184,16 @@ func TestExpiredActiveEnvironmentHasNoIdleDeadline(t *testing.T) {
 	}
 	defer store.Close()
 	now := time.Now().UTC().Truncate(time.Microsecond)
+	workspace := environment.WorkspaceState{
+		ID: "workspace", Strategy: environment.WorkspaceStrategyArchive,
+		SetupGeneration: 1, CreatedAt: now.Add(-time.Minute), UpdatedAt: now,
+	}
+	if err := store.SaveWorkspaceState(context.Background(), workspace); err != nil {
+		t.Fatal(err)
+	}
 	state := environment.State{
-		Key: "/workspace", Provider: "e2b", EnvironmentID: "sandbox", Template: "pons-hands",
-		Network: environment.NetworkDisabled, WorkspaceStrategy: environment.WorkspaceStrategyArchive,
-		SetupGeneration: 1, Status: environment.StateActive, RunID: "run",
+		WorkspaceID: "workspace", Provider: "e2b", EnvironmentID: "sandbox", Template: "pons-hands",
+		Network: environment.NetworkDisabled, Status: environment.StateActive, RunID: "run",
 		ExpiresAt: now.Add(-time.Second), UpdatedAt: now.Add(-time.Minute),
 	}
 	if err := store.SaveEnvironmentState(context.Background(), state); err != nil {

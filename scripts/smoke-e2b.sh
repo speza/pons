@@ -14,7 +14,7 @@ cd "$repo_root"
 PONS_E2B_TEST=1 go test \
 	-tags integration \
 	-count=1 \
-	-run '^TestE2BHandsRoundTrip$' \
+	-run '^TestE2BWorkspaceCheckpointRecovery$' \
 	-v ./environment/e2b
 
 printf 'E2B smoke test: passed\n'

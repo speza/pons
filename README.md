@@ -134,9 +134,11 @@ scoped to the `pons-hands` template; `make cleanup-e2b-all` explicitly targets
 all running and paused sandboxes visible to the API key.
 
 The E2B API key remains on the host, internet access is disabled unless
-`-sandbox-network` is set, and the bounded workspace copy is checkpointed back
-after every run. Sandbox IDs and lifecycle state are persisted in SQLite, so a
-workspace reuses its sandbox across messages and server restarts. Idle
+`-sandbox-network` is set, and the local workspace is used only to seed a new
+logical workspace. Bounded checkpoints are stored under the runtime state
+directory after every run; the source checkout is never replaced. Workspace
+metadata and sandbox placement are persisted separately in SQLite, so a
+workspace survives sandbox deletion and can be restored in a new VM. Idle
 sandboxes are deleted after `-sandbox-idle-timeout` (10 minutes by default).
 The initial E2B backend does not support external plugin manifests.
 

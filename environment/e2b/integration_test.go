@@ -19,7 +19,7 @@ import (
 	runtimesqlite "github.com/samperrin/pons/runtime/sqlite"
 )
 
-func TestE2BHandsRoundTrip(t *testing.T) {
+func TestE2BWorkspaceCheckpointRecovery(t *testing.T) {
 	if os.Getenv("PONS_E2B_TEST") != "1" {
 		t.Skip("set PONS_E2B_TEST=1 to run the live E2B test")
 	}
@@ -38,11 +38,12 @@ func TestE2BHandsRoundTrip(t *testing.T) {
 	}
 	defer store.Close()
 	provider := &e2b.Provider{IdleTimeout: time.Second, CleanupInterval: 100 * time.Millisecond}
-	if err := provider.SetStateStore(store); err != nil {
+	if err := provider.SetStores(store, store); err != nil {
 		t.Fatal(err)
 	}
 	defer provider.Close()
 	spec := environment.Spec{
+		WorkspaceID:   "live-workspace",
 		WorkspacePath: workspace,
 		RunID:         "first-run",
 		Command:       []string{"/usr/local/bin/pons-hands", "--bash-timeout", "30"},
@@ -71,14 +72,14 @@ func TestE2BHandsRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	firstID := session.Metadata().EnvironmentID
-	stateKey := session.Metadata().WorkspacePath
+	stateKey := session.Metadata().WorkspaceID
 	if err := provider.Close(); err != nil {
 		t.Fatal(err)
 	}
 	// A new provider instance simulates a server restart: only SQLite and the
 	// host-side API key carry over.
 	provider = &e2b.Provider{IdleTimeout: time.Second, CleanupInterval: 100 * time.Millisecond}
-	if err := provider.SetStateStore(store); err != nil {
+	if err := provider.SetStores(store, store); err != nil {
 		t.Fatal(err)
 	}
 	defer provider.Close()
@@ -94,19 +95,53 @@ func TestE2BHandsRoundTrip(t *testing.T) {
 	if err := second.Close(); err != nil {
 		t.Fatal(err)
 	}
-	body, err := os.ReadFile(filepath.Join(workspace, "hello.txt"))
-	if err != nil || string(body) != "Hello from E2B!\n" {
-		t.Fatalf("checkpointed file = %q, %v", body, err)
+	if _, err := os.Stat(filepath.Join(workspace, "hello.txt")); !os.IsNotExist(err) {
+		t.Fatalf("remote result was written back to source workspace: %v", err)
 	}
-	t.Log(strings.TrimSpace(string(body)))
+	waitForEnvironmentDeletion(t, ctx, store, stateKey)
+	workspaceState, err := store.WorkspaceState(ctx, stateKey)
+	if err != nil || workspaceState.CheckpointRef == "" {
+		t.Fatalf("durable workspace = %+v, %v", workspaceState, err)
+	}
+	third, err := provider.Start(ctx, environment.Spec{
+		WorkspaceID:   spec.WorkspaceID,
+		WorkspacePath: spec.WorkspacePath,
+		RunID:         "third-run",
+		Command:       spec.Command,
+		Network:       spec.Network,
+		Limits:        spec.Limits,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Metadata().EnvironmentID == firstID {
+		t.Fatal("deleted sandbox was unexpectedly reused")
+	}
+	args, err = json.Marshal(map[string]string{"command": "cat hello.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err = third.Execute(ctx, protocol.Action{ID: "restored", Kind: bash.KindBash, Args: args})
+	if err != nil || !result.OK || !strings.Contains(result.Output, "Hello from E2B!") {
+		t.Fatalf("restored result = %+v, %v", result, err)
+	}
+	if err := third.Close(); err != nil {
+		t.Fatal(err)
+	}
+	waitForEnvironmentDeletion(t, ctx, store, stateKey)
+	t.Log(strings.TrimSpace(result.Output))
+}
+
+func waitForEnvironmentDeletion(t *testing.T, ctx context.Context, store *runtimesqlite.Store, workspaceID string) {
+	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		_, stateErr := store.EnvironmentState(ctx, stateKey)
-		if errors.Is(stateErr, environment.ErrStateNotFound) {
+		_, err := store.EnvironmentState(ctx, workspaceID)
+		if errors.Is(err, environment.ErrStateNotFound) {
 			return
 		}
-		if stateErr != nil {
-			t.Fatal(stateErr)
+		if err != nil {
+			t.Fatal(err)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

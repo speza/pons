@@ -4,13 +4,17 @@ package sqlite
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ncruces/go-sqlite3/driver"
@@ -24,11 +28,15 @@ const runtimeDBName = "runtime.db"
 // Store is the local, exclusive-manager runtime backend. Its transactions
 // prevent duplicate claims and concurrent conversation/workspace ownership,
 // but they are not renewable leases or a distributed fencing mechanism.
-type Store struct{ db *sql.DB }
+type Store struct {
+	db            *sql.DB
+	checkpointDir string
+}
 
 var (
-	_ ponsruntime.Store      = (*Store)(nil)
-	_ environment.StateStore = (*Store)(nil)
+	_ ponsruntime.Store           = (*Store)(nil)
+	_ environment.StateStore      = (*Store)(nil)
+	_ environment.CheckpointStore = (*Store)(nil)
 )
 
 func newID() string { return ponsruntime.NewID() }
@@ -50,7 +58,7 @@ func Open(stateDir string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(4)
-	store := &Store{db: db}
+	store := &Store{db: db, checkpointDir: filepath.Join(stateDir, "workspaces")}
 	if err := store.initializeSchema(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -146,18 +154,23 @@ CREATE TABLE IF NOT EXISTS events (
   created_at INTEGER NOT NULL,
   PRIMARY KEY(conversation_id, cursor)
 );
+CREATE TABLE IF NOT EXISTS workspaces (
+  id TEXT PRIMARY KEY CHECK (id <> ''),
+  strategy TEXT NOT NULL CHECK (strategy <> ''),
+  source_ref TEXT NOT NULL,
+  base_revision TEXT NOT NULL,
+  checkpoint_ref TEXT NOT NULL,
+  setup_generation INTEGER NOT NULL CHECK (setup_generation > 0),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS execution_environments (
-  environment_key TEXT PRIMARY KEY,
+  workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id),
   provider TEXT NOT NULL,
   environment_id TEXT NOT NULL,
   template TEXT NOT NULL,
   network_policy TEXT NOT NULL DEFAULT 'disabled'
     CHECK (network_policy IN ('disabled', 'enabled')),
-  workspace_strategy TEXT NOT NULL DEFAULT 'archive/v1',
-  workspace_source_ref TEXT NOT NULL DEFAULT '',
-  workspace_revision TEXT NOT NULL DEFAULT '',
-  checkpoint_revision TEXT NOT NULL DEFAULT '',
-  setup_generation INTEGER NOT NULL DEFAULT 1,
   status TEXT NOT NULL CHECK (status IN ('active', 'idle')),
   run_id TEXT NOT NULL DEFAULT '',
   idle_until INTEGER,
@@ -188,21 +201,170 @@ type rowScanner interface {
 	Scan(...any) error
 }
 
+func scanWorkspaceState(row rowScanner) (environment.WorkspaceState, error) {
+	var state environment.WorkspaceState
+	var createdAt, updatedAt int64
+	if err := row.Scan(
+		&state.ID,
+		&state.Strategy,
+		&state.SourceRef,
+		&state.BaseRevision,
+		&state.CheckpointRef,
+		&state.SetupGeneration,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return environment.WorkspaceState{}, err
+	}
+	state.CreatedAt = decodeTime(createdAt)
+	state.UpdatedAt = decodeTime(updatedAt)
+	return state, nil
+}
+
+func (s *Store) WorkspaceState(ctx context.Context, id string) (environment.WorkspaceState, error) {
+	state, err := scanWorkspaceState(s.db.QueryRowContext(ctx, `
+SELECT id, strategy, source_ref, base_revision, checkpoint_ref,
+       setup_generation, created_at, updated_at
+FROM workspaces WHERE id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return environment.WorkspaceState{}, environment.ErrStateNotFound
+	}
+	if err != nil {
+		return environment.WorkspaceState{}, fmt.Errorf("runtime: read workspace state: %w", err)
+	}
+	return state, nil
+}
+
+func (s *Store) SaveWorkspaceState(ctx context.Context, state environment.WorkspaceState) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO workspaces (
+  id, strategy, source_ref, base_revision, checkpoint_ref,
+  setup_generation, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+  strategy = excluded.strategy,
+  source_ref = excluded.source_ref,
+  base_revision = excluded.base_revision,
+  checkpoint_ref = excluded.checkpoint_ref,
+  setup_generation = excluded.setup_generation,
+  updated_at = excluded.updated_at`,
+		state.ID,
+		state.Strategy,
+		state.SourceRef,
+		state.BaseRevision,
+		state.CheckpointRef,
+		state.SetupGeneration,
+		encodeTime(state.CreatedAt),
+		encodeTime(state.UpdatedAt),
+	)
+	if err != nil {
+		return fmt.Errorf("runtime: save workspace state: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) PutWorkspaceCheckpoint(ctx context.Context, workspaceID string, archive []byte) (string, error) {
+	if workspaceID == "" {
+		return "", errors.New("runtime: workspace ID is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(archive)
+	ref := "sha256:" + hex.EncodeToString(digest[:])
+	dir := s.workspaceCheckpointDir(workspaceID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("runtime: create workspace checkpoint directory: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", fmt.Errorf("runtime: secure workspace checkpoint directory: %w", err)
+	}
+	path := filepath.Join(dir, strings.TrimPrefix(ref, "sha256:")+".tar")
+	if _, err := os.Stat(path); err == nil {
+		return ref, nil
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("runtime: inspect workspace checkpoint: %w", err)
+	}
+	file, err := os.CreateTemp(dir, ".checkpoint-*")
+	if err != nil {
+		return "", fmt.Errorf("runtime: create workspace checkpoint: %w", err)
+	}
+	temporary := file.Name()
+	defer os.Remove(temporary)
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return "", fmt.Errorf("runtime: secure workspace checkpoint: %w", err)
+	}
+	_, writeErr := file.Write(archive)
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return "", fmt.Errorf("runtime: write workspace checkpoint: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		return "", fmt.Errorf("runtime: install workspace checkpoint: %w", err)
+	}
+	return ref, nil
+}
+
+func (s *Store) WorkspaceCheckpoint(
+	ctx context.Context,
+	workspaceID string,
+	ref string,
+	limit int64,
+) ([]byte, error) {
+	if workspaceID == "" || limit < 0 {
+		return nil, errors.New("runtime: invalid workspace checkpoint request")
+	}
+	algorithm, encoded, ok := strings.Cut(ref, ":")
+	decoded, decodeErr := hex.DecodeString(encoded)
+	if !ok || algorithm != "sha256" || decodeErr != nil || len(decoded) != sha256.Size {
+		return nil, errors.New("runtime: invalid workspace checkpoint reference")
+	}
+	path := filepath.Join(s.workspaceCheckpointDir(workspaceID), encoded+".tar")
+	file, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return nil, environment.ErrStateNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("runtime: open workspace checkpoint: %w", err)
+	}
+	defer file.Close()
+	archive, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("runtime: read workspace checkpoint: %w", err)
+	}
+	if int64(len(archive)) > limit {
+		return nil, fmt.Errorf("runtime: workspace checkpoint exceeds %d bytes", limit)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	actual := sha256.Sum256(archive)
+	if !bytes.Equal(actual[:], decoded) {
+		return nil, errors.New("runtime: workspace checkpoint digest mismatch")
+	}
+	return archive, nil
+}
+
+func (s *Store) workspaceCheckpointDir(workspaceID string) string {
+	digest := sha256.Sum256([]byte(workspaceID))
+	return filepath.Join(s.checkpointDir, hex.EncodeToString(digest[:]))
+}
+
 func scanEnvironmentState(row rowScanner) (environment.State, error) {
 	var state environment.State
 	var idleUntil sql.NullInt64
 	var expiresAt, updatedAt int64
 	if err := row.Scan(
-		&state.Key,
+		&state.WorkspaceID,
 		&state.Provider,
 		&state.EnvironmentID,
 		&state.Template,
 		&state.Network,
-		&state.WorkspaceStrategy,
-		&state.WorkspaceSourceRef,
-		&state.WorkspaceRevision,
-		&state.CheckpointRevision,
-		&state.SetupGeneration,
 		&state.Status,
 		&state.RunID,
 		&idleUntil,
@@ -219,13 +381,11 @@ func scanEnvironmentState(row rowScanner) (environment.State, error) {
 	return state, nil
 }
 
-func (s *Store) EnvironmentState(ctx context.Context, key string) (environment.State, error) {
+func (s *Store) EnvironmentState(ctx context.Context, workspaceID string) (environment.State, error) {
 	state, err := scanEnvironmentState(s.db.QueryRowContext(ctx, `
-SELECT environment_key, provider, environment_id, template, network_policy,
-       workspace_strategy, workspace_source_ref, workspace_revision,
-       checkpoint_revision, setup_generation, status, run_id,
-       idle_until, expires_at, updated_at
-FROM execution_environments WHERE environment_key = ?`, key))
+SELECT workspace_id, provider, environment_id, template, network_policy,
+       status, run_id, idle_until, expires_at, updated_at
+FROM execution_environments WHERE workspace_id = ?`, workspaceID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return environment.State{}, environment.ErrStateNotFound
 	}
@@ -242,36 +402,24 @@ func (s *Store) SaveEnvironmentState(ctx context.Context, state environment.Stat
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO execution_environments (
-  environment_key, provider, environment_id, template, network_policy,
-  workspace_strategy, workspace_source_ref, workspace_revision,
-  checkpoint_revision, setup_generation, status, run_id,
-  idle_until, expires_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(environment_key) DO UPDATE SET
+  workspace_id, provider, environment_id, template, network_policy,
+  status, run_id, idle_until, expires_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(workspace_id) DO UPDATE SET
   provider = excluded.provider,
   environment_id = excluded.environment_id,
   template = excluded.template,
   network_policy = excluded.network_policy,
-  workspace_strategy = excluded.workspace_strategy,
-  workspace_source_ref = excluded.workspace_source_ref,
-  workspace_revision = excluded.workspace_revision,
-  checkpoint_revision = excluded.checkpoint_revision,
-  setup_generation = excluded.setup_generation,
   status = excluded.status,
   run_id = excluded.run_id,
   idle_until = excluded.idle_until,
   expires_at = excluded.expires_at,
   updated_at = excluded.updated_at`,
-		state.Key,
+		state.WorkspaceID,
 		state.Provider,
 		state.EnvironmentID,
 		state.Template,
 		state.Network,
-		state.WorkspaceStrategy,
-		state.WorkspaceSourceRef,
-		state.WorkspaceRevision,
-		state.CheckpointRevision,
-		state.SetupGeneration,
 		state.Status,
 		state.RunID,
 		idleUntil,
@@ -284,10 +432,10 @@ ON CONFLICT(environment_key) DO UPDATE SET
 	return nil
 }
 
-func (s *Store) DeleteEnvironmentState(ctx context.Context, key, environmentID string) error {
+func (s *Store) DeleteEnvironmentState(ctx context.Context, workspaceID, environmentID string) error {
 	_, err := s.db.ExecContext(ctx, `
 DELETE FROM execution_environments
-WHERE environment_key = ? AND environment_id = ?`, key, environmentID)
+WHERE workspace_id = ? AND environment_id = ?`, workspaceID, environmentID)
 	if err != nil {
 		return fmt.Errorf("runtime: delete environment state: %w", err)
 	}
@@ -304,14 +452,12 @@ func (s *Store) ExpiredEnvironmentStates(
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT environment_key, provider, environment_id, template, network_policy,
-       workspace_strategy, workspace_source_ref, workspace_revision,
-       checkpoint_revision, setup_generation, status, run_id,
-       idle_until, expires_at, updated_at
+SELECT workspace_id, provider, environment_id, template, network_policy,
+       status, run_id, idle_until, expires_at, updated_at
 FROM execution_environments
 WHERE provider = ?
   AND ((status = ? AND idle_until <= ?) OR expires_at <= ?)
-ORDER BY COALESCE(idle_until, expires_at), environment_key
+ORDER BY COALESCE(idle_until, expires_at), workspace_id
 LIMIT ?`, provider, environment.StateIdle, encodeTime(now), encodeTime(now), limit)
 	if err != nil {
 		return nil, fmt.Errorf("runtime: list expired environment states: %w", err)

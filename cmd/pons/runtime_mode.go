@@ -71,8 +71,8 @@ func runServerReady(ctx context.Context, logger *log.Logger, opts serverOptions,
 		return err
 	}
 	defer store.Close()
-	if stateful, ok := opts.Environment.(environment.StatefulProvider); ok {
-		if err := stateful.SetStateStore(store); err != nil {
+	if durable, ok := opts.Environment.(environment.DurableProvider); ok {
+		if err := durable.SetStores(store, store); err != nil {
 			return fmt.Errorf("configure environment state: %w", err)
 		}
 	}
@@ -373,6 +373,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	effectiveSandbox, effectiveNetwork, effectiveEnvironmentID := "none", "host", ""
 	if r.opts.Environment != nil {
 		spec := r.opts.EnvironmentSpec
+		spec.WorkspaceID = request.ConversationID
 		spec.WorkspacePath = request.Workspace
 		spec.RunID = request.RunID
 		session, startErr := r.opts.Environment.Start(ctx, spec)

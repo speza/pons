@@ -107,9 +107,14 @@ func (p Provider) Start(ctx context.Context, spec environment.Spec) (environment
 		return nil, err
 	}
 	return &seatbeltSession{
-		host:     host,
-		scratch:  scratch,
-		metadata: environment.Metadata{Provider: "seatbelt", WorkspacePath: workspace, Network: network},
+		host:    host,
+		scratch: scratch,
+		metadata: environment.Metadata{
+			Provider:      "seatbelt",
+			WorkspaceID:   spec.WorkspaceID,
+			WorkspacePath: workspace,
+			Network:       network,
+		},
 	}, nil
 }
 

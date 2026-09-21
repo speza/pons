@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -21,8 +22,11 @@ func archiveWorkspace(workspace string, limit int64) ([]byte, error) {
 			return walkErr
 		}
 		rel, err := filepath.Rel(workspace, path)
-		if err != nil || rel == "." {
+		if err != nil {
 			return err
+		}
+		if !info.IsDir() && !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
+			return fmt.Errorf("unsupported workspace entry %q", rel)
 		}
 		link := ""
 		if info.Mode()&os.ModeSymlink != 0 {
@@ -74,12 +78,21 @@ func (w *limitedWriter) Write(data []byte) (int, error) {
 }
 
 func restoreWorkspace(workspace string, archive []byte, limit int64) error {
+	if limit < 0 {
+		return errors.New("environment: E2B checkpoint limit must not be negative")
+	}
 	parent := filepath.Dir(workspace)
 	staging, err := os.MkdirTemp(parent, ".pons-e2b-checkpoint-")
 	if err != nil {
 		return fmt.Errorf("environment: stage E2B checkpoint: %w", err)
 	}
-	defer os.RemoveAll(staging)
+	defer removeWorkspaceTree(staging)
+	rootInfo, err := os.Stat(workspace)
+	if err != nil {
+		return fmt.Errorf("environment: inspect existing workspace: %w", err)
+	}
+	rootMode := rootInfo.Mode().Perm()
+	directoryModes := make(map[string]os.FileMode)
 	reader := tar.NewReader(bytes.NewReader(archive))
 	var total int64
 	for {
@@ -92,6 +105,10 @@ func restoreWorkspace(workspace string, archive []byte, limit int64) error {
 		}
 		name := filepath.Clean(filepath.FromSlash(header.Name))
 		if name == "." {
+			if header.Typeflag != tar.TypeDir {
+				return fmt.Errorf("environment: unsupported checkpoint root entry %q", header.Name)
+			}
+			rootMode = os.FileMode(header.Mode).Perm()
 			continue
 		}
 		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
@@ -101,26 +118,29 @@ func restoreWorkspace(workspace string, archive []byte, limit int64) error {
 		if err := safeCheckpointParent(staging, filepath.Dir(target)); err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 			return err
 		}
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, os.FileMode(header.Mode).Perm()); err != nil {
+			if err := os.MkdirAll(target, 0o700); err != nil {
 				return err
 			}
-		case tar.TypeReg:
-			total += header.Size
-			if total > limit {
+			directoryModes[target] = os.FileMode(header.Mode).Perm()
+		case tar.TypeReg, 0:
+			if header.Size < 0 || total > limit || header.Size > limit-total {
 				return fmt.Errorf("environment: E2B checkpoint exceeds %d bytes", limit)
 			}
-			file, openErr := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(header.Mode).Perm())
+			total += header.Size
+			mode := os.FileMode(header.Mode).Perm()
+			file, openErr := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 			if openErr != nil {
 				return openErr
 			}
 			_, copyErr := io.Copy(file, reader)
+			chmodErr := file.Chmod(mode)
 			closeErr := file.Close()
-			if err := errors.Join(copyErr, closeErr); err != nil {
+			if err := errors.Join(copyErr, chmodErr, closeErr); err != nil {
 				return err
 			}
 		case tar.TypeSymlink:
@@ -135,18 +155,58 @@ func restoreWorkspace(workspace string, archive []byte, limit int64) error {
 			return fmt.Errorf("environment: unsupported checkpoint entry %q", header.Name)
 		}
 	}
+	paths := make([]string, 0, len(directoryModes))
+	for path := range directoryModes {
+		paths = append(paths, path)
+	}
+	sort.Slice(paths, func(i, j int) bool { return len(paths[i]) > len(paths[j]) })
+	for _, path := range paths {
+		if err := os.Chmod(path, directoryModes[path]); err != nil {
+			return fmt.Errorf("environment: restore directory mode: %w", err)
+		}
+	}
+	if err := os.Chmod(staging, rootMode); err != nil {
+		return fmt.Errorf("environment: restore workspace mode: %w", err)
+	}
 	backup := workspace + ".pons-e2b-backup-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	if err := os.Rename(workspace, backup); err != nil {
 		return fmt.Errorf("environment: checkpoint existing workspace: %w", err)
 	}
 	if err := os.Rename(staging, workspace); err != nil {
-		_ = os.Rename(backup, workspace)
-		return fmt.Errorf("environment: install E2B checkpoint: %w", err)
+		installErr := fmt.Errorf("environment: install E2B checkpoint: %w", err)
+		if rollbackErr := os.Rename(backup, workspace); rollbackErr != nil {
+			return errors.Join(installErr, fmt.Errorf("environment: restore workspace backup %q: %w", backup, rollbackErr))
+		}
+		return installErr
 	}
-	if err := os.RemoveAll(backup); err != nil {
+	if err := removeWorkspaceTree(backup); err != nil {
 		return fmt.Errorf("environment: remove workspace backup: %w", err)
 	}
 	return nil
+}
+
+func removeWorkspaceTree(root string) error {
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr == nil && info.IsDir() {
+			_ = os.Chmod(path, info.Mode().Perm()|0o700)
+		}
+		return nil
+	})
+	return os.RemoveAll(root)
+}
+
+func validateWorkspaceArchive(archive []byte, limit int64) error {
+	parent, err := os.MkdirTemp("", "pons-e2b-checkpoint-validation-")
+	if err != nil {
+		return fmt.Errorf("environment: validate E2B checkpoint: %w", err)
+	}
+	workspace := filepath.Join(parent, "workspace")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		_ = os.RemoveAll(parent)
+		return fmt.Errorf("environment: validate E2B checkpoint: %w", err)
+	}
+	defer func() { _ = removeWorkspaceTree(parent) }()
+	return restoreWorkspace(workspace, archive, limit)
 }
 
 func safeCheckpointParent(root, parent string) error {

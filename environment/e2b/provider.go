@@ -55,11 +55,12 @@ type Provider struct {
 	EnvdURL           string
 	OnError           func(error)
 
-	lifecycleMu sync.Mutex
-	stateStore  environment.StateStore
-	stopJanitor context.CancelFunc
-	janitorDone chan struct{}
-	active      map[string]string
+	lifecycleMu     sync.Mutex
+	stateStore      environment.StateStore
+	checkpointStore environment.CheckpointStore
+	stopJanitor     context.CancelFunc
+	janitorDone     chan struct{}
+	active          map[string]string
 }
 
 func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environment.HandsSession, error) {
@@ -77,32 +78,42 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 	client := &e2bClient{apiKey: cfg.apiKey, apiURL: cfg.apiURL, envdURL: cfg.envdURL, http: cfg.http}
 	p.lifecycleMu.Lock()
 	defer p.lifecycleMu.Unlock()
-	store := p.stateStore
+	store, checkpoints := p.stateStore, p.checkpointStore
+	if store == nil || checkpoints == nil {
+		return nil, errors.New("environment: E2B durable workspace stores are required")
+	}
+	workspaceID := spec.WorkspaceID
 	runID := spec.RunID
 	if p.active == nil {
 		p.active = make(map[string]string)
 	}
-	if activeRun := p.active[workspace]; activeRun != "" {
-		return nil, fmt.Errorf("environment: workspace %q already has active E2B run %q", workspace, activeRun)
+	if activeRun := p.active[workspaceID]; activeRun != "" {
+		return nil, fmt.Errorf("environment: workspace %q already has active E2B run %q", workspaceID, activeRun)
 	}
-	if store != nil && runID == "" {
+	if runID == "" {
 		return nil, errors.New("environment: durable E2B session requires a run ID")
 	}
-	sandbox, resumed, err := p.acquireSandbox(ctx, client, cfg, workspace, runID, network)
+	workspaceState, err := p.loadOrCreateWorkspace(ctx, store, checkpoints, workspaceID, workspace, cfg.maxWorkspaceBytes)
+	if err != nil {
+		return nil, err
+	}
+	sandbox, resumed, err := p.acquireSandbox(ctx, client, cfg, workspaceID, runID, network)
 	if err != nil {
 		return nil, err
 	}
 	cleanup := func() error {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		var stateErr error
-		if store != nil {
-			stateErr = store.DeleteEnvironmentState(cleanupCtx, workspace, sandbox.ID)
-		}
+		stateErr := store.DeleteEnvironmentState(cleanupCtx, workspaceID, sandbox.ID)
 		return errors.Join(client.killSandbox(cleanupCtx, sandbox.ID), stateErr)
 	}
 	if !resumed {
-		archive, archiveErr := archiveWorkspace(workspace, cfg.maxWorkspaceBytes)
+		archive, archiveErr := checkpoints.WorkspaceCheckpoint(
+			ctx,
+			workspaceID,
+			workspaceState.CheckpointRef,
+			cfg.maxWorkspaceBytes,
+		)
 		if archiveErr != nil {
 			return nil, errors.Join(archiveErr, cleanup())
 		}
@@ -114,23 +125,19 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 		}, "/home/user", nil); err != nil {
 			return nil, errors.Join(fmt.Errorf("environment: prepare E2B workspace: %w", err), cleanup())
 		}
-		if store != nil {
-			now := time.Now().UTC()
-			if err := store.SaveEnvironmentState(ctx, environment.State{
-				Key:               workspace,
-				Provider:          "e2b",
-				EnvironmentID:     sandbox.ID,
-				Template:          cfg.template,
-				Network:           network,
-				WorkspaceStrategy: environment.WorkspaceStrategyArchive,
-				SetupGeneration:   e2bSetupGeneration,
-				Status:            environment.StateActive,
-				RunID:             runID,
-				ExpiresAt:         now.Add(cfg.timeout),
-				UpdatedAt:         now,
-			}); err != nil {
-				return nil, errors.Join(err, cleanup())
-			}
+		now := time.Now().UTC()
+		if err := store.SaveEnvironmentState(ctx, environment.State{
+			WorkspaceID:   workspaceID,
+			Provider:      "e2b",
+			EnvironmentID: sandbox.ID,
+			Template:      cfg.template,
+			Network:       network,
+			Status:        environment.StateActive,
+			RunID:         runID,
+			ExpiresAt:     now.Add(cfg.timeout),
+			UpdatedAt:     now,
+		}); err != nil {
+			return nil, errors.Join(err, cleanup())
 		}
 	} else {
 		// A host crash may leave the prior protocol process alive. Runs are
@@ -172,17 +179,15 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 	if err := host.Start(ctx); err != nil {
 		return nil, errors.Join(err, host.Close(), cleanup())
 	}
-	if runID == "" {
-		runID = sandbox.ID
-	}
-	p.active[workspace] = runID
+	p.active[workspaceID] = runID
 	session := &e2bSession{
 		host:              host,
 		client:            client,
 		sandbox:           sandbox,
-		workspace:         workspace,
+		workspace:         workspaceState,
 		owner:             p,
 		store:             store,
+		checkpoints:       checkpoints,
 		runID:             runID,
 		template:          cfg.template,
 		idleTimeout:       cfg.idleTimeout,
@@ -192,6 +197,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 		metadata: environment.Metadata{
 			Provider:      "e2b",
 			EnvironmentID: sandbox.ID,
+			WorkspaceID:   workspaceID,
 			WorkspacePath: workspace,
 			Network:       network,
 		},
@@ -268,10 +274,10 @@ func (p *Provider) config() (e2bConfig, error) {
 	return cfg, nil
 }
 
-// SetStateStore enables durable workspace affinity and idle cleanup.
-func (p *Provider) SetStateStore(store environment.StateStore) error {
-	if store == nil {
-		return errors.New("environment: E2B state store is nil")
+// SetStores enables durable workspace checkpoints, affinity, and idle cleanup.
+func (p *Provider) SetStores(store environment.StateStore, checkpoints environment.CheckpointStore) error {
+	if store == nil || checkpoints == nil {
+		return errors.New("environment: E2B durable workspace stores are nil")
 	}
 	cfg, err := p.config()
 	if err != nil {
@@ -284,6 +290,7 @@ func (p *Provider) SetStateStore(store environment.StateStore) error {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p.stateStore = store
+	p.checkpointStore = checkpoints
 	p.stopJanitor = cancel
 	p.janitorDone = make(chan struct{})
 	go p.janitor(ctx, cfg)
@@ -305,6 +312,62 @@ func (p *Provider) Close() error {
 	p.stopJanitor, p.janitorDone = nil, nil
 	p.lifecycleMu.Unlock()
 	return nil
+}
+
+func (p *Provider) loadOrCreateWorkspace(
+	ctx context.Context,
+	store environment.StateStore,
+	checkpoints environment.CheckpointStore,
+	workspaceID string,
+	sourcePath string,
+	limit int64,
+) (environment.WorkspaceState, error) {
+	state, err := store.WorkspaceState(ctx, workspaceID)
+	if err == nil {
+		if state.Strategy != environment.WorkspaceStrategyArchive ||
+			state.SetupGeneration != e2bSetupGeneration ||
+			state.CheckpointRef == "" {
+			return environment.WorkspaceState{}, fmt.Errorf("environment: workspace %q is incompatible with the requested archive source", workspaceID)
+		}
+		return state, nil
+	}
+	if !errors.Is(err, environment.ErrStateNotFound) {
+		return environment.WorkspaceState{}, err
+	}
+	canonicalSource, err := filepath.EvalSymlinks(sourcePath)
+	if err != nil {
+		return environment.WorkspaceState{}, fmt.Errorf("environment: workspace source: %w", err)
+	}
+	info, err := os.Stat(canonicalSource)
+	if err != nil || !info.IsDir() {
+		if err != nil {
+			return environment.WorkspaceState{}, fmt.Errorf("environment: workspace source: %w", err)
+		}
+		return environment.WorkspaceState{}, errors.New("environment: workspace source must be a directory")
+	}
+	archive, err := archiveWorkspace(canonicalSource, limit)
+	if err != nil {
+		return environment.WorkspaceState{}, err
+	}
+	checkpointRef, err := checkpoints.PutWorkspaceCheckpoint(ctx, workspaceID, archive)
+	if err != nil {
+		return environment.WorkspaceState{}, err
+	}
+	now := time.Now().UTC()
+	state = environment.WorkspaceState{
+		ID:              workspaceID,
+		Strategy:        environment.WorkspaceStrategyArchive,
+		SourceRef:       canonicalSource,
+		BaseRevision:    checkpointRef,
+		CheckpointRef:   checkpointRef,
+		SetupGeneration: e2bSetupGeneration,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if err := store.SaveWorkspaceState(ctx, state); err != nil {
+		return environment.WorkspaceState{}, err
+	}
+	return state, nil
 }
 
 func (p *Provider) acquireSandbox(
@@ -364,9 +427,7 @@ func (p *Provider) acquireSandbox(
 func reusableState(state environment.State, cfg e2bConfig, network environment.NetworkPolicy) bool {
 	return state.Provider == "e2b" &&
 		state.Template == cfg.template &&
-		state.Network == network &&
-		state.WorkspaceStrategy == environment.WorkspaceStrategyArchive &&
-		state.SetupGeneration == e2bSetupGeneration
+		state.Network == network
 }
 
 func (p *Provider) janitor(ctx context.Context, cfg e2bConfig) {
@@ -397,14 +458,14 @@ func (p *Provider) cleanExpired(ctx context.Context, cfg e2bConfig) {
 	}
 	client := &e2bClient{apiKey: cfg.apiKey, apiURL: cfg.apiURL, envdURL: cfg.envdURL, http: cfg.http}
 	for _, state := range states {
-		if p.active[state.Key] != "" {
+		if p.active[state.WorkspaceID] != "" {
 			continue
 		}
 		if err := client.killSandbox(ctx, state.EnvironmentID); err != nil {
 			p.report(cfg, err)
 			continue
 		}
-		if err := p.stateStore.DeleteEnvironmentState(ctx, state.Key, state.EnvironmentID); err != nil {
+		if err := p.stateStore.DeleteEnvironmentState(ctx, state.WorkspaceID, state.EnvironmentID); err != nil {
 			p.report(cfg, err)
 		}
 	}
@@ -417,23 +478,15 @@ func (p *Provider) report(cfg e2bConfig, err error) {
 }
 
 func validateE2BSpec(spec environment.Spec) (string, []string, environment.NetworkPolicy, map[string]string, error) {
+	if strings.TrimSpace(spec.WorkspaceID) == "" || strings.ContainsRune(spec.WorkspaceID, '\x00') {
+		return "", nil, "", nil, errors.New("environment: workspace ID is required")
+	}
 	if spec.WorkspacePath == "" {
 		return "", nil, "", nil, errors.New("environment: workspace is required")
 	}
 	workspace, err := filepath.Abs(spec.WorkspacePath)
 	if err != nil {
 		return "", nil, "", nil, fmt.Errorf("environment: workspace: %w", err)
-	}
-	workspace, err = filepath.EvalSymlinks(workspace)
-	if err != nil {
-		return "", nil, "", nil, fmt.Errorf("environment: workspace: %w", err)
-	}
-	info, err := os.Stat(workspace)
-	if err != nil || !info.IsDir() {
-		if err != nil {
-			return "", nil, "", nil, fmt.Errorf("environment: workspace: %w", err)
-		}
-		return "", nil, "", nil, errors.New("environment: workspace must be a directory")
 	}
 	if len(spec.Command) == 0 {
 		return "", nil, "", nil, errors.New("environment: hands command is required")
@@ -463,9 +516,10 @@ type e2bSession struct {
 	host              *external.Host
 	client            *e2bClient
 	sandbox           e2bSandbox
-	workspace         string
+	workspace         environment.WorkspaceState
 	owner             *Provider
 	store             environment.StateStore
+	checkpoints       environment.CheckpointStore
 	runID             string
 	template          string
 	idleTimeout       time.Duration
@@ -530,21 +584,32 @@ func (s *e2bSession) refreshTimeout(ctx context.Context) error {
 	}
 	now := time.Now().UTC()
 	if err := s.store.SaveEnvironmentState(ctx, environment.State{
-		Key:               s.workspace,
-		Provider:          "e2b",
-		EnvironmentID:     s.sandbox.ID,
-		Template:          s.template,
-		Network:           s.metadata.Network,
-		WorkspaceStrategy: environment.WorkspaceStrategyArchive,
-		SetupGeneration:   e2bSetupGeneration,
-		Status:            environment.StateActive,
-		RunID:             s.runID,
-		ExpiresAt:         now.Add(s.timeout),
-		UpdatedAt:         now,
+		WorkspaceID:   s.workspace.ID,
+		Provider:      "e2b",
+		EnvironmentID: s.sandbox.ID,
+		Template:      s.template,
+		Network:       s.metadata.Network,
+		Status:        environment.StateActive,
+		RunID:         s.runID,
+		ExpiresAt:     now.Add(s.timeout),
+		UpdatedAt:     now,
 	}); err != nil {
 		return fmt.Errorf("environment: refresh E2B state: %w", err)
 	}
 	return nil
+}
+
+func (s *e2bSession) persistCheckpoint(ctx context.Context, archive []byte) error {
+	if err := validateWorkspaceArchive(archive, s.maxWorkspaceBytes); err != nil {
+		return err
+	}
+	checkpointRef, err := s.checkpoints.PutWorkspaceCheckpoint(ctx, s.workspace.ID, archive)
+	if err != nil {
+		return err
+	}
+	s.workspace.CheckpointRef = checkpointRef
+	s.workspace.UpdatedAt = time.Now().UTC()
+	return s.store.SaveWorkspaceState(ctx, s.workspace)
 }
 
 func (s *e2bSession) stopKeepalive() error {
@@ -570,8 +635,8 @@ func (s *e2bSession) Close() error {
 				s.closeErr = fmt.Errorf("environment: checkpoint E2B workspace: %w", err)
 			} else if body, err := s.client.download(ctx, s.sandbox, workspaceCheckpointPath, s.maxWorkspaceBytes); err != nil {
 				s.closeErr = err
-			} else if err := restoreWorkspace(s.workspace, body, s.maxWorkspaceBytes); err != nil {
-				s.closeErr = err
+			} else {
+				s.closeErr = s.persistCheckpoint(ctx, body)
 			}
 		}
 		s.closeErr = errors.Join(s.closeErr, s.stopKeepalive())
@@ -582,17 +647,15 @@ func (s *e2bSession) Close() error {
 				s.closeErr = err
 			} else {
 				s.closeErr = s.store.SaveEnvironmentState(ctx, environment.State{
-					Key:               s.workspace,
-					Provider:          "e2b",
-					EnvironmentID:     s.sandbox.ID,
-					Template:          s.template,
-					Network:           s.metadata.Network,
-					WorkspaceStrategy: environment.WorkspaceStrategyArchive,
-					SetupGeneration:   e2bSetupGeneration,
-					Status:            environment.StateIdle,
-					IdleUntil:         idleUntil,
-					ExpiresAt:         idleUntil.Add(time.Minute),
-					UpdatedAt:         now,
+					WorkspaceID:   s.workspace.ID,
+					Provider:      "e2b",
+					EnvironmentID: s.sandbox.ID,
+					Template:      s.template,
+					Network:       s.metadata.Network,
+					Status:        environment.StateIdle,
+					IdleUntil:     idleUntil,
+					ExpiresAt:     idleUntil.Add(time.Minute),
+					UpdatedAt:     now,
 				})
 			}
 		}
@@ -601,13 +664,13 @@ func (s *e2bSession) Close() error {
 			defer killCancel()
 			s.closeErr = errors.Join(s.closeErr, s.client.killSandbox(killCtx, s.sandbox.ID))
 			if s.store != nil {
-				s.closeErr = errors.Join(s.closeErr, s.store.DeleteEnvironmentState(killCtx, s.workspace, s.sandbox.ID))
+				s.closeErr = errors.Join(s.closeErr, s.store.DeleteEnvironmentState(killCtx, s.workspace.ID, s.sandbox.ID))
 			}
 		}
 		if s.owner != nil {
 			s.owner.lifecycleMu.Lock()
-			if s.owner.active[s.workspace] == s.runID {
-				delete(s.owner.active, s.workspace)
+			if s.owner.active[s.workspace.ID] == s.runID {
+				delete(s.owner.active, s.workspace.ID)
 			}
 			s.owner.lifecycleMu.Unlock()
 		}

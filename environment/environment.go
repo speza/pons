@@ -38,11 +38,13 @@ type ResourceLimits struct {
 }
 
 // Spec is the explicit policy and launch input for one hands environment.
-// WorkspacePath is the host-local path used by local and archive-backed
-// providers. Command[0] must be an absolute pons-hands executable path.
+// WorkspaceID is the independent logical workspace identity. WorkspacePath is
+// the host-local path used directly by local providers or once as an archive
+// source. Command[0] must be an absolute pons-hands executable path.
 // Environment is a clean, explicit list of KEY=VALUE entries; the parent
 // environment is never inherited.
 type Spec struct {
+	WorkspaceID   string
 	WorkspacePath string
 	RunID         string
 	Command       []string
@@ -56,6 +58,7 @@ type Spec struct {
 type Metadata struct {
 	Provider      string
 	EnvironmentID string
+	WorkspaceID   string
 	WorkspacePath string
 	Network       NetworkPolicy
 }

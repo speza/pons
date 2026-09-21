@@ -131,12 +131,12 @@ The E2B adapter does this:
 2. Reconnect the workspace's sandbox, or create one from a pinned pons-hands template.
 3. Request allow_internet_access=false unless policy explicitly enables it.
 4. Pass only explicit environment values; keep the E2B API key on the host.
-5. Upload and extract a bounded workspace archive when creating a sandbox.
+5. Upload the latest durable checkpoint, or seed a new logical workspace once.
 6. Start pons-hands through authenticated envd process APIs.
 7. Adapt envd stdin/stdout to the existing host hands session.
 8. Execute protocol actions and return ToolResults.
-9. Checkpoint the remote workspace after the run and mark the sandbox idle.
-10. Reuse it for later runs, or let the idle janitor kill it.
+9. Validate and persist a bounded checkpoint outside the source checkout.
+10. Mark the sandbox idle; later runs may reuse it or restore a replacement.
 ```
 
 The template contains the tool host; envd supplies the process transport. The host should not
@@ -167,21 +167,18 @@ silently change runtime protocol 1.
 
 ### E2B workspace model
 
-A local path cannot be mounted directly into a remote E2B sandbox. The remote
-adapter therefore needs an explicit workspace transfer mode:
+A local path cannot be mounted directly into a remote E2B sandbox. The local
+path is therefore only the source for a new logical workspace. The initial
+provider uploads that bounded seed once and persists a full validated
+checkpoint after every run without replacing the source checkout.
 
-- seed from a git repository or archive;
-- upload selected files before a run and download changed files afterward; or
-- retain a provider workspace by sandbox ID and periodically checkpoint it.
-
-The initial provider uploads a full tar archive when it creates a sandbox and
-downloads a full checkpoint after every run. The checkpoint is validated in a
-staging directory before replacing the local workspace, including remote
-deletions. SQLite persists the workspace-to-sandbox association, lifecycle
-state, run lease, idle deadline, and provider expiry, but no credentials. A
-later process reconnects with its host-side API key and receives a fresh envd
-access token. Transfer size is bounded, and incremental synchronization is
-left for later.
+SQLite stores logical workspace metadata separately from replaceable sandbox
+placement. Checkpoint archives live under the runtime state directory and are
+addressed by digest; a future checkpoint-store implementation may use S3 or
+another object store. A later process reconnects to the retained sandbox or
+creates a replacement from the latest checkpoint using its host-side API key
+and a fresh envd access token. Transfer size is bounded, and incremental
+checkpointing is left for later.
 
 If the E2B sandbox expires, the host treats the environment as failed. It does
 not automatically repeat a tool action. A later agent run may create a new

@@ -48,8 +48,11 @@ func (p *lifecycleEnvironment) Start(context.Context, environment.Spec) (environ
 	return nil, errors.New("unexpected environment start")
 }
 
-func (p *lifecycleEnvironment) SetStateStore(store environment.StateStore) error {
+func (p *lifecycleEnvironment) SetStores(store environment.StateStore, checkpoints environment.CheckpointStore) error {
 	p.store = store
+	if checkpoints == nil {
+		return errors.New("checkpoint store is nil")
+	}
 	return nil
 }
 
@@ -142,8 +145,8 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 	}
 	for i := 1; i <= 2; i++ {
 		spec := <-execution.specs
-		if spec.WorkspacePath != workspace {
-			t.Fatalf("environment workspace = %q, want %q", spec.WorkspacePath, workspace)
+		if spec.WorkspaceID != "conversation-1" || spec.WorkspacePath != workspace {
+			t.Fatalf("environment workspace = %q at %q", spec.WorkspaceID, spec.WorkspacePath)
 		}
 		if want := fmt.Sprintf("run-%d", i); spec.RunID != want {
 			t.Fatalf("environment run ID = %q, want %q", spec.RunID, want)

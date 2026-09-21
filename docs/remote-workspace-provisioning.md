@@ -1,288 +1,250 @@
 # Remote workspace provisioning design
 
-**Status:** Proposed; `archive/v1` implemented, `git/v1` deferred
+**Status:** `archive/v1` implemented; `git/v1` deferred
 **Date:** 2026-09-21
 **Related:** ADR-0009, ADR-0015
 
 ## Goal
 
-Support isolated remote workspaces without making the host checkout and the
-sandbox filesystem appear to be one mounted directory. Workspace behavior is
-selected explicitly by a versioned strategy:
-
-- `archive/v1` transfers a bounded local snapshot into a retained sandbox and
-  checkpoints the resulting tree back to the host;
-- `git/v1` will give the agent a repository-backed worktree inside the sandbox,
-  including ordinary credentialed Git commands through its bash tool.
-
-Local and Seatbelt providers continue to operate directly on the local
-workspace. This document concerns remote environments.
-
-## Identities
-
-Remote execution has three distinct identities:
+A remote workspace is an independent durable line of work, not a mounted or
+synchronized view of a developer's checkout. The source supplies initial
+content. The logical workspace survives replacement or deletion of the VM that
+currently hosts it.
 
 ```text
-source identity     repository or archive from which work starts
-workspace identity  one independent mutable line of agent work
-placement identity  the replaceable VM currently hosting that workspace
+source identity     repository or archive used to seed work
+workspace identity  independent mutable and durable line of work
+placement identity  replaceable VM currently hosting that workspace
 ```
 
-Several VMs may clone the same repository and immutable base revision. They do
-not share mutable state unless they intentionally push to the same Git ref. A
-retained VM is a performance optimization; durable Git state must survive its
-loss.
+The runtime conversation ID currently supplies the workspace identity. Several
+workspaces may use the same source and immutable base revision without sharing
+mutable state.
 
-The workspace identity should normally follow the conversation or another
-explicit task/workspace ID. It must not be inferred from a local checkout path
-for `git/v1`.
+## Durable resources
 
-## Current strategy: `archive/v1`
+Logical state and provider placement have different lifetimes:
 
-The E2B provider currently:
+```text
+workspaces                              execution_environments
+──────────                              ──────────────────────
+id                  <────────────────── workspace_id
+strategy                               provider
+source_ref                             environment_id
+base_revision                          template
+checkpoint_ref                         network_policy
+setup_generation                       status / run_id
+created_at / updated_at                idle_until / expires_at
 
-1. archives the configured local workspace with a size bound;
-2. uploads and extracts it when creating a sandbox;
-3. retains the remote filesystem across runs;
-4. starts a fresh `pons-hands` protocol process for each run; and
-5. downloads a validated checkpoint after the run.
+one logical workspace ───── 0 or 1 current retained environment
+```
 
-This mode is useful for smoke tests, experiments, non-Git directories, and
-proving remote lifecycle and transport behavior. It is not the final workflow
-for independently publishable engineering work.
+Deleting an environment does not delete its workspace. A replacement VM can
+restore the latest checkpoint.
 
-The current checkpoint replaces the local workspace, preserving remote
-changes and deletions. Concurrent local editing during an archive-backed run is
-unsupported because it can diverge from the retained remote tree. A later
-archive revision should add digest-based conflict detection or artifact-only
-export before being presented as a collaborative synchronization mechanism.
+`source_ref` and `checkpoint_ref` are non-secret identifiers. They must never
+contain embedded credentials.
 
-## Future strategy: `git/v1`
+## Checkpoint storage
 
-### Workspace plan
-
-The future domain contract should carry a non-secret plan resembling:
+Checkpoint bytes live outside SQLite behind `environment.CheckpointStore`:
 
 ```go
-type WorkspacePlan struct {
-    ID                 string // stable independent workspace identity
-    Strategy           string // archive/v1 or git/v1
-    SourceRef          string // opaque trusted source configuration reference
-    BaseRevision       string // immutable initial commit
-    CheckpointRevision string // latest known durable remote commit
-    SetupGeneration    int
+type CheckpointStore interface {
+    PutWorkspaceCheckpoint(context.Context, string, []byte) (string, error)
+    WorkspaceCheckpoint(context.Context, string, string, int64) ([]byte, error)
 }
 ```
 
-The exact type should be added when `git/v1` is implemented rather than exposed
-speculatively in the current provider API. Existing durable state already
-reserves the strategy, source, base revision, checkpoint revision, and setup
-generation fields. `environment.State.Key` can hold the workspace identity.
-
-`SourceRef` is an identifier resolved through trusted configuration. It must
-not be a clone URL containing credentials.
-
-### Setup lifecycle
-
-For a new Git workspace:
+The first implementation stores content-addressed archives under the runtime
+state directory:
 
 ```text
-resolve trusted source configuration
-  -> create VM
-  -> acquire repository-scoped credential capability
-  -> clone inside VM
-  -> checkout checkpoint revision, or immutable base revision
-  -> configure workspace branch/ref
-  -> start pons-hands
+<state-dir>/
+├── runtime.db
+└── workspaces/
+    └── <hash-of-workspace-id>/
+        └── <sha256>.tar
 ```
 
-For a replacement VM:
+A future implementation may place the same bounded objects in S3 or another
+object store. Object-store credentials remain host-side; the host carries the
+archive through envd.
+
+## Current strategy: `archive/v1`
+
+### First placement
 
 ```text
-create VM
-  -> clone the same source
-  -> checkout latest durable checkpoint revision
-  -> continue the workspace
+resolve canonical source path
+  -> archive source once
+  -> store archive as base and current checkpoint
+  -> create logical workspace row
+  -> create E2B VM
+  -> upload and extract checkpoint
+  -> start fresh pons-hands
 ```
 
-The VM therefore does not become the only durable copy of useful work.
+The source directory is never a checkpoint destination and is never silently
+replaced.
 
-### Agent Git capability
-
-Git is part of the agent's normal development capability. Through the existing
-bash tool, hands may run operations including:
+### Reused placement
 
 ```text
-git status
-git diff
-git log
-git fetch
-git checkout / switch
-git add
-git commit
-git rebase
-git push
+load logical workspace
+  -> reconnect retained compatible VM
+  -> stop any stale pons-hands process
+  -> start fresh pons-hands
 ```
 
-`git push` is not translated into a special pons tool. It remains an ordinary
-bash action so the agent can use standard repository workflows.
+### Replacement placement
 
-Authenticated Git means the sandbox intentionally possesses repository write
-authority. A credential usable by ordinary Git under unrestricted bash cannot
-also be considered secret from that bash process. Security therefore comes
-from capability scope, lifetime, repository policy, isolation, and audit—not
-from claiming the token is invisible to hands.
+```text
+load logical workspace
+  -> no retained VM exists
+  -> create E2B VM
+  -> load latest checkpoint from CheckpointStore
+  -> upload and extract checkpoint
+  -> start fresh pons-hands
+```
 
-### Credential model
+### Run completion
+
+```text
+stop pons-hands cleanly
+  -> create bounded remote archive
+  -> download and validate archive
+  -> persist content-addressed checkpoint
+  -> advance workspaces.checkpoint_ref
+  -> mark environment idle
+```
+
+Checkpointing occurs after every completed run rather than immediately before
+idle deletion. Planned deletion is therefore cheap, and an unplanned VM loss
+loses at most work since the last completed checkpoint.
+
+If hands does not stop cleanly, or checkpoint download, validation, or storage
+fails, the prior durable checkpoint remains authoritative and the sandbox is
+discarded rather than reused.
+
+`archive/v1` is suitable for smoke tests, experiments, non-Git sources, and
+isolated remote work. An explicit export operation may later materialize a
+checkpoint into a chosen destination; automatic source synchronization is not
+part of the strategy.
+
+## Future strategy: `git/v1`
+
+A Git workspace uses the same logical workspace and placement model:
+
+```text
+strategy        git/v1
+source_ref      trusted repository configuration ID
+base_revision   immutable initial commit
+checkpoint_ref  latest durable recovery state
+```
+
+Several independent workspaces may clone the same repository and base commit.
+Each should normally publish through a distinct branch or checkpoint ref, for
+example:
+
+```text
+refs/heads/pons/<workspace-id>/work
+```
+
+Git publication and workspace recovery are related but distinct:
+
+```text
+Agent Git capability
+  commit / fetch / rebase / push
+  publishes useful work
+
+Host checkpoint capability
+  preserves dirty or unpushed state
+  allows recovery after VM loss
+```
+
+A first Git implementation may use a pushed commit as its durable checkpoint
+when the tree is clean. Dirty or unpushed state must either be captured by a
+host-owned blob checkpoint or explicitly reported as non-durable.
+
+## Agent Git authority
+
+Git remains available through the existing bash tool. Hands may run ordinary
+commands including `git commit`, `fetch`, `rebase`, and authenticated `push`.
+The credential is therefore an intentional agent capability, not a value that
+can be hidden from unrestricted bash.
 
 Never pass developer credentials, organization-wide tokens, or `E2B_API_KEY`
-to hands. The preferred first implementation uses a short-lived GitHub App
+to hands. The preferred initial credential is a short-lived GitHub App
 installation token with:
 
 - access to one configured repository;
 - metadata read and contents read/write only;
 - no administration or organization-wide authority;
 - no workflow authority unless separately justified;
-- a short expiration; and
-- a dedicated agent branch/ref namespace.
+- short expiration; and
+- protected destination branches.
 
-E2B can transport explicit process environment values securely into its
-isolated VM, but values supplied to `pons-hands` are readable by the agent. A
-credential helper may avoid accidental persistence in URLs and Git config; it
-does not make the credential inaccessible to arbitrary bash.
+A stronger later design can exchange E2B workload identity through a trusted
+credential broker. Credential helpers reduce accidental persistence but do not
+hide authority from hands.
 
-A stronger later design can use E2B workload identity:
+Credentials and credential references must not appear in SQLite, repository
+URLs, workspace archives, transcripts, logs, tool results, or templates.
 
-```text
-sandbox workload identity
-  -> trusted credential broker
-  -> short-lived repository capability
+## Provider contract
+
+The common execution contract remains provider-neutral:
+
+```go
+type Provider interface {
+    Start(context.Context, Spec) (HandsSession, error)
+}
+
+type Spec struct {
+    WorkspaceID   string // logical identity
+    WorkspacePath string // local source for local/archive providers
+    RunID         string
+    // command, environment, network policy, protocol limits...
+}
 ```
 
-A non-exportable SSH agent or policy-enforcing Git proxy could further prevent
-private-key extraction while still allowing `git push`, but the agent can
-exercise whatever scoped authority that capability represents.
+Provider-specific template, image, region, compute, and credential-broker
+configuration stays on the provider. Modal, Kubernetes, and E2B can share the
+same workspace metadata and checkpoint contracts while implementing placement
+differently.
 
-Credentials and credential references must not appear in:
+When `git/v1` is implemented, add an explicit non-secret workspace plan rather
+than overloading `WorkspacePath` with repository configuration.
 
-- SQLite environment state;
-- repository URLs or `.git/config`;
-- workspace files or archives;
-- transcripts, logs, tool results, or checkpoint metadata; or
-- templates and long-lived sandbox environment variables.
+## Network and credentials
 
-### Branch and repository policy
+Archive hands retain default-deny networking. Git-capable hands need egress to
+the configured repository host. Prefer separate setup and hands policies and
+repository-host allowlists when the execution platform supports them.
 
-Each independent workspace should default to a distinct branch or checkpoint
-ref, for example:
-
-```text
-refs/heads/pons/<workspace-id>/work
-```
-
-Multiple VMs may use the same source and base commit while pushing separate
-refs. Protected branches should reject direct pushes and force-pushes, require
-normal checks, and require pull requests where appropriate. Tags and unrelated
-refs should be denied by repository policy where the hosting provider supports
-it.
-
-The agent may intentionally share a branch with another workspace, but normal
-Git non-fast-forward or force-with-lease behavior must surface conflicts rather
-than silently replacing another workspace's result.
-
-### Completion and durability
-
-The runtime must not assume that every successful agent run pushed its work.
-At session close, a Git provider should inspect and report at least:
-
-```text
-current branch/ref
-current HEAD
-latest known remote checkpoint revision
-dirty working tree
-unpushed commits
-```
-
-If the agent pushed successfully, `checkpoint_revision` records the resulting
-remote commit. Dirty or unpushed work remains dependent on the retained VM and
-must be reported as non-durable. A future policy may require a durable push
-before a run is considered complete, but automatic commit/push is not implied
-by the first Git contract.
-
-Publishing a normal branch or pull request can be performed by the agent using
-its scoped Git capability and, if granted, a separate pull-request capability.
-Repository branch protection remains the final authority.
-
-## Durable state
-
-`execution_environments` stores only non-secret placement and compatibility
-metadata:
-
-- `environment_key`: stable workspace identity;
-- `workspace_strategy`: `archive/v1` or future `git/v1`;
-- `workspace_source_ref`: opaque trusted source ID;
-- `workspace_revision`: immutable base revision;
-- `checkpoint_revision`: latest durable archive digest or Git commit;
-- `setup_generation`: operator-controlled compatibility generation;
-- provider, VM ID, template, network policy, lifecycle, and expiry fields.
-
-A provider must discard or re-provision an idle environment when its strategy,
-source, requested revision, network policy, template, or setup generation is
-incompatible. It must not silently merge independent workspace histories.
-
-The single table remains appropriate for `archive/v1`, where workspace affinity
-and retained placement have the same lifetime. When `git/v1` introduces a
-logical workspace that can survive without a VM, promote its source and
-checkpoint fields into a `workspaces` table and have
-`execution_environments.workspace_id` reference it. Defer that split until the
-workspace lifecycle exists rather than inventing retention semantics now.
-
-## Network policy
-
-Archive hands retain the existing default-deny network policy. A Git-capable
-agent needs egress to its configured repository host while cloning, fetching,
-or pushing. The eventual policy should distinguish setup access and hands
-access and should prefer repository-host allowlists over unrestricted internet
-access when the execution platform supports them.
+E2B API keys, envd access tokens, object-store credentials, and other provider
+control-plane credentials remain host-only.
 
 ## Failure policy
 
-- Setup failure prevents hands startup and records no reusable environment.
-- Provider expiry falls back to the latest durable Git checkpoint; no tool
-  action is retried automatically.
-- Dirty or unpushed Git work is explicitly non-durable if the VM is lost.
-- A rejected push is returned as a normal bash/tool result for the agent to
-  resolve.
-- Credential acquisition failure does not fall back to a broader credential.
-- An interrupted archive checkpoint leaves the previous local tree intact and
-  discards uncertain reusable state.
+- Source seeding or setup failure starts no hands session.
+- A failed checkpoint leaves the prior checkpoint authoritative.
+- Environment deletion leaves logical workspace state intact.
+- Provider expiry restores from the latest durable checkpoint; no tool action
+  is retried automatically.
+- A rejected Git push is a normal bash result for the agent to resolve.
+- Credential acquisition never falls back to a broader credential.
+- Independent workspace histories are never silently merged.
 
-## Interface impact
+## Next stages
 
-No new public Go interface is required for `git/v1` in the current PR:
-
-- `environment.Provider` and `HandsSession` already cover placement and tool
-  execution;
-- `StateStore` already persists strategy-neutral workspace metadata;
-- `environment.State.Key` can become the remote workspace ID; and
-- `Spec.WorkspacePath` is explicitly the host-local path required by
-  `archive/v1` and Seatbelt.
-
-When Git support is implemented, add an explicit workspace plan or source
-configuration to `environment.Spec` rather than overloading `Workspace` or
-passing secrets through it. Credential acquisition belongs in provider
-configuration or an injected credential broker, not serialized domain state.
-
-## Implementation stages
-
-1. Ship and clearly label the current `archive/v1` strategy.
-2. Add explicit workspace identity and source-plan types with no credentials.
-3. Resolve trusted repository configuration and immutable base revisions.
-4. Implement in-VM clone and credential-free Git operations.
-5. Add short-lived, repository-scoped write credentials for hands bash.
-6. Persist and verify remote checkpoint revisions across VM replacement.
+1. Keep `archive/v1` checkpoints bounded, validated, and content-addressed.
+2. Add explicit checkpoint export and workspace deletion/retention policy.
+3. Add an S3-compatible `CheckpointStore` when multi-host durability is needed.
+4. Add non-secret Git workspace plans and in-VM clone.
+5. Add short-lived repository-scoped Git credentials.
+6. Define durable handling for dirty and unpushed Git state.
 7. Add branch-policy, credential-leakage, expiry, and conflicting-push tests.
-8. Add workload-identity credential exchange or a non-exportable Git capability
-   if stronger isolation is required.
 
 Live provider and Git tests remain opt-in and credential-dependent.

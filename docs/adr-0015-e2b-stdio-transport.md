@@ -44,19 +44,22 @@ Linux `pons-hands` binary but no model or E2B credentials. `E2B_API_KEY`
 remains in the host process. Sandbox internet access is disabled unless the
 operator enables the existing sandbox network policy.
 
-Workspace synchronization is copy-in/checkpoint-out. A successful checkpoint
-is staged locally and replaces the prior workspace so remote deletions are
-preserved. If checkpoint download or validation fails, the original local
-workspace remains in place, closing the session reports an error, and the
-sandbox is discarded rather than reused.
+The local source workspace is a one-time seed, not a synchronization target.
+After each run, the provider downloads and validates a bounded checkpoint,
+stores it under the runtime state directory, and advances the logical
+workspace's content-addressed checkpoint reference. It never replaces the
+source checkout. If checkpoint download, validation, or persistence fails,
+closing the session reports an error and the sandbox is discarded rather than
+reused.
 
-Sandbox affinity is durable operational state. SQLite stores the workspace
-key, provider, sandbox ID, template, workspace strategy/source/revisions/setup
-generation, status, active run ID, idle deadline, and provider expiry. It never
-stores the E2B API key or temporary envd access token. Reconnection obtains a
-fresh token from E2B using the host-side secret. The strategy-neutral workspace
-fields support the future control-plane provisioning contract described in
-`remote-workspace-provisioning.md`.
+Logical workspace state and sandbox affinity are separate durable resources.
+SQLite stores strategy, source, base revision, checkpoint reference, and setup
+generation in `workspaces`; `execution_environments` stores only the current
+provider placement, active run ID, idle deadline, and provider expiry. Archive
+bytes remain outside SQLite and can move from the local checkpoint store to an
+object-store implementation later. Neither store contains the E2B API key or
+temporary envd access token. Reconnection obtains a fresh token from E2B using
+the host-side secret.
 While a session is active, a heartbeat refreshes both the E2B timeout and the
 durable provider-expiry deadline. An idle janitor deletes sandboxes after the
 configured timeout. Provider TTL remains a crash-cleanup backstop, and stale
@@ -78,7 +81,8 @@ an explicit artifact mapping contract.
 - Local and E2B environments use the same tool host and protocol semantics.
 - No sandbox application port is exposed.
 - Startup and shutdown transfer the entire workspace and are unsuitable for
-  very large repositories; archive size is bounded.
+  very large repositories; archive size is bounded and the source checkout is
+  never overwritten.
 - Abnormal host termination can lose changes made after the last completed
   checkpoint; interrupted tool calls are not retried.
 - The template must be built for the sandbox architecture before use.
