@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/samperrin/pons/environment"
+	"github.com/samperrin/pons/plugins/external"
 )
 
 func TestE2BConfigUsesRestrictiveDefaults(t *testing.T) {
@@ -235,6 +237,93 @@ func writeConnectFrame(w io.Writer, value any) error {
 	return err
 }
 
+func TestSessionRefreshesSandboxAndDurableExpiry(t *testing.T) {
+	var gotTimeout int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sandboxes/sandbox/timeout" {
+			http.NotFound(w, r)
+			return
+		}
+		var payload struct {
+			Timeout int `json:"timeout"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+			return
+		}
+		gotTimeout = payload.Timeout
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	store := &recordingStateStore{}
+	session := &e2bSession{
+		client:    &e2bClient{apiKey: "secret", apiURL: server.URL, http: server.Client()},
+		sandbox:   e2bSandbox{ID: "sandbox"},
+		workspace: "/workspace",
+		store:     store,
+		runID:     "run",
+		template:  "template",
+		timeout:   5 * time.Minute,
+		metadata:  environment.Metadata{Network: environment.NetworkDisabled},
+	}
+	before := time.Now().UTC()
+	if err := session.refreshTimeout(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state := store.last.Load()
+	if gotTimeout != 300 || state == nil {
+		t.Fatalf("timeout = %d, state = %+v", gotTimeout, state)
+	}
+	if state.Status != environment.StateActive || state.RunID != "run" ||
+		state.EnvironmentID != "sandbox" || state.ExpiresAt.Before(before.Add(session.timeout)) {
+		t.Fatalf("state = %+v", state)
+	}
+}
+
+func TestSessionCloseSkipsCheckpointAfterHandsFailure(t *testing.T) {
+	var processStarts, sandboxDeletes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/sandboxes/sandbox":
+			sandboxDeletes.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/process.Process/Start":
+			processStarts.Add(1)
+			http.Error(w, "checkpoint unexpectedly started", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	host, err := external.NewConnectionHost(external.Manifest{
+		ManifestVersion: external.ManifestVersion,
+		Name:            "pons.hands",
+		Entrypoint:      "/usr/local/bin/pons-hands",
+		RuntimeProtocol: external.RuntimeProtocol,
+	}, external.HostConfig{Workspace: defaultE2BWorkspace}, func(context.Context) (external.Connection, error) {
+		return external.Connection{}, errors.New("hands unavailable")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Start(context.Background()); err == nil {
+		t.Fatal("host startup unexpectedly succeeded")
+	}
+	session := &e2bSession{
+		host: host,
+		client: &e2bClient{
+			apiKey: "secret", apiURL: server.URL, envdURL: server.URL, http: server.Client(),
+		},
+		sandbox: e2bSandbox{ID: "sandbox"},
+	}
+	if err := session.Close(); err == nil || !strings.Contains(err.Error(), "hands unavailable") {
+		t.Fatalf("error = %v", err)
+	}
+	if processStarts.Load() != 0 || sandboxDeletes.Load() != 1 {
+		t.Fatalf("process starts = %d, sandbox deletes = %d", processStarts.Load(), sandboxDeletes.Load())
+	}
+}
+
 func TestWorkspaceArchiveRestoreReconcilesDeletions(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	if err := os.Mkdir(workspace, 0o755); err != nil {
@@ -272,13 +361,17 @@ func TestWorkspaceArchiveRestoreReconcilesDeletions(t *testing.T) {
 	}
 }
 
-type recordingStateStore struct{ saves atomic.Int32 }
+type recordingStateStore struct {
+	saves atomic.Int32
+	last  atomic.Pointer[environment.State]
+}
 
 func (*recordingStateStore) EnvironmentState(context.Context, string) (environment.State, error) {
 	return environment.State{}, environment.ErrStateNotFound
 }
-func (s *recordingStateStore) SaveEnvironmentState(context.Context, environment.State) error {
+func (s *recordingStateStore) SaveEnvironmentState(_ context.Context, state environment.State) error {
 	s.saves.Add(1)
+	s.last.Store(&state)
 	return nil
 }
 func (*recordingStateStore) DeleteEnvironmentState(context.Context, string, string) error {

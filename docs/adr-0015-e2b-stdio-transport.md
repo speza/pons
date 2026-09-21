@@ -57,10 +57,17 @@ stores the E2B API key or temporary envd access token. Reconnection obtains a
 fresh token from E2B using the host-side secret. The strategy-neutral workspace
 fields support the future control-plane provisioning contract described in
 `remote-workspace-provisioning.md`.
-An idle janitor deletes sandboxes after the configured timeout. Provider TTL
-remains a crash-cleanup backstop, and stale active records are removed after
-that expiry. A server restart can therefore reuse an idle sandbox without
-preserving process memory or an open protocol connection.
+While a session is active, a heartbeat refreshes both the E2B timeout and the
+durable provider-expiry deadline. An idle janitor deletes sandboxes after the
+configured timeout. Provider TTL remains a crash-cleanup backstop, and stale
+active records are removed after that expiry. A server restart can therefore
+reuse an idle sandbox without preserving process memory or an open protocol
+connection.
+
+A reconnected sandbox must successfully stop any stale `pons-hands` process
+before starting the new protocol session. Checkpointing begins only after the
+current hands process has stopped cleanly; otherwise the sandbox is discarded
+and the original local workspace remains unchanged.
 
 External hands plugins are rejected by the first implementation. Their local
 manifests and executables are not portable into a remote Linux template without

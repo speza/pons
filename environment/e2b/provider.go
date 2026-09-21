@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,11 @@ const (
 	prepareWorkspaceScript  = "rm -rf " + defaultE2BWorkspace +
 		" && mkdir -p " + defaultE2BWorkspace +
 		" && tar -xf " + workspaceUploadPath + " -C " + defaultE2BWorkspace
+	stopStaleHandsScript = `
+pkill -f -- "$1"
+status=$?
+[ "$status" -eq 0 ] || [ "$status" -eq 1 ]
+`
 	defaultE2BTimeout        = 15 * time.Minute
 	defaultE2BWorkspaceBytes = 256 << 20
 	e2bSetupGeneration       = 1
@@ -130,9 +136,12 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 		// A host crash may leave the prior protocol process alive. Runs are
 		// recovered as interrupted before they can reacquire this workspace, so
 		// it is safe to replace that idle/stale endpoint without retrying a call.
-		_, _, _ = client.run(ctx, sandbox, "/usr/bin/pkill", []string{
-			"-f", "^" + cfg.handsPath + "( |$)",
-		}, "/home/user", nil)
+		pattern := "^" + regexp.QuoteMeta(cfg.handsPath) + "( |$)"
+		if _, _, err := client.run(ctx, sandbox, "/bin/sh", []string{
+			"-c", stopStaleHandsScript, "pons-stop-stale-hands", pattern,
+		}, "/home/user", nil); err != nil {
+			return nil, errors.Join(fmt.Errorf("environment: stop stale E2B hands: %w", err), cleanup())
+		}
 	}
 	remoteArgs := append([]string(nil), args...)
 	remoteArgs = append(remoteArgs, "--workspace", defaultE2BWorkspace)
@@ -167,7 +176,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 		runID = sandbox.ID
 	}
 	p.active[workspace] = runID
-	return &e2bSession{
+	session := &e2bSession{
 		host:              host,
 		client:            client,
 		sandbox:           sandbox,
@@ -177,14 +186,18 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 		runID:             runID,
 		template:          cfg.template,
 		idleTimeout:       cfg.idleTimeout,
+		timeout:           cfg.timeout,
 		maxWorkspaceBytes: cfg.maxWorkspaceBytes,
+		onError:           cfg.onError,
 		metadata: environment.Metadata{
 			Provider:      "e2b",
 			EnvironmentID: sandbox.ID,
 			WorkspacePath: workspace,
 			Network:       network,
 		},
-	}, nil
+	}
+	session.startKeepalive()
+	return session, nil
 }
 
 type e2bConfig struct {
@@ -226,6 +239,8 @@ func (p *Provider) config() (e2bConfig, error) {
 	}
 	if cfg.timeout <= 0 {
 		cfg.timeout = defaultE2BTimeout
+	} else if cfg.timeout < time.Second {
+		cfg.timeout = time.Second
 	}
 	if cfg.idleTimeout <= 0 {
 		cfg.idleTimeout = 10 * time.Minute
@@ -454,8 +469,14 @@ type e2bSession struct {
 	runID             string
 	template          string
 	idleTimeout       time.Duration
+	timeout           time.Duration
 	maxWorkspaceBytes int64
+	onError           func(error)
 	metadata          environment.Metadata
+	keepaliveCancel   context.CancelFunc
+	keepaliveDone     chan struct{}
+	keepaliveMu       sync.Mutex
+	keepaliveErr      error
 	closeOnce         sync.Once
 	closeErr          error
 }
@@ -465,20 +486,95 @@ func (s *e2bSession) Metadata() environment.Metadata      { return s.metadata }
 func (s *e2bSession) Execute(ctx context.Context, action protocol.Action) (protocol.ToolResult, error) {
 	return s.host.Execute(ctx, action)
 }
+
+func (s *e2bSession) startKeepalive() {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.keepaliveCancel = cancel
+	s.keepaliveDone = make(chan struct{})
+	go s.keepalive(ctx)
+}
+
+func (s *e2bSession) keepalive(ctx context.Context) {
+	defer close(s.keepaliveDone)
+	interval := min(s.timeout/3, time.Minute)
+	if interval <= 0 {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			err := s.refreshTimeout(ctx)
+			if ctx.Err() != nil {
+				return
+			}
+			s.keepaliveMu.Lock()
+			s.keepaliveErr = err
+			s.keepaliveMu.Unlock()
+			if err != nil && s.onError != nil {
+				s.onError(err)
+			}
+		}
+	}
+}
+
+func (s *e2bSession) refreshTimeout(ctx context.Context) error {
+	if err := s.client.setSandboxTimeout(ctx, s.sandbox.ID, s.timeout); err != nil {
+		return err
+	}
+	if s.store == nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	if err := s.store.SaveEnvironmentState(ctx, environment.State{
+		Key:               s.workspace,
+		Provider:          "e2b",
+		EnvironmentID:     s.sandbox.ID,
+		Template:          s.template,
+		Network:           s.metadata.Network,
+		WorkspaceStrategy: environment.WorkspaceStrategyArchive,
+		SetupGeneration:   e2bSetupGeneration,
+		Status:            environment.StateActive,
+		RunID:             s.runID,
+		ExpiresAt:         now.Add(s.timeout),
+		UpdatedAt:         now,
+	}); err != nil {
+		return fmt.Errorf("environment: refresh E2B state: %w", err)
+	}
+	return nil
+}
+
+func (s *e2bSession) stopKeepalive() error {
+	if s.keepaliveCancel == nil {
+		return nil
+	}
+	s.keepaliveCancel()
+	<-s.keepaliveDone
+	s.keepaliveMu.Lock()
+	defer s.keepaliveMu.Unlock()
+	return s.keepaliveErr
+}
+
 func (s *e2bSession) Close() error {
 	s.closeOnce.Do(func() {
 		s.closeErr = s.host.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		if _, _, err := s.client.run(ctx, s.sandbox, "/bin/tar", []string{
-			"--hard-dereference", "-cf", workspaceCheckpointPath, "-C", defaultE2BWorkspace, ".",
-		}, "/home/user", nil); err != nil {
-			s.closeErr = errors.Join(s.closeErr, fmt.Errorf("environment: checkpoint E2B workspace: %w", err))
-		} else if body, err := s.client.download(ctx, s.sandbox, workspaceCheckpointPath, s.maxWorkspaceBytes); err != nil {
-			s.closeErr = errors.Join(s.closeErr, err)
-		} else if err := restoreWorkspace(s.workspace, body, s.maxWorkspaceBytes); err != nil {
-			s.closeErr = errors.Join(s.closeErr, err)
+		if s.closeErr == nil {
+			if _, _, err := s.client.run(ctx, s.sandbox, "/bin/tar", []string{
+				"--hard-dereference", "-cf", workspaceCheckpointPath, "-C", defaultE2BWorkspace, ".",
+			}, "/home/user", nil); err != nil {
+				s.closeErr = fmt.Errorf("environment: checkpoint E2B workspace: %w", err)
+			} else if body, err := s.client.download(ctx, s.sandbox, workspaceCheckpointPath, s.maxWorkspaceBytes); err != nil {
+				s.closeErr = err
+			} else if err := restoreWorkspace(s.workspace, body, s.maxWorkspaceBytes); err != nil {
+				s.closeErr = err
+			}
 		}
+		s.closeErr = errors.Join(s.closeErr, s.stopKeepalive())
 		if s.closeErr == nil && s.store != nil {
 			now := time.Now().UTC()
 			idleUntil := now.Add(s.idleTimeout)
