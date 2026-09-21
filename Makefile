@@ -3,8 +3,8 @@ GO_FILES := $(shell find . -type f -name '*.go' -not -path './.git/*' -print)
 # not on PATH (CI pins the action's binary; install locally with
 # `make install-tools`).
 GOLANGCI_LINT ?= $(shell go env GOPATH)/bin/golangci-lint
-GOLANGCI_LINT_VERSION ?= v2.6.0
-LINT_GOTOOLCHAIN ?= go1.25.0
+GOLANGCI_LINT_VERSION ?= v2.13.2
+LINT_GOTOOLCHAIN ?= go1.27.1
 E2B_CLI_VERSION ?= 2.20.0
 
 .PHONY: fmt fmt-check test test-race test-integration test-integration-race test-integration-seatbelt test-integration-e2b vet lint check install-tools smoke-runtime smoke-e2b cleanup-e2b cleanup-e2b-all build-e2b-hands e2b-template

@@ -146,8 +146,7 @@ func (p *Bash) run(ctx context.Context, a protocol.Action) (protocol.ToolResult,
 }
 
 func exitCodeOf(err error) int {
-	var ee *exec.ExitError
-	if errors.As(err, &ee) {
+	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 		return ee.ExitCode()
 	}
 	return 0
