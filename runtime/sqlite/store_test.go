@@ -26,6 +26,47 @@ func TestOpenConfiguresBusyTimeout(t *testing.T) {
 	}
 }
 
+func TestTimeEncodingIsChronologicalAndUsesMicrosecondPrecision(t *testing.T) {
+	earlier := time.Date(2026, time.September, 21, 12, 0, 5, 100_000_001, time.FixedZone("offset", 3600))
+	later := earlier.Add(10 * time.Millisecond)
+	if encodeTime(earlier) >= encodeTime(later) {
+		t.Fatalf("encoded timestamps are not chronological: %v >= %v", encodeTime(earlier), encodeTime(later))
+	}
+	want := earlier.UTC().Truncate(time.Microsecond)
+	if got := decodeTime(encodeTime(earlier)); !got.Equal(want) || got.Location() != time.UTC {
+		t.Fatalf("round trip = %v, want %v UTC", got, want)
+	}
+}
+
+func TestTimestampColumnsUseIntegerStorage(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for table, columns := range map[string][]string{
+		"conversations":          {"created_at"},
+		"messages":               {"created_at"},
+		"submissions":            {"accepted_at"},
+		"runs":                   {"started_at", "completed_at"},
+		"tool_calls":             {"updated_at"},
+		"events":                 {"created_at"},
+		"execution_environments": {"idle_until", "expires_at", "updated_at"},
+	} {
+		for _, column := range columns {
+			var dataType string
+			if err := store.db.QueryRowContext(context.Background(),
+				`SELECT type FROM pragma_table_info(?) WHERE name = ?`, table, column,
+			).Scan(&dataType); err != nil {
+				t.Fatalf("%s.%s: %v", table, column, err)
+			}
+			if dataType != "INTEGER" {
+				t.Fatalf("%s.%s type = %q, want INTEGER", table, column, dataType)
+			}
+		}
+	}
+}
+
 func TestEnvironmentStateRoundTripAndExpiry(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {
@@ -89,6 +130,31 @@ func TestEnvironmentStateRoundTripAndExpiry(t *testing.T) {
 	}
 	if _, err := store.EnvironmentState(ctx, state.Key); !errors.Is(err, environment.ErrStateNotFound) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestExpiredActiveEnvironmentHasNoIdleDeadline(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	state := environment.State{
+		Key: "/workspace", Provider: "e2b", EnvironmentID: "sandbox", Template: "pons-hands",
+		Network: environment.NetworkDisabled, WorkspaceStrategy: environment.WorkspaceStrategyLocalArchive,
+		SetupGeneration: 1, Status: environment.StateActive, LeaseID: "run",
+		ExpiresAt: now.Add(-time.Second), UpdatedAt: now.Add(-time.Minute),
+	}
+	if err := store.SaveEnvironmentState(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	expired, err := store.ExpiredEnvironmentStates(context.Background(), "e2b", now, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(expired) != 1 || !expired[0].IdleUntil.IsZero() {
+		t.Fatalf("expired states = %+v", expired)
 	}
 }
 
