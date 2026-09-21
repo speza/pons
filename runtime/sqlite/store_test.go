@@ -120,6 +120,23 @@ func TestEnvironmentStateRoundTripAndExpiry(t *testing.T) {
 	if err := store.SaveEnvironmentState(ctx, invalidNetwork); err == nil {
 		t.Fatal("invalid network policy was accepted")
 	}
+	activeWithoutRun := state
+	activeWithoutRun.Key, activeWithoutRun.EnvironmentID = "/active-without-run", "active-without-run"
+	activeWithoutRun.Status, activeWithoutRun.IdleUntil = environment.StateActive, time.Time{}
+	if err := store.SaveEnvironmentState(ctx, activeWithoutRun); err == nil {
+		t.Fatal("active environment without run ID was accepted")
+	}
+	idleWithRun := state
+	idleWithRun.Key, idleWithRun.EnvironmentID, idleWithRun.RunID = "/idle-with-run", "idle-with-run", "run"
+	if err := store.SaveEnvironmentState(ctx, idleWithRun); err == nil {
+		t.Fatal("idle environment with run ID was accepted")
+	}
+	idleWithoutDeadline := state
+	idleWithoutDeadline.Key, idleWithoutDeadline.EnvironmentID = "/idle-without-deadline", "idle-without-deadline"
+	idleWithoutDeadline.IdleUntil = time.Time{}
+	if err := store.SaveEnvironmentState(ctx, idleWithoutDeadline); err == nil {
+		t.Fatal("idle environment without deadline was accepted")
+	}
 	duplicate := state
 	duplicate.Key = "/other-workspace"
 	if err := store.SaveEnvironmentState(ctx, duplicate); err == nil {

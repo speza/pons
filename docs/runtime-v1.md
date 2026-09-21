@@ -306,10 +306,12 @@ Domain and store contracts use UTC `time.Time` values normalized to microsecond
 precision. The SQLite adapter stores those instants as integer Unix
 microseconds so indexed ordering and deadline comparisons are numeric; a future
 PostgreSQL adapter should use `TIMESTAMPTZ` behind the same Go contract.
-The runtime database is authoritative. SQLite-specific opening, migration, and
-connection policy are confined to `runtime/sqlite`; the manager only consumes
-the `runtime.Store` contract. Store shutdown belongs to the composing process,
-not the manager.
+The runtime database is authoritative. SQLite-specific opening, schema
+initialization, and connection policy are confined to `runtime/sqlite`; the
+manager only consumes the `runtime.Store` contract. Store shutdown belongs to
+the composing process, not the manager. During the current pre-compatibility
+phase, an existing database with an older schema must be recreated rather than
+migrated.
 
 ## HTTP API
 

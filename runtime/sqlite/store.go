@@ -51,7 +51,7 @@ func Open(stateDir string) (*Store, error) {
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(4)
 	store := &Store{db: db}
-	if err := store.migrate(context.Background()); err != nil {
+	if err := store.initializeSchema(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -62,7 +62,7 @@ func Open(stateDir string) (*Store, error) {
 	return store, nil
 }
 
-func (s *Store) migrate(ctx context.Context) error {
+func (s *Store) initializeSchema(ctx context.Context) error {
 	const schema = `
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
@@ -162,7 +162,12 @@ CREATE TABLE IF NOT EXISTS execution_environments (
   run_id TEXT NOT NULL DEFAULT '',
   idle_until INTEGER,
   expires_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  CHECK (
+    (status = 'active' AND run_id <> '' AND idle_until IS NULL)
+    OR
+    (status = 'idle' AND run_id = '' AND idle_until IS NOT NULL)
+  )
 );
 CREATE INDEX IF NOT EXISTS execution_environments_expiry
   ON execution_environments(provider, status, idle_until);
@@ -172,72 +177,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS execution_environments_provider_id
   ON execution_environments(provider, environment_id);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
-		return fmt.Errorf("runtime: migrate database: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "message_parts", "metadata", "BLOB"); err != nil {
-		return fmt.Errorf("runtime: migrate message part metadata: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "messages", "complete", "BOOLEAN NOT NULL DEFAULT TRUE"); err != nil {
-		return fmt.Errorf("runtime: migrate message completeness: %w", err)
-	}
-	for _, column := range []struct {
-		name       string
-		definition string
-	}{
-		{"network_policy", "TEXT NOT NULL DEFAULT 'disabled'"},
-		{"workspace_strategy", "TEXT NOT NULL DEFAULT 'archive/v1'"},
-		{"workspace_source_ref", "TEXT NOT NULL DEFAULT ''"},
-		{"workspace_revision", "TEXT NOT NULL DEFAULT ''"},
-		{"checkpoint_revision", "TEXT NOT NULL DEFAULT ''"},
-		{"setup_generation", "INTEGER NOT NULL DEFAULT 1"},
-	} {
-		if err := s.ensureColumn(ctx, "execution_environments", column.name, column.definition); err != nil {
-			return fmt.Errorf("runtime: migrate environment %s: %w", column.name, err)
-		}
-	}
-	var invalid int
-	if err := s.db.QueryRowContext(ctx, `
-SELECT COUNT(*) FROM execution_environments
-WHERE status NOT IN ('active', 'idle')
-   OR network_policy NOT IN ('disabled', 'enabled')`).Scan(&invalid); err != nil {
-		return fmt.Errorf("runtime: validate environment lifecycle values: %w", err)
-	}
-	if invalid != 0 {
-		return fmt.Errorf("runtime: %d execution environment rows have invalid lifecycle values", invalid)
-	}
-	const environmentTriggers = `
-CREATE TRIGGER IF NOT EXISTS execution_environments_validate_insert
-BEFORE INSERT ON execution_environments
-WHEN NEW.status NOT IN ('active', 'idle')
-  OR NEW.network_policy NOT IN ('disabled', 'enabled')
-BEGIN
-  SELECT RAISE(ABORT, 'invalid execution environment lifecycle value');
-END;
-CREATE TRIGGER IF NOT EXISTS execution_environments_validate_update
-BEFORE UPDATE OF status, network_policy ON execution_environments
-WHEN NEW.status NOT IN ('active', 'idle')
-  OR NEW.network_policy NOT IN ('disabled', 'enabled')
-BEGIN
-  SELECT RAISE(ABORT, 'invalid execution environment lifecycle value');
-END;
-`
-	if _, err := s.db.ExecContext(ctx, environmentTriggers); err != nil {
-		return fmt.Errorf("runtime: constrain environment lifecycle values: %w", err)
+		return fmt.Errorf("runtime: initialize database: %w", err)
 	}
 	return nil
-}
-
-func (s *Store) ensureColumn(ctx context.Context, table, column, definition string) error {
-	var exists bool
-	query := fmt.Sprintf("SELECT EXISTS(SELECT 1 FROM pragma_table_info('%s') WHERE name = ?)", table)
-	if err := s.db.QueryRowContext(ctx, query, column).Scan(&exists); err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-	_, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition))
-	return err
 }
 
 func (s *Store) Close() error { return s.db.Close() }

@@ -22,8 +22,9 @@ type WorkspaceStrategy string
 
 const WorkspaceStrategyArchive WorkspaceStrategy = "archive/v1"
 
-// State is non-secret durable placement metadata. Provider access tokens and
-// API keys must never be stored here.
+// State is non-secret durable placement metadata. Active states have a RunID
+// and no IdleUntil; idle states have an IdleUntil and no RunID. Provider access
+// tokens and API keys must never be stored here.
 type State struct {
 	Key                string
 	Provider           string
