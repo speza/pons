@@ -28,39 +28,24 @@ var _ environment.CheckpointStore = (*Store)(nil)
 // New configures an archive directory. Directories are created lazily on write.
 func New(dir string) *Store { return &Store{dir: dir} }
 
-func (s *Store) PutWorkspaceCheckpoint(ctx context.Context, workspaceID string, archive []byte) (string, error) {
-	if workspaceID == "" {
-		return "", errors.New("runtime: workspace ID is required")
+func (s *Store) PutWorkspaceCheckpoint(
+	ctx context.Context,
+	workspaceID string,
+	archive io.Reader,
+	limit int64,
+) (string, error) {
+	if workspaceID == "" || archive == nil || limit < 0 || limit == math.MaxInt64 {
+		return "", errors.New("runtime: invalid workspace checkpoint request")
 	}
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	digest := sha256.Sum256(archive)
-	ref := "sha256:" + hex.EncodeToString(digest[:])
 	dir := s.workspaceCheckpointDir(workspaceID)
 	if err := mkdirAllDurable(dir, 0o700); err != nil {
 		return "", fmt.Errorf("runtime: create workspace checkpoint directory: %w", err)
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return "", fmt.Errorf("runtime: secure workspace checkpoint directory: %w", err)
-	}
-	path := filepath.Join(dir, strings.TrimPrefix(ref, "sha256:")+".tar")
-	if _, err := os.Stat(path); err == nil {
-		matches, matchErr := checkpointFileMatches(path, digest)
-		if matchErr != nil {
-			return "", matchErr
-		}
-		if matches {
-			if err := os.Chmod(path, 0o600); err != nil {
-				return "", fmt.Errorf("runtime: secure workspace checkpoint: %w", err)
-			}
-			if err := syncDirectory(dir); err != nil {
-				return "", fmt.Errorf("runtime: sync workspace checkpoint directory: %w", err)
-			}
-			return ref, nil
-		}
-	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("runtime: inspect workspace checkpoint: %w", err)
 	}
 	file, err := os.CreateTemp(dir, ".checkpoint-*")
 	if err != nil {
@@ -72,7 +57,14 @@ func (s *Store) PutWorkspaceCheckpoint(ctx context.Context, workspaceID string, 
 		_ = file.Close()
 		return "", fmt.Errorf("runtime: secure workspace checkpoint: %w", err)
 	}
-	_, writeErr := file.Write(archive)
+	hash := sha256.New()
+	written, writeErr := io.Copy(
+		io.MultiWriter(file, hash),
+		io.LimitReader(&contextReader{ctx: ctx, reader: archive}, limit+1),
+	)
+	if writeErr == nil && written > limit {
+		writeErr = fmt.Errorf("runtime: workspace checkpoint exceeds %d bytes", limit)
+	}
 	syncErr := file.Sync()
 	closeErr := file.Close()
 	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
@@ -81,6 +73,9 @@ func (s *Store) PutWorkspaceCheckpoint(ctx context.Context, workspaceID string, 
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	digest := hash.Sum(nil)
+	ref := "sha256:" + hex.EncodeToString(digest)
+	path := filepath.Join(dir, strings.TrimPrefix(ref, "sha256:")+".tar")
 	if err := os.Rename(temporary, path); err != nil {
 		return "", fmt.Errorf("runtime: install workspace checkpoint: %w", err)
 	}
@@ -90,18 +85,16 @@ func (s *Store) PutWorkspaceCheckpoint(ctx context.Context, workspaceID string, 
 	return ref, nil
 }
 
-func checkpointFileMatches(path string, want [sha256.Size]byte) (bool, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return false, fmt.Errorf("runtime: open existing workspace checkpoint: %w", err)
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
 	}
-	hash := sha256.New()
-	_, copyErr := io.Copy(hash, file)
-	closeErr := file.Close()
-	if err := errors.Join(copyErr, closeErr); err != nil {
-		return false, fmt.Errorf("runtime: verify existing workspace checkpoint: %w", err)
-	}
-	return bytes.Equal(hash.Sum(nil), want[:]), nil
+	return r.reader.Read(buffer)
 }
 
 func mkdirAllDurable(path string, perm os.FileMode) error {
@@ -133,7 +126,7 @@ func (s *Store) WorkspaceCheckpoint(
 	workspaceID string,
 	ref string,
 	limit int64,
-) ([]byte, error) {
+) (io.ReadCloser, error) {
 	if workspaceID == "" || limit < 0 || limit == math.MaxInt64 {
 		return nil, errors.New("runtime: invalid workspace checkpoint request")
 	}
@@ -148,22 +141,35 @@ func (s *Store) WorkspaceCheckpoint(
 	if err != nil {
 		return nil, fmt.Errorf("runtime: open workspace checkpoint: %w", err)
 	}
-	defer file.Close()
-	archive, err := io.ReadAll(io.LimitReader(file, limit+1))
+	failed := true
+	defer func() {
+		if failed {
+			_ = file.Close()
+		}
+	}()
+	info, err := file.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("runtime: read workspace checkpoint: %w", err)
+		return nil, fmt.Errorf("runtime: inspect workspace checkpoint: %w", err)
 	}
-	if int64(len(archive)) > limit {
+	if info.Size() > limit {
 		return nil, fmt.Errorf("runtime: workspace checkpoint exceeds %d bytes", limit)
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	hash := sha256.New()
+	read, err := io.Copy(hash, io.LimitReader(&contextReader{ctx: ctx, reader: file}, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("runtime: verify workspace checkpoint: %w", err)
 	}
-	actual := sha256.Sum256(archive)
-	if !bytes.Equal(actual[:], decoded) {
+	if read != info.Size() {
+		return nil, errors.New("runtime: workspace checkpoint size changed during verification")
+	}
+	if !bytes.Equal(hash.Sum(nil), decoded) {
 		return nil, errors.New("runtime: workspace checkpoint digest mismatch")
 	}
-	return archive, nil
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("runtime: rewind workspace checkpoint: %w", err)
+	}
+	failed = false
+	return file, nil
 }
 
 func (s *Store) PruneWorkspaceCheckpoints(ctx context.Context, workspaceID string, keepRefs []string) error {

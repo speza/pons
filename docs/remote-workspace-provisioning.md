@@ -51,11 +51,20 @@ Checkpoint bytes live outside SQLite behind `environment.CheckpointStore`:
 
 ```go
 type CheckpointStore interface {
-    PutWorkspaceCheckpoint(context.Context, string, []byte) (string, error)
-    WorkspaceCheckpoint(context.Context, string, string, int64) ([]byte, error)
+    PutWorkspaceCheckpoint(context.Context, string, io.Reader, int64) (string, error)
+    WorkspaceCheckpoint(context.Context, string, string, int64) (io.ReadCloser, error)
     PruneWorkspaceCheckpoints(context.Context, string, []string) error
 }
 ```
+
+Both operations enforce an archive byte limit. Writes stream into a private
+temporary file while hashing, then sync and atomically publish it before metadata
+advances. Reads verify size and digest before returning a rewound reader that the
+caller must close. Seeding and envd downloads stage bounded temporary files;
+validation and uploads use readers, without buffering whole archives in memory.
+Validation still extracts into a disposable directory and enforces expanded-size
+and entry-count limits. This trades temporary disk space and extra I/O for bounded
+payload memory; path metadata still scales with the bounded entry count.
 
 The filesystem implementation in `runtime/checkpoint` stores content-addressed
 archives under the runtime state directory. Runtime wiring supplies it separately

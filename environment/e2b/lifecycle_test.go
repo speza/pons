@@ -39,12 +39,12 @@ type checkpointFailureStore struct {
 	fault string
 }
 
-func (s *checkpointFailureStore) PutWorkspaceCheckpoint(ctx context.Context, id string, body []byte) (string, error) {
+func (s *checkpointFailureStore) PutWorkspaceCheckpoint(ctx context.Context, id string, body io.Reader, limit int64) (string, error) {
 	seed := s.workspaceLast.Load() == nil
 	if !seed && s.fault == "checkpoint" {
 		return "", errors.New("checkpoint disk full")
 	}
-	_, err := s.recordingStateStore.PutWorkspaceCheckpoint(ctx, id, body)
+	_, err := s.recordingStateStore.PutWorkspaceCheckpoint(ctx, id, body, limit)
 	if seed {
 		return "seed", err
 	}
@@ -282,8 +282,9 @@ func testSessionCheckpoint(t *testing.T, fault string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer archive.Close()
 	restored := t.TempDir()
-	if err := restoreWorkspace(restored, archive, 1<<20); err != nil {
+	if err := restoreWorkspaceArchive(restored, archive, 1<<20); err != nil {
 		t.Fatal(err)
 	}
 	if body, err := os.ReadFile(filepath.Join(restored, "result")); err != nil || string(body) != "completed edit" {

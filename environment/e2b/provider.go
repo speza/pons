@@ -1,10 +1,10 @@
 package e2b
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -124,7 +124,8 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 		if archiveErr != nil {
 			return nil, errors.Join(archiveErr, cleanup())
 		}
-		if err := client.upload(ctx, sandbox, workspaceUploadPath, bytes.NewReader(archive)); err != nil {
+		uploadErr := client.upload(ctx, sandbox, workspaceUploadPath, archive)
+		if err := errors.Join(uploadErr, archive.Close()); err != nil {
 			return nil, errors.Join(err, cleanup())
 		}
 		if _, _, err := client.run(ctx, sandbox, "/bin/sh", []string{
@@ -361,11 +362,15 @@ func loadOrCreateWorkspace(
 		}
 		return environment.WorkspaceState{}, errors.New("environment: workspace source must be a directory")
 	}
-	archive, err := archiveWorkspace(canonicalSource, limit)
+	archive, err := stageWorkspaceArchive(func(out io.Writer) error {
+		return writeWorkspaceArchive(ctx, out, canonicalSource, limit)
+	})
 	if err != nil {
 		return environment.WorkspaceState{}, err
 	}
-	checkpointRef, err := checkpoints.PutWorkspaceCheckpoint(ctx, workspaceID, archive)
+	defer os.Remove(archive.Name())
+	defer archive.Close()
+	checkpointRef, err := checkpoints.PutWorkspaceCheckpoint(ctx, workspaceID, archive, limit)
 	if err != nil {
 		return environment.WorkspaceState{}, err
 	}
@@ -628,11 +633,14 @@ func (s *e2bSession) refreshTimeout(ctx context.Context) error {
 	return nil
 }
 
-func (s *e2bSession) persistCheckpoint(ctx context.Context, archive []byte) error {
-	if err := validateWorkspaceArchive(archive, s.maxWorkspaceBytes); err != nil {
+func (s *e2bSession) persistCheckpoint(ctx context.Context, archive io.ReadSeeker) error {
+	if err := validateWorkspaceArchive(&contextReader{ctx: ctx, reader: archive}, s.maxWorkspaceBytes); err != nil {
 		return err
 	}
-	checkpointRef, err := s.checkpoints.PutWorkspaceCheckpoint(ctx, s.workspace.ID, archive)
+	if _, err := archive.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	checkpointRef, err := s.checkpoints.PutWorkspaceCheckpoint(ctx, s.workspace.ID, archive, s.maxWorkspaceBytes)
 	if err != nil {
 		return err
 	}
@@ -695,9 +703,13 @@ func (s *e2bSession) Close() error {
 				"--hard-dereference", "-cf", workspaceCheckpointPath, "-C", defaultE2BWorkspace, ".",
 			}, "/home/user", nil); err != nil {
 				s.closeErr = fmt.Errorf("environment: checkpoint E2B workspace: %w", err)
-			} else if body, err := s.client.download(ctx, s.sandbox, workspaceCheckpointPath, s.maxWorkspaceBytes); err != nil {
+			} else if body, err := stageWorkspaceArchive(func(out io.Writer) error {
+				return s.client.download(ctx, s.sandbox, workspaceCheckpointPath, out, s.maxWorkspaceBytes)
+			}); err != nil {
 				s.closeErr = err
 			} else {
+				defer os.Remove(body.Name())
+				defer body.Close()
 				s.closeErr = s.persistCheckpoint(ctx, body)
 			}
 		}

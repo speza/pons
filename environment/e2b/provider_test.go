@@ -377,7 +377,7 @@ func TestSessionCheckpointDoesNotReplaceSourceWorkspace(t *testing.T) {
 		},
 		maxWorkspaceBytes: 1 << 20,
 	}
-	if err := session.persistCheckpoint(context.Background(), archive); err != nil {
+	if err := session.persistCheckpoint(context.Background(), bytes.NewReader(archive)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(source, "result.txt")); !os.IsNotExist(err) {
@@ -549,19 +549,26 @@ func (s *recordingStateStore) SaveWorkspaceState(_ context.Context, state enviro
 	s.workspaceLast.Store(&state)
 	return nil
 }
-func (s *recordingStateStore) PutWorkspaceCheckpoint(_ context.Context, _ string, archive []byte) (string, error) {
+func (s *recordingStateStore) PutWorkspaceCheckpoint(_ context.Context, _ string, archive io.Reader, limit int64) (string, error) {
 	s.checkpointMu.Lock()
 	defer s.checkpointMu.Unlock()
-	s.checkpoint = append([]byte(nil), archive...)
+	body, err := io.ReadAll(io.LimitReader(archive, limit+1))
+	if err != nil {
+		return "", err
+	}
+	if int64(len(body)) > limit {
+		return "", errors.New("checkpoint exceeds limit")
+	}
+	s.checkpoint = body
 	return "checkpoint", nil
 }
-func (s *recordingStateStore) WorkspaceCheckpoint(context.Context, string, string, int64) ([]byte, error) {
+func (s *recordingStateStore) WorkspaceCheckpoint(context.Context, string, string, int64) (io.ReadCloser, error) {
 	s.checkpointMu.Lock()
 	defer s.checkpointMu.Unlock()
 	if s.checkpoint == nil {
 		return nil, environment.ErrStateNotFound
 	}
-	return append([]byte(nil), s.checkpoint...), nil
+	return io.NopCloser(bytes.NewReader(s.checkpoint)), nil
 }
 func (s *recordingStateStore) PruneWorkspaceCheckpoints(_ context.Context, _ string, refs []string) error {
 	retained := strings.Join(refs, ",")

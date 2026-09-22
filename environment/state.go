@@ -3,6 +3,7 @@ package environment
 import (
 	"context"
 	"errors"
+	"io"
 	"time"
 )
 
@@ -72,8 +73,10 @@ type StateStore interface {
 // supplied references. A local filesystem implementation may be replaced by
 // object storage without changing workspace or environment state.
 type CheckpointStore interface {
-	PutWorkspaceCheckpoint(context.Context, string, []byte) (string, error)
-	WorkspaceCheckpoint(context.Context, string, string, int64) ([]byte, error)
+	// Put consumes at most limit+1 bytes and publishes only complete archives.
+	PutWorkspaceCheckpoint(context.Context, string, io.Reader, int64) (string, error)
+	// Get verifies size and integrity before returning. The caller closes the reader.
+	WorkspaceCheckpoint(context.Context, string, string, int64) (io.ReadCloser, error)
 	PruneWorkspaceCheckpoints(context.Context, string, []string) error
 }
 

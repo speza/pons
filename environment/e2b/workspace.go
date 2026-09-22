@@ -2,7 +2,7 @@ package e2b
 
 import (
 	"archive/tar"
-	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -16,11 +16,13 @@ import (
 
 const maxWorkspaceArchiveEntries = 100_000
 
-func archiveWorkspace(workspace string, limit int64) ([]byte, error) {
-	var out bytes.Buffer
+func writeWorkspaceArchive(ctx context.Context, out io.Writer, workspace string, limit int64) error {
 	entries := 0
-	writer := tar.NewWriter(&limitedWriter{writer: &out, remaining: limit})
+	writer := tar.NewWriter(&limitedWriter{writer: &contextWriter{ctx: ctx, writer: out}, remaining: limit})
 	err := filepath.Walk(workspace, func(path string, info os.FileInfo, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -68,9 +70,52 @@ func archiveWorkspace(workspace string, limit int64) ([]byte, error) {
 		err = closeErr
 	}
 	if err != nil {
-		return nil, fmt.Errorf("environment: archive workspace: %w", err)
+		return fmt.Errorf("environment: archive workspace: %w", err)
 	}
-	return out.Bytes(), nil
+	return nil
+}
+
+// stageWorkspaceArchive returns a rewound private file. The caller closes and
+// removes it; failures leave no partial archive behind.
+func stageWorkspaceArchive(write func(io.Writer) error) (*os.File, error) {
+	file, err := os.CreateTemp("", "pons-workspace-*.tar")
+	if err != nil {
+		return nil, err
+	}
+	err = write(file)
+	if err == nil {
+		_, err = file.Seek(0, io.SeekStart)
+	}
+	if err != nil {
+		_ = file.Close()
+		_ = os.Remove(file.Name())
+		return nil, err
+	}
+	return file, nil
+}
+
+type contextWriter struct {
+	ctx    context.Context
+	writer io.Writer
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(data []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(data)
+}
+
+func (w *contextWriter) Write(data []byte) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return w.writer.Write(data)
 }
 
 type limitedWriter struct {
@@ -87,7 +132,7 @@ func (w *limitedWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
-func restoreWorkspace(workspace string, archive []byte, limit int64) error {
+func restoreWorkspaceArchive(workspace string, archive io.Reader, limit int64) error {
 	if limit < 0 {
 		return errors.New("environment: E2B checkpoint limit must not be negative")
 	}
@@ -109,7 +154,7 @@ func restoreWorkspace(workspace string, archive []byte, limit int64) error {
 	rootMode := rootInfo.Mode().Perm()
 	directoryModes := make(map[string]os.FileMode)
 	seen := make(map[string]string)
-	reader := tar.NewReader(bytes.NewReader(archive))
+	reader := tar.NewReader(archive)
 	var total int64
 	entries := 0
 	for {
@@ -228,7 +273,7 @@ func removeWorkspaceTree(root string) error {
 	return os.RemoveAll(root)
 }
 
-func validateWorkspaceArchive(archive []byte, limit int64) error {
+func validateWorkspaceArchive(archive io.Reader, limit int64) error {
 	parent, err := os.MkdirTemp("", "pons-e2b-checkpoint-validation-")
 	if err != nil {
 		return fmt.Errorf("environment: validate E2B checkpoint: %w", err)
@@ -239,7 +284,7 @@ func validateWorkspaceArchive(archive []byte, limit int64) error {
 		return fmt.Errorf("environment: validate E2B checkpoint: %w", err)
 	}
 	defer func() { _ = removeWorkspaceTree(parent) }()
-	return restoreWorkspace(workspace, archive, limit)
+	return restoreWorkspaceArchive(workspace, archive, limit)
 }
 
 func safeCheckpointParent(root, parent string) error {

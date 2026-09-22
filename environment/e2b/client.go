@@ -135,7 +135,8 @@ func (c *e2bClient) killSandbox(ctx context.Context, id string) error {
 }
 
 func (c *e2bClient) upload(ctx context.Context, sandbox e2bSandbox, path string, body io.Reader) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.envdURL+"/files?path="+url.QueryEscape(path), body)
+	// The caller owns the archive; do not let the transport close its file.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.envdURL+"/files?path="+url.QueryEscape(path), struct{ io.Reader }{body})
 	if err != nil {
 		return err
 	}
@@ -152,31 +153,31 @@ func (c *e2bClient) upload(ctx context.Context, sandbox e2bSandbox, path string,
 	return nil
 }
 
-func (c *e2bClient) download(ctx context.Context, sandbox e2bSandbox, path string, limit int64) ([]byte, error) {
+func (c *e2bClient) download(ctx context.Context, sandbox e2bSandbox, path string, out io.Writer, limit int64) error {
 	if limit < 0 || limit == math.MaxInt64 {
-		return nil, errors.New("environment: invalid E2B download limit")
+		return errors.New("environment: invalid E2B download limit")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.envdURL+"/files?path="+url.QueryEscape(path), nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	c.envdHeaders(req, sandbox)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("environment: download E2B workspace: %w", err)
+		return fmt.Errorf("environment: download E2B workspace: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, responseError("download E2B workspace", resp)
+		return responseError("download E2B workspace", resp)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	n, err := io.Copy(out, io.LimitReader(resp.Body, limit+1))
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if int64(len(body)) > limit {
-		return nil, fmt.Errorf("environment: E2B workspace archive exceeds %d bytes", limit)
+	if n > limit {
+		return fmt.Errorf("environment: E2B workspace archive exceeds %d bytes", limit)
 	}
-	return body, nil
+	return nil
 }
 
 func (c *e2bClient) envdHeaders(req *http.Request, sandbox e2bSandbox) {
