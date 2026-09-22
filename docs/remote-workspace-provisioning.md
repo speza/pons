@@ -1,6 +1,7 @@
 # Remote workspace provisioning design
 
-**Status:** `archive/v1` implemented; `git/v1` deferred
+**Status:** `archive/v1`, `git/v1`, and bring-your-own `github_app/v1`
+implemented; App Manifest onboarding deferred
 **Date:** 2026-09-21
 **Related:** ADR-0009, ADR-0015
 
@@ -152,7 +153,7 @@ isolated remote work. An explicit export operation may later materialize a
 checkpoint into a chosen destination; automatic source synchronization is not
 part of the strategy.
 
-## Future strategy: `git/v1`
+## Git strategy: `git/v1`
 
 A Git workspace uses the same logical workspace and placement model:
 
@@ -187,6 +188,51 @@ A first Git implementation may use a pushed commit as its durable checkpoint
 when the tree is clean. Dirty or unpushed state must either be captured by a
 host-owned blob checkpoint or explicitly reported as non-durable.
 
+The implemented initial slice accepts a credential-free HTTPS repository URL
+and a full 40-character SHA-1 commit ID. GitHub repositories use SHA-1 object
+IDs today; SHA-256 repositories are outside this initial contract because their
+object format must be selected when the local repository is initialized. On
+first placement the provider:
+
+```text
+create E2B VM
+  -> initialize an empty Git repository in the workspace
+  -> fetch only the configured immutable commit
+  -> check it out on an independent pons/<workspace>/work branch
+  -> persist a bounded host-owned archive checkpoint
+  -> record the logical workspace
+  -> start fresh pons-hands
+```
+
+Replacement placement still restores the latest archive checkpoint, preserving
+the repository metadata together with dirty and unpushed state. Repository URLs
+containing user information, query parameters, or fragments are rejected so
+credentials cannot enter workspace metadata or checkpoints. The CLI repository
+URL is the initial non-secret `source_ref`; a named repository configuration
+registry can replace that direct identity when authenticated repositories are
+added.
+
+The workspace strategy and source provider are separate axes. `git/v1` remains
+provider-neutral: `environment/gitworkspace` owns plan validation, branch
+identity, transient Git process credentials, and result redaction, while an
+environment adapter such as E2B owns command execution and checkpoint
+transport. A future named repository configuration identifies its source
+provider explicitly, for example:
+
+```json
+{
+  "id": "main-repo",
+  "provider": "github",
+  "owner": "speza",
+  "repository": "pons",
+  "auth": "github_app/v1"
+}
+```
+
+`source_ref` then stores `main-repo`, not the resolved clone URL. Other source
+providers can define their own configuration and authentication kinds without
+changing `git/v1`, workspace persistence, or checkpoint recovery.
+
 ## Agent Git authority
 
 Git remains available through the existing bash tool. Hands may run ordinary
@@ -195,8 +241,9 @@ The credential is therefore an intentional agent capability, not a value that
 can be hidden from unrestricted bash.
 
 Never pass developer credentials, organization-wide tokens, or `E2B_API_KEY`
-to hands. The preferred initial credential is a short-lived GitHub App
-installation token with:
+to hands. The first authenticated source integration is specifically
+`github_app/v1`, which supplies a short-lived GitHub App installation token
+with:
 
 - access to one configured repository;
 - metadata read and contents read/write only;
@@ -205,12 +252,39 @@ installation token with:
 - short expiration; and
 - protected destination branches.
 
+Local pons installations do not depend on a centrally owned Pons GitHub App.
+The implemented first slice accepts a bring-your-own App ID and host-side
+private-key path. The owner installs that App only on selected repositories.
+GitHub's App Manifest flow can later create an app owned by the user or their
+organization and place its returned ID and private key into the local credential
+store, improving interactive setup without changing runtime authentication.
+
+For each run, the local host signs a GitHub App JWT and requests a one-hour
+installation token narrowed to the configured repository and required
+permissions. Only that installation token crosses into the microVM, through
+transient Git process configuration. The App private key never leaves the
+host. The repository may use an SSH remote in the developer's checkout; pons
+uses a derived HTTPS URL in the remote workspace and does not forward SSH keys
+or an SSH agent.
+
+The installation token is delegated authority available to unrestricted hands;
+an agent can inspect, transform, or write any credential it is able to use.
+Pons itself does not place the token in URLs, files, durable state, checkpoints,
+or sandbox-wide configuration. Exact token and Authorization-header values in
+tool results are redacted before host persistence to reduce accidental leakage,
+but redaction is not a security boundary against deliberate encoding. Tokens
+are not refreshed within a run: authenticated Git operations stop working when
+the token expires, normally after one hour, and the next run mints a new token.
+
 A stronger later design can exchange E2B workload identity through a trusted
 credential broker. Credential helpers reduce accidental persistence but do not
 hide authority from hands.
 
-Credentials and credential references must not appear in SQLite, repository
-URLs, workspace archives, transcripts, logs, tool results, or templates.
+Pons-managed credential plumbing must not place credentials or credential
+references in SQLite, repository URLs, workspace archives, logs, or templates.
+Exact delegated token values are redacted from tool results and transcripts as
+an accidental-leak safeguard, subject to the unrestricted-hands limitation
+above.
 
 ## Provider contract
 
@@ -234,8 +308,8 @@ configuration stays on the provider. Modal, Kubernetes, and E2B can share the
 same workspace metadata and checkpoint contracts while implementing placement
 differently.
 
-When `git/v1` is implemented, add an explicit non-secret workspace plan rather
-than overloading `WorkspacePath` with repository configuration.
+`git/v1` uses an explicit non-secret workspace plan rather than overloading
+`WorkspacePath` with repository configuration.
 
 ## Network and credentials
 
@@ -262,9 +336,11 @@ control-plane credentials remain host-only.
 1. Keep `archive/v1` checkpoints bounded, validated, and content-addressed.
 2. Add explicit checkpoint export and logical workspace deletion policy.
 3. Add an S3-compatible `CheckpointStore` when multi-host durability is needed.
-4. Add non-secret Git workspace plans and in-VM clone.
-5. Add short-lived repository-scoped Git credentials.
-6. Define durable handling for dirty and unpushed Git state.
+4. Add a named repository configuration registry with an explicit source
+   provider.
+5. Add user-owned App Manifest setup for the implemented `github_app/v1`
+   credentials.
+6. Refine publication policy for dirty and unpushed Git state.
 7. Add branch-policy, credential-leakage, expiry, and conflicting-push tests.
 
 Live provider and Git tests remain opt-in and credential-dependent.

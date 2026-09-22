@@ -23,7 +23,10 @@ const (
 // WorkspaceStrategy identifies versioned workspace provisioning behavior.
 type WorkspaceStrategy string
 
-const WorkspaceStrategyArchive WorkspaceStrategy = "archive/v1"
+const (
+	WorkspaceStrategyArchive WorkspaceStrategy = "archive/v1"
+	WorkspaceStrategyGit     WorkspaceStrategy = "git/v1"
+)
 
 // WorkspaceState is durable logical workspace metadata. It survives the loss
 // or deletion of any execution environment. SourceRef and CheckpointRef never

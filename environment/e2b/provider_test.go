@@ -21,8 +21,16 @@ import (
 	"time"
 
 	"github.com/samperrin/pons/environment"
+	"github.com/samperrin/pons/environment/gitworkspace"
 	"github.com/samperrin/pons/plugins/external"
+	checkpointstore "github.com/samperrin/pons/runtime/checkpoint"
 )
+
+type gitCredentialSourceFunc func(context.Context, string) (gitworkspace.Credentials, error)
+
+func (f gitCredentialSourceFunc) RepositoryCredentials(ctx context.Context, repository string) (gitworkspace.Credentials, error) {
+	return f(ctx, repository)
+}
 
 func TestE2BConfigUsesRestrictiveDefaults(t *testing.T) {
 	t.Setenv("E2B_API_KEY", "test-key")
@@ -73,6 +81,53 @@ func TestInvalidEnvironmentDoesNotExposeValue(t *testing.T) {
 	}
 }
 
+func TestValidateE2BGitWorkspaceRequiresNetwork(t *testing.T) {
+	spec := environment.Spec{
+		WorkspaceID: "workspace", WorkspacePath: t.TempDir(), Command: []string{defaultE2BHandsPath},
+		Network: environment.NetworkDisabled,
+		WorkspacePlan: environment.WorkspacePlan{
+			Strategy:     environment.WorkspaceStrategyGit,
+			SourceRef:    "https://github.com/example/project.git",
+			BaseRevision: strings.Repeat("a", 40),
+		},
+	}
+	if _, _, _, _, err := validateE2BSpec(spec); err == nil || !strings.Contains(err.Error(), "requires network access") {
+		t.Fatalf("network-disabled Git plan error = %v", err)
+	}
+}
+
+func TestE2BGitWorkspaceGetsCredentialsBeforeCreatingSandbox(t *testing.T) {
+	wantErr := errors.New("token unavailable")
+	var gotRepository string
+	store := &recordingStateStore{}
+	provider := &Provider{
+		APIKey: "key", CleanupInterval: time.Hour,
+		GitCredentials: gitCredentialSourceFunc(func(_ context.Context, repository string) (gitworkspace.Credentials, error) {
+			gotRepository = repository
+			return gitworkspace.Credentials{}, wantErr
+		}),
+	}
+	if err := provider.SetStores(store, store); err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close()
+	repository := "https://github.com/acme/widgets.git"
+	_, err := provider.Start(context.Background(), environment.Spec{
+		WorkspaceID: "workspace", WorkspacePath: t.TempDir(), RunID: "run",
+		Command: []string{defaultE2BHandsPath}, Network: environment.NetworkEnabled,
+		WorkspacePlan: environment.WorkspacePlan{
+			Strategy: environment.WorkspaceStrategyGit, SourceRef: repository,
+			BaseRevision: strings.Repeat("a", 40),
+		},
+	})
+	if !errors.Is(err, wantErr) || gotRepository != repository {
+		t.Fatalf("Start error = %v, repository = %q", err, gotRepository)
+	}
+	if store.environmentSaves.Load() != 0 {
+		t.Fatal("sandbox state was saved before GitHub authentication succeeded")
+	}
+}
+
 func TestConnectSandboxAcceptsBoundedSuccessResponses(t *testing.T) {
 	for _, status := range []int{http.StatusOK, http.StatusCreated} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
@@ -107,19 +162,89 @@ func TestArchiveWorkspaceUsesSourceOnlyForInitialSeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := &recordingStateStore{}
-	first, err := loadOrCreateWorkspace(context.Background(), store, store, "workspace", source, 1<<20, nil)
+	first, err := loadOrCreateWorkspace(
+		context.Background(), store, store, "workspace", source, environment.WorkspacePlan{}, 1<<20, nil,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.RemoveAll(source); err != nil {
 		t.Fatal(err)
 	}
-	second, err := loadOrCreateWorkspace(context.Background(), store, store, "workspace", source, 1<<20, nil)
+	second, err := loadOrCreateWorkspace(
+		context.Background(), store, store, "workspace", source, environment.WorkspacePlan{}, 1<<20, nil,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if second.CheckpointRef != first.CheckpointRef || second.SourceRef != first.SourceRef {
 		t.Fatalf("workspace changed after source removal: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestProvisionGitWorkspaceUsesImmutableRevisionAndPersistsCheckpoint(t *testing.T) {
+	remote := t.TempDir()
+	if err := os.Mkdir(filepath.Join(remote, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(remote, ".git", "HEAD"), []byte("ref: refs/heads/pons/work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	archive, err := archiveWorkspace(remote, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var commands []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/process.Process/Start":
+			body, _ := io.ReadAll(r.Body)
+			var request struct {
+				Process struct {
+					Cmd  string
+					Args []string
+				}
+			}
+			if len(body) < 5 || json.Unmarshal(body[5:], &request) != nil {
+				t.Error("invalid process frame")
+				return
+			}
+			commands = append(commands, strings.Join(append([]string{request.Process.Cmd}, request.Process.Args...), " "))
+			w.Header().Set("Content-Type", "application/connect+json")
+			_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"end": map[string]string{"status": "exit status 0"}}})
+		case r.URL.Path == "/files" && r.Method == http.MethodGet:
+			_, _ = w.Write(archive)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	store := &recordingStateStore{}
+	revision := strings.Repeat("b", 40)
+	state, err := provisionGitWorkspace(
+		context.Background(),
+		&e2bClient{envdURL: server.URL, http: server.Client()},
+		e2bSandbox{ID: "sandbox", AccessToken: "access"},
+		store,
+		store,
+		environment.WorkspaceState{
+			ID: "workspace", Strategy: environment.WorkspaceStrategyGit,
+			SourceRef: "https://github.com/example/project.git", BaseRevision: revision,
+		},
+		nil,
+		1<<20,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(commands, "\n")
+	if !strings.Contains(joined, "git -C "+defaultE2BWorkspace+" fetch --depth=1 --no-tags origin "+revision) ||
+		!strings.Contains(joined, "git -C "+defaultE2BWorkspace+" checkout -b "+gitworkspace.BranchName("workspace")+" FETCH_HEAD") {
+		t.Fatalf("Git commands:\n%s", joined)
+	}
+	if state.CheckpointRef != "checkpoint" || store.workspaceLast.Load().CheckpointRef != "checkpoint" {
+		t.Fatalf("workspace state = %+v, stored = %+v", state, store.workspaceLast.Load())
 	}
 }
 
@@ -391,6 +516,72 @@ func TestSessionCheckpointDoesNotReplaceSourceWorkspace(t *testing.T) {
 	}
 	if pruned := store.prunedCheckpointRefs.Load(); pruned == nil || *pruned != "base,checkpoint" {
 		t.Fatalf("retained checkpoint refs = %v", pruned)
+	}
+}
+
+func TestGitCheckpointPruningKeepsOnlyLatestArchive(t *testing.T) {
+	ctx := context.Background()
+	checkpoints := checkpointstore.New(t.TempDir())
+	metadata := &recordingStateStore{}
+	workspaceID := "git-workspace"
+	putArchive := func(contents string) string {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "contents.txt"), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		archive, err := archiveWorkspace(dir, 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref, err := checkpoints.PutWorkspaceCheckpoint(ctx, workspaceID, bytes.NewReader(archive), 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ref
+	}
+	initialRef := putArchive("initial")
+	session := &e2bSession{
+		store: metadata, checkpoints: checkpoints,
+		workspace: environment.WorkspaceState{
+			ID: workspaceID, Strategy: environment.WorkspaceStrategyGit,
+			BaseRevision: strings.Repeat("a", 40), CheckpointRef: initialRef,
+		},
+		maxWorkspaceBytes: 1 << 20,
+		onError: func(err error) {
+			t.Errorf("checkpoint pruning: %v", err)
+		},
+	}
+	var refs []string
+	for _, contents := range []string{"first run", "second run"} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "contents.txt"), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		archive, err := archiveWorkspace(dir, 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := session.persistCheckpoint(ctx, bytes.NewReader(archive)); err != nil {
+			t.Fatal(err)
+		}
+		refs = append(refs, session.workspace.CheckpointRef)
+	}
+	for _, ref := range []string{initialRef, refs[0]} {
+		reader, err := checkpoints.WorkspaceCheckpoint(ctx, workspaceID, ref, 1<<20)
+		if reader != nil {
+			_ = reader.Close()
+		}
+		if !errors.Is(err, environment.ErrStateNotFound) {
+			t.Fatalf("superseded checkpoint %q remains: %v", ref, err)
+		}
+	}
+	reader, err := checkpoints.WorkspaceCheckpoint(ctx, workspaceID, refs[1], 1<<20)
+	if err != nil {
+		t.Fatalf("latest checkpoint: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

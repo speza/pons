@@ -128,6 +128,49 @@ go run ./cmd/pons -provider codex -sandbox e2b \
   -message "inspect this project"
 ```
 
+To create a new remote workspace from a public Git repository instead of
+archiving the local workspace, supply its credential-free HTTPS URL and a full
+immutable commit ID:
+
+```sh
+go run ./cmd/pons -provider codex -sandbox e2b \
+  -git-repository https://github.com/OWNER/REPOSITORY.git \
+  -git-revision COMMIT_SHA \
+  -message "inspect this project"
+```
+
+Git provisioning enables sandbox networking and checks out the commit on an
+independent `pons/<workspace>/work` branch before hands starts. Subsequent Git
+commands use the existing bash tool.
+
+For a private GitHub repository, create a deployment-owned GitHub App with
+Metadata read and Contents read/write permissions, install it on the repository,
+and provide its ID and private key. The key must be readable only by its owner:
+
+```sh
+chmod 600 /secure/pons-github-app.pem
+go run ./cmd/pons -provider codex -sandbox e2b \
+  -git-repository https://github.com/OWNER/REPOSITORY.git \
+  -git-revision COMMIT_SHA \
+  -github-app-id APP_ID \
+  -github-app-private-key /secure/pons-github-app.pem \
+  -message "inspect this project"
+```
+
+Pons discovers the repository installation and mints a one-hour token narrowed
+to that repository for each run. The App private key stays on the host; the
+token is deliberately delegated to unrestricted hands through its process
+environment, so the agent can use, inspect, or copy it. Pons does not itself
+write the token to the remote URL, Git configuration, workspace, checkpoint,
+or sandbox-wide environment, and exact token values in tool results are
+redacted before host persistence as an accidental-leak safeguard. This cannot
+prevent an agent from transforming or deliberately persisting its authority.
+The token is not refreshed during a run, so authenticated Git operations fail
+after it expires (normally one hour); the next run receives a new token. This
+`github_app/v1` authentication is separate from generic `git/v1` provisioning.
+Pons does not depend on a centrally controlled shared App or forward SSH
+credentials.
+
 To remove retained pons sandboxes manually, run `make cleanup-e2b`; use
 `./scripts/cleanup-e2b.sh --dry-run` to inspect matches first. The default is
 scoped to the `pons-hands` template; `make cleanup-e2b-all` explicitly targets
@@ -141,8 +184,10 @@ metadata and sandbox placement are persisted separately in SQLite, so a
 workspace survives sandbox deletion and can be restored in a new VM. The state
 directory must remain outside the source workspace; pons rejects unsafe nested
 configuration. The immutable base and latest checkpoint are retained while
-superseded intermediate checkpoints are pruned. Idle sandboxes are deleted
-after `-sandbox-idle-timeout` (10 minutes by default).
+superseded intermediate checkpoints are pruned for archive workspaces; Git
+workspaces retain only the latest full checkpoint because their immutable base
+is a Git object ID, not a checkpoint reference. Idle sandboxes are deleted after
+`-sandbox-idle-timeout` (10 minutes by default).
 If hands stops cleanly but checkpointing fails, the sandbox is quarantined for
 manual recovery for one hour, not deleted immediately. The error includes its
 ID and deadline. New runs for that workspace are blocked during that window;
@@ -165,7 +210,8 @@ discovered implicitly. Example providers are in
 Useful flags include `-workspace`, `-state-dir`, `-max-turns`,
 `-compact-chars`, repeatable `-plugin`, `-plugin-path`, `-sandbox`,
 `-hands-command`, `-e2b-template`, `-e2b-hands-path`,
-`-sandbox-idle-timeout`, `-fallback`, and `-debug`.
+`-git-repository`, `-git-revision`, `-github-app-id`,
+`-github-app-private-key`, `-sandbox-idle-timeout`, `-fallback`, and `-debug`.
 
 ## Configuration
 

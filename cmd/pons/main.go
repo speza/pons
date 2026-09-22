@@ -64,6 +64,10 @@ func main() {
 	handsCommand := flag.String("hands-command", "", "local pons-hands executable used by Seatbelt (default: find pons-hands on PATH)")
 	e2bTemplate := flag.String("e2b-template", "", `E2B template containing pons-hands (default: "pons-hands")`)
 	e2bHandsPath := flag.String("e2b-hands-path", "", "absolute pons-hands path inside the E2B template (default: /usr/local/bin/pons-hands)")
+	gitRepository := flag.String("git-repository", "", "credential-free HTTPS repository to clone into a new E2B workspace")
+	gitRevision := flag.String("git-revision", "", "full immutable commit ID to check out in a new E2B Git workspace")
+	githubAppID := flag.Int64("github-app-id", 0, "deployment-owned GitHub App ID for private repository access")
+	githubAppPrivateKey := flag.String("github-app-private-key", "", "host path to the GitHub App private key PEM")
 	sandboxIdleTimeout := flag.Duration("sandbox-idle-timeout", 10*time.Minute, "idle time before a retained remote sandbox is deleted")
 	runtimeAddress := flag.String("addr", "127.0.0.1:7337", "runtime server listen address (serve mode; loopback only)")
 	serverURL := flag.String("server", "http://127.0.0.1:7337", "runtime server URL (client mode)")
@@ -179,6 +183,8 @@ func main() {
 		FSReadBytes: *fsReadBytes, BashTimeout: *bashTimeout, BashMaxLines: *bashMaxLines, BashMaxBytes: *bashMaxBytes,
 		PluginPaths: pluginPaths, PluginPath: *pluginPath, PluginMaxResultBytes: *pluginMaxResultBytes, Debug: *debug,
 		Sandbox: *sandbox, E2BTemplate: *e2bTemplate, E2BHandsPath: *e2bHandsPath,
+		GitRepository: *gitRepository, GitRevision: *gitRevision,
+		GitHubAppID: *githubAppID, GitHubAppPrivateKey: *githubAppPrivateKey,
 		SandboxIdleTimeout: *sandboxIdleTimeout,
 		EnvironmentError: func(err error) {
 			logger.Printf("environment: %v", err)

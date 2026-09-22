@@ -134,7 +134,8 @@ The E2B adapter does this:
 2. Reconnect the workspace's sandbox, or create one from a pinned pons-hands template.
 3. Request allow_internet_access=false unless policy explicitly enables it.
 4. Pass only explicit environment values; keep the E2B API key on the host.
-5. Upload the latest durable checkpoint, or seed a new logical workspace once.
+5. Upload the latest durable checkpoint, seed a new archive workspace once, or
+   clone the configured immutable Git revision in the VM.
 6. Start pons-hands through authenticated envd process APIs.
 7. Adapt envd stdin/stdout to the existing host hands session.
 8. Execute protocol actions and return ToolResults.

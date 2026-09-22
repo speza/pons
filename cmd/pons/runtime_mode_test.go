@@ -354,6 +354,72 @@ func TestExecutionEnvironmentConfiguresE2B(t *testing.T) {
 	}
 }
 
+func TestExecutionEnvironmentConfiguresGitWorkspace(t *testing.T) {
+	revision := strings.Repeat("a", 40)
+	_, spec, err := executionEnvironment("e2b", "", false, serverOptions{
+		GitRepository: "https://github.com/example/project.git",
+		GitRevision:   revision,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Network != environment.NetworkEnabled ||
+		spec.WorkspacePlan.Strategy != environment.WorkspaceStrategyGit ||
+		spec.WorkspacePlan.SourceRef != "https://github.com/example/project.git" ||
+		spec.WorkspacePlan.BaseRevision != revision {
+		t.Fatalf("spec = %+v", spec)
+	}
+}
+
+func TestExecutionEnvironmentRequiresCompleteE2BGitConfiguration(t *testing.T) {
+	_, _, err := executionEnvironment("e2b", "", false, serverOptions{
+		GitRepository: "https://github.com/example/project.git",
+	})
+	if err == nil || !strings.Contains(err.Error(), "must be set together") {
+		t.Fatalf("incomplete configuration error = %v", err)
+	}
+	_, _, err = executionEnvironment("seatbelt", "/bin/sh", false, serverOptions{
+		GitRepository: "https://github.com/example/project.git",
+		GitRevision:   strings.Repeat("a", 40),
+	})
+	if err == nil || !strings.Contains(err.Error(), "require --sandbox e2b") {
+		t.Fatalf("seatbelt Git configuration error = %v", err)
+	}
+}
+
+func TestExecutionEnvironmentRequiresCompleteGitHubAppConfiguration(t *testing.T) {
+	_, _, err := executionEnvironment("e2b", "", false, serverOptions{
+		GitRepository: "https://github.com/example/project.git",
+		GitRevision:   strings.Repeat("a", 40),
+		GitHubAppID:   1234,
+	})
+	if err == nil || !strings.Contains(err.Error(), "private key path is required") {
+		t.Fatalf("incomplete GitHub App configuration error = %v", err)
+	}
+	_, _, err = executionEnvironment("e2b", "", false, serverOptions{
+		GitHubAppID: 1234, GitHubAppPrivateKey: "/private/key.pem",
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires --git-repository") {
+		t.Fatalf("repository-less GitHub App configuration error = %v", err)
+	}
+	for name, test := range map[string]struct {
+		backend      string
+		handsCommand string
+	}{
+		"no sandbox": {},
+		"Seatbelt":   {backend: "seatbelt", handsCommand: "/bin/sh"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := executionEnvironment(test.backend, test.handsCommand, false, serverOptions{
+				GitHubAppID: 1234,
+			})
+			if err == nil {
+				t.Fatal("GitHub App option was silently ignored")
+			}
+		})
+	}
+}
+
 func TestExecutionEnvironmentRejectsNegativeSandboxIdleTimeout(t *testing.T) {
 	_, _, err := executionEnvironment("e2b", "", false, serverOptions{SandboxIdleTimeout: -time.Second})
 	if err == nil || !strings.Contains(err.Error(), "must not be negative") {
