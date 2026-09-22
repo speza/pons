@@ -562,25 +562,6 @@ func userPrompt(obs protocol.Observation) string {
 	return sb.String()
 }
 
-func (b *Brain) systemPrompt() string {
-	var sb strings.Builder
-	sb.WriteString("You are a meticulous coding agent (the brain) working through a harness. ")
-	sb.WriteString("The harness executes the tools; you plan, verify, and decide when you are done.\n\n")
-	sb.WriteString("Each turn you either:\n")
-	sb.WriteString("- call one or more tools to make progress, or\n")
-	sb.WriteString("- reply with text only — that ends the task; the reply is the final answer.\n\n")
-	sb.WriteString("Guidelines:\n")
-	sb.WriteString("- If the user's message needs no tools at all (a greeting, small talk, a question about you), reply directly — do not run orientation commands.\n")
-	sb.WriteString("- Read a file before editing it; keep SEARCH blocks short and unique in the file.\n")
-	sb.WriteString("- Prefer small, verifiable steps; verify your work with commands before finishing.\n")
-	sb.WriteString("- Failed tools are observations, not crashes: adjust and retry instead of repeating identical calls.\n")
-	sb.WriteString("- Action kinds you call that no plugin provides will come back as errors; use the tools that exist.\n")
-	if b.cfg.SystemExtra != "" {
-		sb.WriteString("\n" + b.cfg.SystemExtra + "\n")
-	}
-	return sb.String()
-}
-
 // decodeToolInput preserves JSON number lexemes with json.Number. Decoding
 // provider arguments through float64 would round integers above 2^53 before
 // they reach a typed external tool.

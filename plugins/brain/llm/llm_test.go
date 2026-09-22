@@ -19,10 +19,34 @@ func TestToolInputPreservesLargeInteger(t *testing.T) {
 	}
 }
 
-func TestSystemPromptDoesNotAdvertiseLegacyTranscript(t *testing.T) {
+func TestSystemPromptContract(t *testing.T) {
 	b := &Brain{}
-	if prompt := b.systemPrompt(); strings.Contains(prompt, "PONS_SESSION_FILE") || strings.Contains(prompt, "NDJSON") {
-		t.Fatalf("legacy transcript leaked into system prompt: %q", prompt)
+	prompt := b.systemPrompt()
+	for _, want := range []string{
+		"The available tool schemas are the complete capability set for this run.",
+		"Calls in the same turn may run concurrently",
+		"A text-only response ends the task and becomes the final answer.",
+		"Treat user reports and proposed causes as claims to verify",
+		"Preserve unrelated work already present in the workspace",
+		"Never claim a check passed unless its result was observed.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("system prompt missing %q", want)
+		}
+	}
+	for _, legacy := range []string{"PONS_SESSION_FILE", "NDJSON"} {
+		if strings.Contains(prompt, legacy) {
+			t.Errorf("legacy transcript term %q leaked into system prompt", legacy)
+		}
+	}
+}
+
+func TestSystemPromptFramesAdditionalInstructions(t *testing.T) {
+	b := &Brain{cfg: Config{SystemExtra: "Prefer table-driven tests."}}
+	prompt := b.systemPrompt()
+	want := "<additional_instructions>\nPrefer table-driven tests.\n</additional_instructions>\n"
+	if !strings.HasSuffix(prompt, want) {
+		t.Fatalf("additional instructions not framed at end of system prompt:\n%s", prompt)
 	}
 }
 
