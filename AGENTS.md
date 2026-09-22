@@ -37,6 +37,9 @@ to the default suite.
 - Keep `gofmt` authoritative, but manually expand dense composite literals,
   function calls, and signatures across lines when a one-line form obscures
   their structure. Do not enforce a mechanical line-length limit.
+- Within functions, use blank lines to separate logical steps, such as
+  validation, setup, and execution. Keep closely related statements together;
+  do not add a blank line after every condition or assignment.
 - Prefer standard-library APIs supported by the module's Go version.
 - Treat `go vet`, `staticcheck`, and `modernize` diagnostics as actionable;
   use a narrowly documented exclusion when a wire-format or public-contract
