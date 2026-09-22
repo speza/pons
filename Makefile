@@ -3,10 +3,11 @@ GO_FILES := $(shell find . -type f -name '*.go' -not -path './.git/*' -print)
 # not on PATH (CI pins the action's binary; install locally with
 # `make install-tools`).
 GOLANGCI_LINT ?= $(shell go env GOPATH)/bin/golangci-lint
-GOLANGCI_LINT_VERSION ?= v2.6.0
-LINT_GOTOOLCHAIN ?= go1.25.0
+GOLANGCI_LINT_VERSION ?= v2.13.2
+LINT_GOTOOLCHAIN ?= go1.27.1
+E2B_CLI_VERSION ?= 2.20.0
 
-.PHONY: fmt fmt-check test test-race test-integration test-integration-race test-integration-seatbelt vet lint check install-tools smoke-runtime
+.PHONY: fmt fmt-check test test-race test-integration test-integration-race test-integration-seatbelt test-integration-e2b vet lint check install-tools smoke-runtime smoke-e2b cleanup-e2b cleanup-e2b-all build-e2b-hands e2b-template
 
 fmt:
 	@if [ -n "$(GO_FILES)" ]; then gofmt -w $(GO_FILES); fi
@@ -36,6 +37,10 @@ test-integration-seatbelt:
 	@if [ "$$(uname -s)" != "Darwin" ]; then echo "Seatbelt integration test requires macOS"; exit 0; fi
 	PONS_SEATBELT_TEST=1 go test -tags integration -count=1 ./integration -run TestRuntimeBlackBoxSeatbelt
 
+test-integration-e2b:
+	@test -n "$$E2B_API_KEY" || (echo "E2B_API_KEY is required"; exit 1)
+	PONS_E2B_TEST=1 go test -tags integration -count=1 -run '^TestE2BWorkspaceCheckpointRecovery$$' ./environment/e2b
+
 vet:
 	go vet ./...
 
@@ -49,3 +54,20 @@ check: fmt-check test vet lint
 
 smoke-runtime:
 	./scripts/smoke-runtime.sh
+
+smoke-e2b:
+	./scripts/smoke-e2b.sh
+
+cleanup-e2b:
+	./scripts/cleanup-e2b.sh
+
+cleanup-e2b-all:
+	./scripts/cleanup-e2b.sh --all
+
+build-e2b-hands:
+	@mkdir -p .build
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o .build/pons-hands-linux-amd64 ./cmd/pons-hands
+
+e2b-template: build-e2b-hands
+	@test -n "$$E2B_API_KEY" || (echo "E2B_API_KEY is required"; exit 1)
+	npx --yes @e2b/cli@$(E2B_CLI_VERSION) template create pons-hands --dockerfile e2b.Dockerfile

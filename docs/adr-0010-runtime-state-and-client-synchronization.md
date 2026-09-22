@@ -235,8 +235,9 @@ snapshot. The server now uses the transactional runtime store exclusively.
   transaction.
 - Reconnecting clients get a coherent snapshot plus lossless durable catch-up.
 - Token streaming remains low-latency and disposable.
-- The shipped server gains a SQLite dependency and schema migrations. A future
-  database adapter can replace it behind `runtime.Store`.
+- The shipped server gains a SQLite dependency. During the pre-compatibility
+  phase it initializes only the current schema, so older databases must be
+  recreated. A future database adapter can replace it behind `runtime.Store`.
 - Materialized state and the event outbox have explicit retention and ownership
   rules instead of acting as overlapping sources of truth.
 

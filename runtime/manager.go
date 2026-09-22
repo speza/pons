@@ -77,7 +77,11 @@ func (m *Manager) CreateConversation(ctx context.Context) (Conversation, error) 
 	if err := m.checkOpen(); err != nil {
 		return Conversation{}, err
 	}
-	value := Conversation{ID: NewID(), Workspace: m.cfg.Workspace, CreatedAt: time.Now().UTC()}
+	value := Conversation{
+		ID:        NewID(),
+		Workspace: m.cfg.Workspace,
+		CreatedAt: time.Now().UTC().Truncate(time.Microsecond),
+	}
 	if err := m.store.CreateConversation(ctx, value); err != nil {
 		return Conversation{}, err
 	}

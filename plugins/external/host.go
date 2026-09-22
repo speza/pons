@@ -141,16 +141,32 @@ type rpcResponse struct {
 	err      error
 }
 
-// Host is one persistent plugin child and its JSON-RPC connection.  It is
-// safe for multiple tool calls to Execute concurrently.
-type Host struct {
-	manifest Manifest
-	cfg      HostConfig
+// Connection is a running tool-provider byte stream. Environment providers
+// use it to attach the existing protocol host to endpoints which are not local
+// child processes. Wait must unblock after Kill.
+type Connection struct {
+	Stdin  io.WriteCloser
+	Stdout io.ReadCloser
+	Stderr io.ReadCloser
+	Wait   func() error
+	Kill   func() error
+}
 
-	cmd    *exec.Cmd
+// Connector establishes one tool-provider connection.
+type Connector func(context.Context) (Connection, error)
+
+// Host is one persistent plugin child or remote connection and its JSON-RPC
+// protocol state. It is safe for multiple tool calls to Execute concurrently.
+type Host struct {
+	manifest  Manifest
+	cfg       HostConfig
+	connector Connector
+
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
 	stderr io.ReadCloser
+	wait   func() error
+	kill   func() error
 
 	writeMu sync.Mutex
 	mu      sync.Mutex
@@ -164,6 +180,7 @@ type Host struct {
 
 	processDone     chan struct{}
 	processDoneOnce sync.Once
+	waitErr         error
 	readerDone      chan struct{}
 	stderrDone      chan struct{}
 	startMu         sync.Mutex
@@ -180,6 +197,20 @@ type Host struct {
 // NewHost constructs a host. It does not execute the manifest until Start or
 // the first Setup call through Plugin.
 func NewHost(manifest Manifest, cfg HostConfig) (*Host, error) {
+	return newHost(manifest, cfg, nil)
+}
+
+// NewConnectionHost constructs a host whose transport is supplied by an
+// environment provider rather than an exec.Cmd. The protocol, validation,
+// limits, cancellation, and result normalization remain identical.
+func NewConnectionHost(manifest Manifest, cfg HostConfig, connector Connector) (*Host, error) {
+	if connector == nil {
+		return nil, errors.New("external: nil connector")
+	}
+	return newHost(manifest, cfg, connector)
+}
+
+func newHost(manifest Manifest, cfg HostConfig, connector Connector) (*Host, error) {
 	if err := manifest.Validate(); err != nil {
 		return nil, fmt.Errorf("external: %w", err)
 	}
@@ -199,6 +230,7 @@ func NewHost(manifest Manifest, cfg HostConfig) (*Host, error) {
 	return &Host{
 		manifest:    manifest,
 		cfg:         cfg,
+		connector:   connector,
 		pending:     make(map[string]*pendingCall),
 		failed:      make(chan struct{}),
 		processDone: make(chan struct{}),
@@ -247,43 +279,17 @@ func (h *Host) Start(ctx context.Context) error {
 	h.started = true
 	h.mu.Unlock()
 
-	cmd := exec.Command(h.manifest.ResolvedEntrypoint(), h.manifest.Args...)
-	setProcessGroup(cmd)
-	cmd.Dir = h.cfg.WorkingDirectory
-	if cmd.Dir == "" {
-		cmd.Dir = h.manifest.Dir()
-	}
-	if cmd.Dir == "" {
-		cmd.Dir = "."
-	}
-	cmd.Env = h.cfg.environment()
-	stdin, err := cmd.StdinPipe()
+	connection, err := h.connect(ctx)
 	if err != nil {
-		return h.startFailure(fmt.Errorf("external: stdin: %w", err))
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = stdin.Close()
-		return h.startFailure(fmt.Errorf("external: stdout: %w", err))
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
-		return h.startFailure(fmt.Errorf("external: stderr: %w", err))
-	}
-	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
-		_ = stderr.Close()
-		return h.startFailure(fmt.Errorf("external: start %q: %w", h.manifest.ResolvedEntrypoint(), err))
+		return h.startFailure(err)
 	}
 	h.mu.Lock()
-	h.cmd, h.stdin, h.stdout, h.stderr = cmd, stdin, stdout, stderr
+	h.stdin, h.stdout, h.stderr = connection.Stdin, connection.Stdout, connection.Stderr
+	h.wait, h.kill = connection.Wait, connection.Kill
 	h.mu.Unlock()
-	go h.readLoop(stdout)
-	go h.stderrLoop(stderr)
-	go h.waitLoop(cmd)
+	go h.readLoop(connection.Stdout)
+	go h.stderrLoop(connection.Stderr)
+	go h.waitLoop(connection.Wait)
 
 	initCtx := ctx
 	cancel := func() {}
@@ -329,10 +335,75 @@ func (h *Host) Start(ctx context.Context) error {
 	return nil
 }
 
+func (h *Host) connect(ctx context.Context) (Connection, error) {
+	if h.connector != nil {
+		connection, err := h.connector(ctx)
+		if err != nil {
+			return Connection{}, fmt.Errorf("external: connect %q: %w", h.manifest.Name, err)
+		}
+		if connection.Stdin == nil ||
+			connection.Stdout == nil ||
+			connection.Stderr == nil ||
+			connection.Wait == nil ||
+			connection.Kill == nil {
+			incompleteErr := errors.New("external: connector returned an incomplete connection")
+			if connection.Kill != nil {
+				incompleteErr = errors.Join(incompleteErr, connection.Kill())
+			}
+			for _, stream := range []io.Closer{connection.Stdin, connection.Stdout, connection.Stderr} {
+				if stream != nil {
+					incompleteErr = errors.Join(incompleteErr, stream.Close())
+				}
+			}
+			return Connection{}, incompleteErr
+		}
+		return connection, nil
+	}
+	cmd := exec.Command(h.manifest.ResolvedEntrypoint(), h.manifest.Args...)
+	setProcessGroup(cmd)
+	cmd.Dir = h.cfg.WorkingDirectory
+	if cmd.Dir == "" {
+		cmd.Dir = h.manifest.Dir()
+	}
+	if cmd.Dir == "" {
+		cmd.Dir = "."
+	}
+	cmd.Env = h.cfg.environment()
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return Connection{}, fmt.Errorf("external: stdin: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return Connection{}, fmt.Errorf("external: stdout: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		return Connection{}, fmt.Errorf("external: stderr: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
+		return Connection{}, fmt.Errorf("external: start %q: %w", h.manifest.ResolvedEntrypoint(), err)
+	}
+	return Connection{
+		Stdin: stdin, Stdout: stdout, Stderr: stderr,
+		Wait: cmd.Wait,
+		Kill: func() error {
+			killProcess(cmd)
+			return nil
+		},
+	}, nil
+}
+
 func (h *Host) startFailure(err error) error {
 	h.fail(err)
 	h.mu.Lock()
-	startedProcess := h.cmd != nil
+	startedProcess := h.wait != nil
 	h.mu.Unlock()
 	if !startedProcess {
 		h.markProcessDone()
@@ -736,10 +807,16 @@ func (h *Host) Stderr() string {
 	return h.stderrBuf.String()
 }
 
-func (h *Host) waitLoop(cmd *exec.Cmd) {
-	err := cmd.Wait()
+func (h *Host) waitLoop(wait func() error) {
+	err := wait()
+	h.mu.Lock()
+	h.waitErr = err
+	h.mu.Unlock()
 	h.markProcessDone()
 	if h.isClosing() {
+		// A fast exit can race the reader delivering the buffered shutdown
+		// acknowledgement. Drain it before rejecting any unanswered request.
+		waitForReaders(h.cfg.ShutdownTimeout, h.readerDone)
 		h.rejectPending(errors.New("external: plugin exited during shutdown"))
 		return
 	}
@@ -780,7 +857,7 @@ func (h *Host) fail(err error) {
 	pending := h.pending
 	h.pending = make(map[string]*pendingCall)
 	closing := h.closing
-	cmd, stdin := h.cmd, h.stdin
+	kill, stdin := h.kill, h.stdin
 	h.mu.Unlock()
 	for _, p := range pending {
 		p.response <- rpcResponse{err: err}
@@ -788,8 +865,8 @@ func (h *Host) fail(err error) {
 	if stdin != nil {
 		_ = stdin.Close()
 	}
-	if !closing && cmd != nil && cmd.Process != nil {
-		killProcess(cmd)
+	if !closing && kill != nil {
+		_ = kill()
 	}
 }
 
@@ -799,13 +876,13 @@ func (h *Host) markProcessDone() {
 
 func (h *Host) terminate() error {
 	h.mu.Lock()
-	cmd, stdin := h.cmd, h.stdin
+	kill, stdin := h.kill, h.stdin
 	h.mu.Unlock()
 	if stdin != nil {
 		_ = stdin.Close()
 	}
-	if cmd != nil && cmd.Process != nil {
-		killProcess(cmd)
+	if kill != nil {
+		return kill()
 	}
 	return nil
 }
@@ -840,7 +917,7 @@ func (h *Host) Close() error {
 		}
 		h.mu.Lock()
 		stdin, processDone := h.stdin, h.processDone
-		startedProcess := h.cmd != nil
+		startedProcess := h.wait != nil
 		h.mu.Unlock()
 		if stdin != nil {
 			_ = stdin.Close()
@@ -852,8 +929,16 @@ func (h *Host) Close() error {
 		select {
 		case <-processDone:
 		case <-time.After(wait):
-			_ = h.terminate()
+			h.closeErr = errors.Join(h.closeErr, h.terminate())
 			<-processDone
+		}
+		h.mu.Lock()
+		waitErr := h.waitErr
+		h.mu.Unlock()
+		if waitErr != nil {
+			// A remote stream failure does not establish that its process exited.
+			// Preserve the error so callers cannot checkpoint/reuse uncertain state.
+			h.closeErr = errors.Join(h.closeErr, fmt.Errorf("external: wait for plugin: %w", waitErr), h.terminate())
 		}
 		// cmd.Wait closes the child pipes. Drain both readers before exposing
 		// final diagnostics so a fast startup failure cannot lose stderr.

@@ -8,7 +8,7 @@ core owns orchestration, not task-specific behavior.
 
 ## Checks
 
-The module targets Go 1.25 (`go.mod`). Before submitting changes, run:
+The module targets Go 1.27 (`go.mod`). Before submitting changes, run:
 
 ```sh
 make check       # format check, tests, vet, golangci-lint

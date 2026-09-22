@@ -20,6 +20,8 @@ import (
 
 	"github.com/samperrin/pons"
 	"github.com/samperrin/pons/environment"
+	"github.com/samperrin/pons/environment/e2b"
+	"github.com/samperrin/pons/environment/seatbelt"
 	"github.com/samperrin/pons/plugins/bash"
 	"github.com/samperrin/pons/plugins/brain/llm"
 	"github.com/samperrin/pons/plugins/edit"
@@ -27,6 +29,7 @@ import (
 	"github.com/samperrin/pons/plugins/fs"
 	"github.com/samperrin/pons/protocol"
 	ponsruntime "github.com/samperrin/pons/runtime"
+	"github.com/samperrin/pons/runtime/checkpoint"
 	"github.com/samperrin/pons/runtime/httptransport"
 	runtimesqlite "github.com/samperrin/pons/runtime/sqlite"
 )
@@ -47,6 +50,10 @@ type serverOptions struct {
 	PluginMaxResultBytes int
 	Debug                bool
 	Sandbox              string
+	E2BTemplate          string
+	E2BHandsPath         string
+	SandboxIdleTimeout   time.Duration
+	EnvironmentError     func(error)
 	Environment          environment.Provider
 	EnvironmentSpec      environment.Spec
 }
@@ -59,12 +66,30 @@ func runServerReady(ctx context.Context, logger *log.Logger, opts serverOptions,
 	if err := validateLoopbackAddress(opts.Address); err != nil {
 		return err
 	}
+	if _, ok := opts.Environment.(environment.DurableProvider); ok {
+		if err := validateRemoteStateDirectory(opts.Workspace, opts.StateDir); err != nil {
+			return err
+		}
+	}
 	logDebugConfiguration(logger, opts)
 	store, err := runtimesqlite.Open(opts.StateDir)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
+	if durable, ok := opts.Environment.(environment.DurableProvider); ok {
+		checkpoints := checkpoint.New(filepath.Join(opts.StateDir, "workspaces"))
+		if err := durable.SetStores(store, checkpoints); err != nil {
+			return fmt.Errorf("configure environment state: %w", err)
+		}
+	}
+	if closer, ok := opts.Environment.(interface{ Close() error }); ok {
+		defer func() {
+			if err := closer.Close(); err != nil {
+				logger.Printf("environment shutdown: %v", err)
+			}
+		}()
+	}
 	runner := &agentRunner{opts: opts, logger: logger}
 	backgroundErrors := make(chan error, 1)
 	manager, err := ponsruntime.New(ponsruntime.Config{
@@ -162,8 +187,8 @@ func logDebugConfiguration(logger *log.Logger, opts serverOptions) {
 			hands = opts.EnvironmentSpec.Command[0]
 		}
 	}
-	logger.Printf("[debug] hands config: sandbox=%s network=%s hands=%q external_plugins=%d read_only_paths=%d",
-		sandbox, network, hands, len(opts.PluginPaths), len(opts.EnvironmentSpec.ReadOnly))
+	logger.Printf("[debug] hands config: sandbox=%s network=%s hands=%q idle_timeout=%s external_plugins=%d read_only_paths=%d",
+		sandbox, network, hands, opts.SandboxIdleTimeout, len(opts.PluginPaths), len(opts.EnvironmentSpec.ReadOnly))
 }
 
 func runBundled(ctx context.Context, logger *log.Logger, opts serverOptions, conversationID, idempotencyKey, message string, interactive bool) error {
@@ -205,6 +230,80 @@ func validateLoopbackAddress(address string) error {
 	return nil
 }
 
+func validateRemoteStateDirectory(workspace, stateDir string) error {
+	workspacePath, err := resolvePathWithMissingLeaf(workspace)
+	if err != nil {
+		return fmt.Errorf("runtime server: resolve workspace: %w", err)
+	}
+	statePath, err := resolvePathWithMissingLeaf(stateDir)
+	if err != nil {
+		return fmt.Errorf("runtime server: resolve state directory: %w", err)
+	}
+	contained, err := pathContains(workspacePath, statePath)
+	if err != nil {
+		return fmt.Errorf("runtime server: compare workspace and state directory: %w", err)
+	}
+	if contained {
+		return errors.New("runtime server: remote workspace state directory must be outside the source workspace")
+	}
+	return nil
+}
+
+func pathContains(parent, child string) (bool, error) {
+	relative, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false, err
+	}
+	if relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
+		return true, nil
+	}
+	parentInfo, err := os.Stat(parent)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	for current := child; ; current = filepath.Dir(current) {
+		info, statErr := os.Stat(current)
+		if statErr == nil && os.SameFile(parentInfo, info) {
+			return true, nil
+		}
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return false, statErr
+		}
+		if next := filepath.Dir(current); next == current {
+			return false, nil
+		}
+	}
+}
+
+func resolvePathWithMissingLeaf(path string) (string, error) {
+	current, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	var missing []string
+	for {
+		resolved, resolveErr := filepath.EvalSymlinks(current)
+		if resolveErr == nil {
+			for _, part := range slices.Backward(missing) {
+				resolved = filepath.Join(resolved, part)
+			}
+			return filepath.Clean(resolved), nil
+		}
+		if !os.IsNotExist(resolveErr) {
+			return "", resolveErr
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", resolveErr
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
+}
+
 func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts serverOptions) (environment.Provider, environment.Spec, error) {
 	if backend == "" {
 		if allowNetwork || handsCommand != "" {
@@ -212,8 +311,40 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 		}
 		return nil, environment.Spec{}, nil
 	}
-	if backend != "seatbelt" {
+	if backend != "seatbelt" && backend != "e2b" {
 		return nil, environment.Spec{}, fmt.Errorf("unknown backend %q", backend)
+	}
+	if backend == "e2b" {
+		if handsCommand != "" {
+			return nil, environment.Spec{}, errors.New("--hands-command is local-only; use --e2b-hands-path")
+		}
+		if len(opts.PluginPaths) != 0 || opts.PluginPath != "" {
+			return nil, environment.Spec{}, errors.New("E2B does not yet support external plugins")
+		}
+		handsPath := opts.E2BHandsPath
+		if handsPath == "" {
+			handsPath = "/usr/local/bin/pons-hands"
+		}
+		command := handsCommandArgs(handsPath, opts)
+		network := environment.NetworkDisabled
+		if allowNetwork {
+			network = environment.NetworkEnabled
+		}
+		if opts.SandboxIdleTimeout < 0 {
+			return nil, environment.Spec{}, errors.New("--sandbox-idle-timeout must not be negative")
+		}
+		return &e2b.Provider{
+			Template:    opts.E2BTemplate,
+			HandsPath:   handsPath,
+			IdleTimeout: opts.SandboxIdleTimeout,
+			OnError:     opts.EnvironmentError,
+		}, environment.Spec{
+			Command: command, Network: network,
+			Limits: environment.ResourceLimits{
+				CallTimeout:    60 * time.Second,
+				MaxResultBytes: opts.PluginMaxResultBytes,
+			},
+		}, nil
 	}
 	commandPath := handsCommand
 	var err error
@@ -227,14 +358,7 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 	if err != nil {
 		return nil, environment.Spec{}, fmt.Errorf("hands command: %w", err)
 	}
-	command := []string{
-		commandPath,
-		"--fs-read-bytes", fmt.Sprint(opts.FSReadBytes),
-		"--bash-timeout", fmt.Sprint(opts.BashTimeout),
-		"--bash-max-lines", fmt.Sprint(opts.BashMaxLines),
-		"--bash-max-bytes", fmt.Sprint(opts.BashMaxBytes),
-		"--plugin-max-result-bytes", fmt.Sprint(opts.PluginMaxResultBytes),
-	}
+	command := handsCommandArgs(commandPath, opts)
 	var readOnly []string
 	if opts.PluginPath != "" {
 		command = append(command, "--plugin-path", opts.PluginPath)
@@ -268,7 +392,7 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 	if allowNetwork {
 		network = environment.NetworkEnabled
 	}
-	return environment.Seatbelt{}, environment.Spec{
+	return seatbelt.Provider{}, environment.Spec{
 		Command: command, ReadOnly: readOnly,
 		Network: network,
 		Limits: environment.ResourceLimits{
@@ -276,6 +400,17 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 			MaxResultBytes: opts.PluginMaxResultBytes,
 		},
 	}, nil
+}
+
+func handsCommandArgs(commandPath string, opts serverOptions) []string {
+	return []string{
+		commandPath,
+		"--fs-read-bytes", fmt.Sprint(opts.FSReadBytes),
+		"--bash-timeout", fmt.Sprint(opts.BashTimeout),
+		"--bash-max-lines", fmt.Sprint(opts.BashMaxLines),
+		"--bash-max-bytes", fmt.Sprint(opts.BashMaxBytes),
+		"--plugin-max-result-bytes", fmt.Sprint(opts.PluginMaxResultBytes),
+	}
 }
 
 type agentRunner struct {
@@ -297,8 +432,6 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	if turnsErr != nil {
 		return result, turnsErr
 	}
-	brain.Seed(turns, request.Text, request.Workspace)
-
 	core := pons.New()
 	core.Workspace, core.MaxTurns = request.Workspace, r.opts.MaxTurns
 	if r.opts.Debug {
@@ -312,18 +445,22 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		}
 	}()
 	plugins := make([]pons.Plugin, 0, 4+len(r.opts.PluginPaths))
-	effectiveSandbox, effectiveNetwork := "none", "host"
+	effectiveSandbox, effectiveNetwork, effectiveEnvironmentID := "none", "host", ""
 	if r.opts.Environment != nil {
 		spec := r.opts.EnvironmentSpec
-		spec.Workspace = request.Workspace
+		spec.WorkspaceID = request.ConversationID
+		spec.WorkspacePath = request.Workspace
+		spec.RunID = request.RunID
 		session, startErr := r.opts.Environment.Start(ctx, spec)
 		if startErr != nil {
 			return result, fmt.Errorf("start execution environment: %w", startErr)
 		}
 		defer func() { err = errors.Join(err, session.Close()) }()
 		metadata := session.Metadata()
+		core.Workspace, core.Platform = metadata.WorkspacePath, metadata.Platform
 		effectiveSandbox = metadata.Provider
 		effectiveNetwork = string(metadata.Network)
+		effectiveEnvironmentID = metadata.EnvironmentID
 		if effectiveSandbox == "" {
 			effectiveSandbox = r.opts.Sandbox
 		}
@@ -354,13 +491,14 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 			plugins = append(plugins, plugin)
 		}
 	}
+	brain.Seed(turns, request.Text, core.Workspace, core.Platform)
 	plugins = append(plugins, brain)
 	if err := core.Use(plugins...); err != nil {
 		return result, err
 	}
 	if r.opts.Debug {
-		r.logger.Printf("[debug] run %s: hands ready: sandbox=%s network=%s workspace=%q tools=%d",
-			request.RunID, effectiveSandbox, effectiveNetwork, request.Workspace, len(core.ToolSpecs()))
+		r.logger.Printf("[debug] run %s: hands ready: sandbox=%s environment_id=%q network=%s workspace=%q tools=%d",
+			request.RunID, effectiveSandbox, effectiveEnvironmentID, effectiveNetwork, request.Workspace, len(core.ToolSpecs()))
 	}
 	core.OnEventError(func(event pons.Event) error {
 		switch event.Type {

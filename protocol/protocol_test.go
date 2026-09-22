@@ -6,6 +6,20 @@ import (
 	"testing"
 )
 
+func TestObservationExecutionContextRoundTrip(t *testing.T) {
+	wire, err := json.Marshal(Observation{Workspace: "/remote/repo", Platform: "linux/arm64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Observation
+	if err := json.Unmarshal(wire, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Workspace != "/remote/repo" || got.Platform != "linux/arm64" {
+		t.Fatalf("execution context = %+v", got)
+	}
+}
+
 func TestActionArgsRemainTypedJSON(t *testing.T) {
 	args, err := ArgsJSON(map[string]any{
 		"count":   3,

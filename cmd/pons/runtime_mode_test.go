@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/samperrin/pons/environment"
+	"github.com/samperrin/pons/environment/e2b"
 	"github.com/samperrin/pons/plugins/brain/llm"
 	"github.com/samperrin/pons/plugins/external"
 	"github.com/samperrin/pons/protocol"
@@ -37,11 +39,39 @@ func (p *recordingEnvironment) Start(_ context.Context, spec environment.Spec) (
 	return recordingSession{closes: &p.closes}, nil
 }
 
+type lifecycleEnvironment struct {
+	store  environment.StateStore
+	closed chan error
+}
+
+func (p *lifecycleEnvironment) Start(context.Context, environment.Spec) (environment.HandsSession, error) {
+	return nil, errors.New("unexpected environment start")
+}
+
+func (p *lifecycleEnvironment) SetStores(store environment.StateStore, checkpoints environment.CheckpointStore) error {
+	p.store = store
+	if checkpoints == nil {
+		return errors.New("checkpoint store is nil")
+	}
+	return nil
+}
+
+func (p *lifecycleEnvironment) Close() error {
+	_, err := p.store.EnvironmentState(context.Background(), "missing")
+	if !errors.Is(err, environment.ErrStateNotFound) {
+		err = fmt.Errorf("state store unavailable during provider close: %w", err)
+	} else {
+		err = nil
+	}
+	p.closed <- err
+	return err
+}
+
 type recordingSession struct{ closes *atomic.Int32 }
 
 func (s recordingSession) Catalog() []external.ToolDescription { return nil }
 func (s recordingSession) Metadata() environment.Metadata {
-	return environment.Metadata{Provider: "recording"}
+	return environment.Metadata{Provider: "recording", WorkspacePath: "/remote/workspace", Platform: "linux/arm64"}
 }
 func (s recordingSession) Execute(_ context.Context, action protocol.Action) (protocol.ToolResult, error) {
 	return protocol.ToolResult{ActionID: action.ID, Kind: string(action.Kind), OK: true}, nil
@@ -84,7 +114,8 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 		requestNumber++
 		inboundID := fmt.Sprintf("inbound-%d", requestNumber)
 		return ponsruntime.RunRequest{
-			ConversationID: "conversation-1", InboundMessageID: inboundID, Workspace: workspace, Text: text,
+			ConversationID: "conversation-1", InboundMessageID: inboundID,
+			RunID: fmt.Sprintf("run-%d", requestNumber), Workspace: workspace, Text: text,
 			Messages: append([]ponsruntime.Message(nil), history...),
 			Emit:     func(ponsruntime.RunEvent) error { return nil },
 		}
@@ -106,16 +137,50 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 	if len(bodies) != 2 || !strings.Contains(bodies[1], "answer 1") || !strings.Contains(bodies[1], "second question") {
 		t.Fatalf("second provider request was not hydrated: %v", bodies)
 	}
+	for _, body := range bodies {
+		if !strings.Contains(body, "cwd: /remote/workspace") || !strings.Contains(body, "os: linux/arm64") || strings.Contains(body, workspace) {
+			t.Fatalf("brain received host rather than hands context: %s", body)
+		}
+	}
 	if execution.starts.Load() != 2 || execution.closes.Load() != 2 {
 		t.Fatalf("environment lifecycle: starts=%d closes=%d", execution.starts.Load(), execution.closes.Load())
 	}
 	if got := debugLog.String(); !strings.Contains(got, "sandbox=recording") || !strings.Contains(got, "workspace="+fmt.Sprintf("%q", workspace)) {
 		t.Fatalf("debug log omits effective environment: %s", got)
 	}
-	for range 2 {
-		if spec := <-execution.specs; spec.Workspace != workspace {
-			t.Fatalf("environment workspace = %q, want %q", spec.Workspace, workspace)
+	for i := 1; i <= 2; i++ {
+		spec := <-execution.specs
+		if spec.WorkspaceID != "conversation-1" || spec.WorkspacePath != workspace {
+			t.Fatalf("environment workspace = %q at %q", spec.WorkspaceID, spec.WorkspacePath)
 		}
+		if want := fmt.Sprintf("run-%d", i); spec.RunID != want {
+			t.Fatalf("environment run ID = %q, want %q", spec.RunID, want)
+		}
+	}
+}
+
+func TestRuntimeServerConfiguresAndClosesStatefulEnvironment(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	provider := &lifecycleEnvironment{closed: make(chan error, 1)}
+	started := make(chan string, 1)
+	done := make(chan error, 1)
+	stateDir, workspace := t.TempDir(), t.TempDir()
+	go func() {
+		done <- runServerReady(ctx, log.New(io.Discard, "", 0), serverOptions{
+			Address: "127.0.0.1:0", StateDir: stateDir, Workspace: workspace,
+			MaxConcurrent: 1, Environment: provider,
+		}, started)
+	}()
+	<-started
+	if provider.store == nil {
+		t.Fatal("environment state store was not configured")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-provider.closed; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -242,6 +307,64 @@ func TestRuntimeTurnsNormalizeEmptyToolArguments(t *testing.T) {
 		if tool.Input == nil || len(tool.Input) != 0 {
 			t.Fatalf("input = %#v", tool.Input)
 		}
+	}
+}
+
+func TestRemoteStateDirectoryMustBeOutsideWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	for _, stateDir := range []string{workspace, filepath.Join(workspace, ".pons", "runtime")} {
+		if err := validateRemoteStateDirectory(workspace, stateDir); err == nil {
+			t.Fatalf("state directory %q was accepted", stateDir)
+		}
+	}
+	if err := validateRemoteStateDirectory(workspace, t.TempDir()); err != nil {
+		t.Fatalf("separate state directory rejected: %v", err)
+	}
+	missingSource := filepath.Join(t.TempDir(), "removed-source")
+	if err := validateRemoteStateDirectory(missingSource, t.TempDir()); err != nil {
+		t.Fatalf("missing one-time source rejected: %v", err)
+	}
+	stateTarget := filepath.Join(workspace, "state")
+	if err := os.Mkdir(stateTarget, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	link := filepath.Join(outside, "linked-state")
+	if err := os.Symlink(stateTarget, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRemoteStateDirectory(workspace, filepath.Join(link, "runtime")); err == nil {
+		t.Fatal("state directory reached through symlink was accepted")
+	}
+}
+
+func TestExecutionEnvironmentConfiguresE2B(t *testing.T) {
+	provider, spec, err := executionEnvironment("e2b", "", false, serverOptions{
+		E2BTemplate: "custom", E2BHandsPath: "/opt/pons-hands", BashTimeout: 9,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e2bProvider, ok := provider.(*e2b.Provider)
+	if !ok || e2bProvider.Template != "custom" || e2bProvider.HandsPath != "/opt/pons-hands" {
+		t.Fatalf("provider = %#v", provider)
+	}
+	if spec.Network != environment.NetworkDisabled || spec.Command[0] != "/opt/pons-hands" || !slices.Contains(spec.Command, "9") {
+		t.Fatalf("spec = %+v", spec)
+	}
+}
+
+func TestExecutionEnvironmentRejectsNegativeSandboxIdleTimeout(t *testing.T) {
+	_, _, err := executionEnvironment("e2b", "", false, serverOptions{SandboxIdleTimeout: -time.Second})
+	if err == nil || !strings.Contains(err.Error(), "must not be negative") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestExecutionEnvironmentRejectsE2BExternalPlugins(t *testing.T) {
+	_, _, err := executionEnvironment("e2b", "", false, serverOptions{PluginPaths: []string{"plugin.json"}})
+	if err == nil || !strings.Contains(err.Error(), "does not yet support external plugins") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

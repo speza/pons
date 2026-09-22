@@ -91,8 +91,7 @@ func (p *Shell) run(ctx context.Context, a protocol.Action) (protocol.ToolResult
 		res.OK = false
 		res.Error = fmt.Sprintf("command timed out after %s", timeout)
 	default:
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 			// Non-zero exit is an observation for the brain, not a crash.
 			res.OK = true
 			res.ExitCode = ee.ExitCode()

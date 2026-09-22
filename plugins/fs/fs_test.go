@@ -52,7 +52,7 @@ func TestReadTruncationKeepsValidUTF8(t *testing.T) {
 	if !res.OK || !strings.Contains(res.Output, "truncated") {
 		t.Fatalf("expected truncated ok read: %+v", res)
 	}
-	if body := strings.SplitN(res.Output, "\n…[", 2)[0]; !utf8.ValidString(body) {
+	if body, _, _ := strings.Cut(res.Output, "\n…["); !utf8.ValidString(body) {
 		t.Fatalf("truncated body is not valid UTF-8: %q", body)
 	}
 }

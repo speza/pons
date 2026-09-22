@@ -1,4 +1,4 @@
-package environment
+package seatbelt
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/samperrin/pons/environment"
 	"github.com/samperrin/pons/internal/toolhost"
 	"github.com/samperrin/pons/protocol"
 )
@@ -69,10 +70,10 @@ func TestSeatbeltIntegration(t *testing.T) {
 	if err := os.WriteFile(helper, binary, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	session, err := (Seatbelt{}).Start(context.Background(), Spec{
-		Workspace:   workspace,
-		Command:     []string{helper},
-		Environment: []string{"PONS_HANDS_TEST_HELPER=1"},
+	session, err := (Provider{}).Start(context.Background(), environment.Spec{
+		WorkspacePath: workspace,
+		Command:       []string{helper},
+		Environment:   []string{"PONS_HANDS_TEST_HELPER=1"},
 	})
 	if err != nil {
 		t.Fatal(err)

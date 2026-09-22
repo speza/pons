@@ -1,4 +1,4 @@
-package environment
+package seatbelt
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/samperrin/pons/environment"
 	"github.com/samperrin/pons/plugins/external"
 	"github.com/samperrin/pons/protocol"
 )
@@ -18,15 +19,15 @@ import (
 // on this host.
 var ErrSeatbeltUnavailable = errors.New("environment: macOS Seatbelt is unavailable")
 
-// Seatbelt is the first local environment provider. SandboxExec may be
-// overridden by tests or deployments; the default is /usr/bin/sandbox-exec.
-type Seatbelt struct {
+// Provider launches hands under macOS Seatbelt. SandboxExec may be overridden
+// by tests or deployments; the default is /usr/bin/sandbox-exec.
+type Provider struct {
 	SandboxExec string
 }
 
 // Start launches a complete pons-hands tool host under a generated Seatbelt
 // profile and connects it to the existing tool_provider/v1 host adapter.
-func (p Seatbelt) Start(ctx context.Context, spec Spec) (HandsSession, error) {
+func (p Provider) Start(ctx context.Context, spec environment.Spec) (environment.HandsSession, error) {
 	if runtime.GOOS != "darwin" {
 		return nil, ErrSeatbeltUnavailable
 	}
@@ -106,22 +107,28 @@ func (p Seatbelt) Start(ctx context.Context, spec Spec) (HandsSession, error) {
 		return nil, err
 	}
 	return &seatbeltSession{
-		host:     host,
-		scratch:  scratch,
-		metadata: Metadata{Provider: "seatbelt", Workspace: workspace, Network: network},
+		host:    host,
+		scratch: scratch,
+		metadata: environment.Metadata{
+			Provider:      "seatbelt",
+			WorkspaceID:   spec.WorkspaceID,
+			WorkspacePath: workspace,
+			Platform:      runtime.GOOS + "/" + runtime.GOARCH,
+			Network:       network,
+		},
 	}, nil
 }
 
 type seatbeltSession struct {
 	host      *external.Host
 	scratch   string
-	metadata  Metadata
+	metadata  environment.Metadata
 	closeOnce sync.Once
 	closeErr  error
 }
 
 func (s *seatbeltSession) Catalog() []external.ToolDescription { return s.host.Tools() }
-func (s *seatbeltSession) Metadata() Metadata                  { return s.metadata }
+func (s *seatbeltSession) Metadata() environment.Metadata      { return s.metadata }
 func (s *seatbeltSession) Execute(ctx context.Context, action protocol.Action) (protocol.ToolResult, error) {
 	return s.host.Execute(ctx, action)
 }
@@ -135,11 +142,11 @@ func (s *seatbeltSession) Close() error {
 	return s.closeErr
 }
 
-func validateSpec(spec Spec) (string, []string, []string, NetworkPolicy, error) {
-	if spec.Workspace == "" {
+func validateSpec(spec environment.Spec) (string, []string, []string, environment.NetworkPolicy, error) {
+	if spec.WorkspacePath == "" {
 		return "", nil, nil, "", errors.New("environment: workspace is required")
 	}
-	workspace, err := filepath.Abs(spec.Workspace)
+	workspace, err := filepath.Abs(spec.WorkspacePath)
 	if err != nil {
 		return "", nil, nil, "", fmt.Errorf("environment: workspace: %w", err)
 	}
@@ -192,9 +199,9 @@ func validateSpec(spec Spec) (string, []string, []string, NetworkPolicy, error) 
 	}
 	network := spec.Network
 	if network == "" {
-		network = NetworkDisabled
+		network = environment.NetworkDisabled
 	}
-	if network != NetworkDisabled && network != NetworkEnabled {
+	if network != environment.NetworkDisabled && network != environment.NetworkEnabled {
 		return "", nil, nil, "", fmt.Errorf("environment: invalid network policy %q", network)
 	}
 	return workspace, command, readOnly, network, nil
@@ -226,7 +233,7 @@ func cleanEnvironment(explicit []string, scratch string) ([]string, error) {
 	return out, nil
 }
 
-func seatbeltProfile(workspace, scratch, handsCommand string, readOnly []string, network NetworkPolicy) (string, error) {
+func seatbeltProfile(workspace, scratch, handsCommand string, readOnly []string, network environment.NetworkPolicy) (string, error) {
 	quoted := make([]string, 3)
 	for i, value := range []string{workspace, scratch, handsCommand} {
 		var err error
@@ -286,7 +293,7 @@ func seatbeltProfile(workspace, scratch, handsCommand string, readOnly []string,
 		}
 		lines = append(lines, "(allow file-read* ("+selector+" "+literal+"))")
 	}
-	if network == NetworkEnabled {
+	if network == environment.NetworkEnabled {
 		lines = append(lines, "(allow network*)")
 	}
 	return strings.Join(lines, "\n") + "\n", nil

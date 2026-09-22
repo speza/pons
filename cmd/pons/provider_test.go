@@ -7,7 +7,7 @@ import (
 
 func TestProviderSlotsFromConfigList(t *testing.T) {
 	cfg := settings{
-		DefaultProviderID: strptr("codex-work"),
+		DefaultProviderID: new("codex-work"),
 		Providers: []providerSettings{
 			{ID: "codex-personal", Provider: "codex"},
 			{ID: "codex-work", Provider: "codex", Model: "m-w"},
@@ -32,7 +32,7 @@ func TestProviderSlotsFromConfigList(t *testing.T) {
 
 func TestProviderSlotsFlagOverridesDefault(t *testing.T) {
 	cfg := settings{
-		DefaultProviderID: strptr("a"),
+		DefaultProviderID: new("a"),
 		Providers: []providerSettings{
 			{ID: "a", Provider: "codex"},
 			{ID: "b", Provider: "openai"},
@@ -54,7 +54,7 @@ func TestProviderSlotsFlagOverridesDefault(t *testing.T) {
 
 func TestProviderSlotsModelFlagOverridesEntry(t *testing.T) {
 	cfg := settings{
-		DefaultProviderID: strptr("a"),
+		DefaultProviderID: new("a"),
 		Providers:         []providerSettings{{ID: "a", Provider: "anthropic", Model: "entry-model"}},
 	}
 	slots, err := providerSlots(cfg, map[string]bool{"model": true}, "anthropic", "flag-model", "", nil)
@@ -68,7 +68,7 @@ func TestProviderSlotsModelFlagOverridesEntry(t *testing.T) {
 
 func TestProviderSlotsFallbackFlagReplaces(t *testing.T) {
 	cfg := settings{
-		DefaultProviderID: strptr("a"),
+		DefaultProviderID: new("a"),
 		Providers: []providerSettings{
 			{ID: "a", Provider: "anthropic"},
 			{ID: "b", Provider: "openai"},
@@ -84,7 +84,7 @@ func TestProviderSlotsFallbackFlagReplaces(t *testing.T) {
 }
 
 func TestProviderSlotsLegacyFlat(t *testing.T) {
-	cfg := settings{Provider: strptr("openai")}
+	cfg := settings{Provider: new("openai")}
 	slots, err := providerSlots(cfg, map[string]bool{}, "openai", "gpt-x", "", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -104,9 +104,9 @@ func TestProviderSlotsValidation(t *testing.T) {
 		{"missing id", settings{Providers: []providerSettings{{Provider: "openai"}}}, "id is required"},
 		{"missing provider type", settings{Providers: []providerSettings{{ID: "a"}}}, "provider is required"},
 		{"no default with several", settings{Providers: []providerSettings{{ID: "a", Provider: "openai"}, {ID: "b", Provider: "codex"}}}, "default_provider_id"},
-		{"unknown default", settings{DefaultProviderID: strptr("z"), Providers: []providerSettings{{ID: "a", Provider: "openai"}}}, "does not match"},
-		{"flat and list", settings{Provider: strptr("openai"), Providers: []providerSettings{{ID: "a", Provider: "openai"}}}, "both"},
-		{"default without list", settings{DefaultProviderID: strptr("a")}, "no providers"},
+		{"unknown default", settings{DefaultProviderID: new("z"), Providers: []providerSettings{{ID: "a", Provider: "openai"}}}, "does not match"},
+		{"flat and list", settings{Provider: new("openai"), Providers: []providerSettings{{ID: "a", Provider: "openai"}}}, "both"},
+		{"default without list", settings{DefaultProviderID: new("a")}, "no providers"},
 		{"empty fallback spec", settings{}, "provider is required"},
 	}
 	for _, tc := range cases {
@@ -121,5 +121,3 @@ func TestProviderSlotsValidation(t *testing.T) {
 		})
 	}
 }
-
-func strptr(s string) *string { return &s }

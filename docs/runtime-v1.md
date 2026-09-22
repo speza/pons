@@ -302,10 +302,16 @@ fencing on every run mutation, and cross-process runnable/outbox notification.
 
 The SQLite database is stored at `<state-dir>/runtime.db`. It uses WAL mode,
 foreign keys, immediate write transactions, and full synchronous commits.
-The runtime database is authoritative. SQLite-specific opening, migration, and
-connection policy are confined to `runtime/sqlite`; the manager only consumes
-the `runtime.Store` contract. Store shutdown belongs to the composing process,
-not the manager.
+Domain and store contracts use UTC `time.Time` values normalized to microsecond
+precision. The SQLite adapter stores those instants as integer Unix
+microseconds so indexed ordering and deadline comparisons are numeric; a future
+PostgreSQL adapter should use `TIMESTAMPTZ` behind the same Go contract.
+The runtime database is authoritative. SQLite-specific opening, schema
+initialization, and connection policy are confined to `runtime/sqlite`; the
+manager only consumes the `runtime.Store` contract. Store shutdown belongs to
+the composing process, not the manager. During the current pre-compatibility
+phase, schema versions are checked at startup and an older database is rejected
+with instructions to recreate the runtime state directory rather than migrated.
 
 ## HTTP API
 

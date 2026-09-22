@@ -551,7 +551,11 @@ func userPrompt(obs protocol.Observation) string {
 	var sb strings.Builder
 	sb.WriteString("<env>\n")
 	fmt.Fprintf(&sb, "cwd: %s\n", obs.Workspace)
-	fmt.Fprintf(&sb, "os: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	platform := obs.Platform
+	if platform == "" {
+		platform = runtime.GOOS + "/" + runtime.GOARCH
+	}
+	fmt.Fprintf(&sb, "os: %s\n", platform)
 	fmt.Fprintf(&sb, "date: %s\n", now.Format("2006-01-02"))
 	sb.WriteString("</env>\n\n")
 	sb.WriteString(obs.Message)
@@ -610,11 +614,11 @@ func stringify(in map[string]any) json.RawMessage {
 // next instruction as the new user turn. Hydration and compaction interplay
 // for free: if the seeded context exceeds the budget, the next planning
 // call compacts it.
-func (b *Brain) Seed(turns []Turn, message, workspace string) {
+func (b *Brain) Seed(turns []Turn, message, workspace, platform string) {
 	b.pending = nil
 	b.turns = append(append([]Turn(nil), turns...), Turn{
 		Role: "user", Blocks: []Block{Text{Value: userPrompt(protocol.Observation{
-			Message: message, Workspace: workspace, Now: time.Now(),
+			Message: message, Workspace: workspace, Platform: platform, Now: time.Now(),
 		})}},
 	})
 	b.seenMessage = message

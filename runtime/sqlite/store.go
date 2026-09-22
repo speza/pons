@@ -14,18 +14,27 @@ import (
 	"time"
 
 	"github.com/ncruces/go-sqlite3/driver"
+	"github.com/samperrin/pons/environment"
 	"github.com/samperrin/pons/protocol"
 	ponsruntime "github.com/samperrin/pons/runtime"
 )
 
-const runtimeDBName = "runtime.db"
+const (
+	runtimeDBName        = "runtime.db"
+	currentSchemaVersion = 2
+)
 
 // Store is the local, exclusive-manager runtime backend. Its transactions
 // prevent duplicate claims and concurrent conversation/workspace ownership,
 // but they are not renewable leases or a distributed fencing mechanism.
-type Store struct{ db *sql.DB }
+type Store struct {
+	db *sql.DB
+}
 
-var _ ponsruntime.Store = (*Store)(nil)
+var (
+	_ ponsruntime.Store      = (*Store)(nil)
+	_ environment.StateStore = (*Store)(nil)
+)
 
 func newID() string { return ponsruntime.NewID() }
 
@@ -47,7 +56,7 @@ func Open(stateDir string) (*Store, error) {
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(4)
 	store := &Store{db: db}
-	if err := store.migrate(context.Background()); err != nil {
+	if err := store.initializeSchema(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -58,23 +67,38 @@ func Open(stateDir string) (*Store, error) {
 	return store, nil
 }
 
-func (s *Store) migrate(ctx context.Context) error {
+func (s *Store) initializeSchema(ctx context.Context) error {
+	var version, tableCount int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return fmt.Errorf("runtime: read schema version: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM sqlite_schema
+WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`).Scan(&tableCount); err != nil {
+		return fmt.Errorf("runtime: inspect schema: %w", err)
+	}
+	if version != currentSchemaVersion && (version != 0 || tableCount != 0) {
+		return fmt.Errorf(
+			"runtime: database schema version %d is unsupported; recreate the runtime state directory",
+			version,
+		)
+	}
 	const schema = `
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
   workspace TEXT NOT NULL,
-  created_at TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
   next_event_cursor INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   inbound_message_id TEXT NOT NULL DEFAULT '',
-	  run_id TEXT NOT NULL DEFAULT '',
-	  role TEXT NOT NULL,
-	  complete BOOLEAN NOT NULL DEFAULT TRUE,
-	  final BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TEXT NOT NULL
+  run_id TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL,
+  complete BOOLEAN NOT NULL DEFAULT TRUE,
+  final BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_conversation_order
   ON messages(conversation_id, created_at, id);
@@ -87,7 +111,7 @@ CREATE TABLE IF NOT EXISTS message_parts (
   tool_kind TEXT NOT NULL DEFAULT '',
   arguments BLOB,
   result BLOB,
-	metadata BLOB,
+  metadata BLOB,
   PRIMARY KEY(message_id, position)
 );
 CREATE TABLE IF NOT EXISTS submissions (
@@ -97,7 +121,7 @@ CREATE TABLE IF NOT EXISTS submissions (
   message_id TEXT NOT NULL REFERENCES messages(id),
   status TEXT NOT NULL,
   error TEXT NOT NULL DEFAULT '',
-  accepted_at TEXT NOT NULL,
+  accepted_at INTEGER NOT NULL,
   UNIQUE(conversation_id, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS submissions_pending
@@ -113,8 +137,8 @@ CREATE TABLE IF NOT EXISTS runs (
   inbound_message_id TEXT NOT NULL,
   status TEXT NOT NULL,
   error TEXT NOT NULL DEFAULT '',
-  started_at TEXT NOT NULL,
-  completed_at TEXT
+  started_at INTEGER NOT NULL,
+  completed_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS runs_conversation_status
   ON runs(conversation_id, status, started_at);
@@ -129,7 +153,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   status TEXT NOT NULL,
   result BLOB,
   result_message_id TEXT,
-  updated_at TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
   PRIMARY KEY(run_id, id)
 );
 CREATE INDEX IF NOT EXISTS tool_calls_conversation
@@ -139,46 +163,258 @@ CREATE TABLE IF NOT EXISTS events (
   cursor INTEGER NOT NULL,
   type TEXT NOT NULL,
   payload BLOB NOT NULL,
-  created_at TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
   PRIMARY KEY(conversation_id, cursor)
 );
+CREATE TABLE IF NOT EXISTS workspaces (
+  id TEXT PRIMARY KEY CHECK (id <> ''),
+  strategy TEXT NOT NULL CHECK (strategy <> ''),
+  source_ref TEXT NOT NULL,
+  base_revision TEXT NOT NULL,
+  checkpoint_ref TEXT NOT NULL,
+  setup_generation INTEGER NOT NULL CHECK (setup_generation > 0),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS execution_environments (
+  workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id),
+  provider TEXT NOT NULL,
+  environment_id TEXT NOT NULL,
+  template TEXT NOT NULL,
+  network_policy TEXT NOT NULL DEFAULT 'disabled'
+    CHECK (network_policy IN ('disabled', 'enabled')),
+  status TEXT NOT NULL CHECK (status IN ('active', 'idle', 'recovery')),
+  run_id TEXT NOT NULL DEFAULT '',
+  idle_until INTEGER,
+  expires_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  CHECK (
+    (status = 'active' AND run_id <> '' AND idle_until IS NULL)
+    OR
+    (status = 'idle' AND run_id = '' AND idle_until IS NOT NULL)
+    OR
+    (status = 'recovery' AND run_id = '' AND idle_until IS NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS execution_environments_expiry
+  ON execution_environments(provider, status, idle_until);
+CREATE INDEX IF NOT EXISTS execution_environments_provider_expiry
+  ON execution_environments(provider, expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS execution_environments_provider_id
+  ON execution_environments(provider, environment_id);
 `
-	if _, err := s.db.ExecContext(ctx, schema); err != nil {
-		return fmt.Errorf("runtime: migrate database: %w", err)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("runtime: begin schema initialization: %w", err)
 	}
-	if err := s.ensureColumn(ctx, "message_parts", "metadata", "BLOB"); err != nil {
-		return fmt.Errorf("runtime: migrate message part metadata: %w", err)
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("runtime: initialize database: %w", err)
 	}
-	if err := s.ensureColumn(ctx, "messages", "complete", "BOOLEAN NOT NULL DEFAULT TRUE"); err != nil {
-		return fmt.Errorf("runtime: migrate message completeness: %w", err)
+	versionStatement := fmt.Sprintf("PRAGMA user_version = %d", currentSchemaVersion)
+	if _, err := tx.ExecContext(ctx, versionStatement); err != nil {
+		return fmt.Errorf("runtime: record schema version: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("runtime: commit schema initialization: %w", err)
 	}
 	return nil
 }
 
-func (s *Store) ensureColumn(ctx context.Context, table, column, definition string) error {
-	var exists bool
-	query := fmt.Sprintf("SELECT EXISTS(SELECT 1 FROM pragma_table_info('%s') WHERE name = ?)", table)
-	if err := s.db.QueryRowContext(ctx, query, column).Scan(&exists); err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-	_, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition))
-	return err
-}
-
 func (s *Store) Close() error { return s.db.Close() }
 
-func encodeTime(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
-
-func decodeTime(value string) (time.Time, error) {
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("runtime: decode timestamp %q: %w", value, err)
-	}
-	return parsed, nil
+type rowScanner interface {
+	Scan(...any) error
 }
+
+func scanWorkspaceState(row rowScanner) (environment.WorkspaceState, error) {
+	var state environment.WorkspaceState
+	var createdAt, updatedAt int64
+	if err := row.Scan(
+		&state.ID,
+		&state.Strategy,
+		&state.SourceRef,
+		&state.BaseRevision,
+		&state.CheckpointRef,
+		&state.SetupGeneration,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return environment.WorkspaceState{}, err
+	}
+	state.CreatedAt = decodeTime(createdAt)
+	state.UpdatedAt = decodeTime(updatedAt)
+	return state, nil
+}
+
+func (s *Store) WorkspaceState(ctx context.Context, id string) (environment.WorkspaceState, error) {
+	state, err := scanWorkspaceState(s.db.QueryRowContext(ctx, `
+SELECT id, strategy, source_ref, base_revision, checkpoint_ref,
+       setup_generation, created_at, updated_at
+FROM workspaces WHERE id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return environment.WorkspaceState{}, environment.ErrStateNotFound
+	}
+	if err != nil {
+		return environment.WorkspaceState{}, fmt.Errorf("runtime: read workspace state: %w", err)
+	}
+	return state, nil
+}
+
+func (s *Store) SaveWorkspaceState(ctx context.Context, state environment.WorkspaceState) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO workspaces (
+  id, strategy, source_ref, base_revision, checkpoint_ref,
+  setup_generation, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+  strategy = excluded.strategy,
+  source_ref = excluded.source_ref,
+  base_revision = excluded.base_revision,
+  checkpoint_ref = excluded.checkpoint_ref,
+  setup_generation = excluded.setup_generation,
+  updated_at = excluded.updated_at`,
+		state.ID,
+		state.Strategy,
+		state.SourceRef,
+		state.BaseRevision,
+		state.CheckpointRef,
+		state.SetupGeneration,
+		encodeTime(state.CreatedAt),
+		encodeTime(state.UpdatedAt),
+	)
+	if err != nil {
+		return fmt.Errorf("runtime: save workspace state: %w", err)
+	}
+	return nil
+}
+
+func scanEnvironmentState(row rowScanner) (environment.State, error) {
+	var state environment.State
+	var idleUntil sql.NullInt64
+	var expiresAt, updatedAt int64
+	if err := row.Scan(
+		&state.WorkspaceID,
+		&state.Provider,
+		&state.EnvironmentID,
+		&state.Template,
+		&state.Network,
+		&state.Status,
+		&state.RunID,
+		&idleUntil,
+		&expiresAt,
+		&updatedAt,
+	); err != nil {
+		return environment.State{}, err
+	}
+	if idleUntil.Valid {
+		state.IdleUntil = decodeTime(idleUntil.Int64)
+	}
+	state.ExpiresAt = decodeTime(expiresAt)
+	state.UpdatedAt = decodeTime(updatedAt)
+	return state, nil
+}
+
+func (s *Store) EnvironmentState(ctx context.Context, workspaceID string) (environment.State, error) {
+	state, err := scanEnvironmentState(s.db.QueryRowContext(ctx, `
+SELECT workspace_id, provider, environment_id, template, network_policy,
+       status, run_id, idle_until, expires_at, updated_at
+FROM execution_environments WHERE workspace_id = ?`, workspaceID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return environment.State{}, environment.ErrStateNotFound
+	}
+	if err != nil {
+		return environment.State{}, fmt.Errorf("runtime: read environment state: %w", err)
+	}
+	return state, nil
+}
+
+func (s *Store) SaveEnvironmentState(ctx context.Context, state environment.State) error {
+	var idleUntil any
+	if !state.IdleUntil.IsZero() {
+		idleUntil = encodeTime(state.IdleUntil)
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO execution_environments (
+  workspace_id, provider, environment_id, template, network_policy,
+  status, run_id, idle_until, expires_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(workspace_id) DO UPDATE SET
+  provider = excluded.provider,
+  environment_id = excluded.environment_id,
+  template = excluded.template,
+  network_policy = excluded.network_policy,
+  status = excluded.status,
+  run_id = excluded.run_id,
+  idle_until = excluded.idle_until,
+  expires_at = excluded.expires_at,
+  updated_at = excluded.updated_at`,
+		state.WorkspaceID,
+		state.Provider,
+		state.EnvironmentID,
+		state.Template,
+		state.Network,
+		state.Status,
+		state.RunID,
+		idleUntil,
+		encodeTime(state.ExpiresAt),
+		encodeTime(state.UpdatedAt),
+	)
+	if err != nil {
+		return fmt.Errorf("runtime: save environment state: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteEnvironmentState(ctx context.Context, workspaceID, environmentID string) error {
+	_, err := s.db.ExecContext(ctx, `
+DELETE FROM execution_environments
+WHERE workspace_id = ? AND environment_id = ?`, workspaceID, environmentID)
+	if err != nil {
+		return fmt.Errorf("runtime: delete environment state: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ExpiredEnvironmentStates(
+	ctx context.Context,
+	provider string,
+	now time.Time,
+	limit int,
+) ([]environment.State, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT workspace_id, provider, environment_id, template, network_policy,
+       status, run_id, idle_until, expires_at, updated_at
+FROM execution_environments
+WHERE provider = ?
+  AND ((status = ? AND idle_until <= ?) OR expires_at <= ?)
+ORDER BY COALESCE(idle_until, expires_at), workspace_id
+LIMIT ?`, provider, environment.StateIdle, encodeTime(now), encodeTime(now), limit)
+	if err != nil {
+		return nil, fmt.Errorf("runtime: list expired environment states: %w", err)
+	}
+	defer rows.Close()
+	var states []environment.State
+	for rows.Next() {
+		state, err := scanEnvironmentState(rows)
+		if err != nil {
+			return nil, err
+		}
+		states = append(states, state)
+	}
+	return states, rows.Err()
+}
+
+func canonicalTime(value time.Time) time.Time {
+	return value.UTC().Truncate(time.Microsecond)
+}
+
+func encodeTime(value time.Time) int64 { return canonicalTime(value).UnixMicro() }
+
+func decodeTime(value int64) time.Time { return time.UnixMicro(value).UTC() }
 
 func (s *Store) CreateConversation(ctx context.Context, conversation ponsruntime.Conversation) error {
 	_, err := s.db.ExecContext(ctx,
@@ -192,7 +428,7 @@ func (s *Store) CreateConversation(ctx context.Context, conversation ponsruntime
 
 func (s *Store) Conversation(ctx context.Context, id string) (ponsruntime.Conversation, error) {
 	var conversation ponsruntime.Conversation
-	var created string
+	var created int64
 	err := s.db.QueryRowContext(ctx,
 		`SELECT id, workspace, created_at FROM conversations WHERE id = ?`, id,
 	).Scan(&conversation.ID, &conversation.Workspace, &created)
@@ -202,8 +438,8 @@ func (s *Store) Conversation(ctx context.Context, id string) (ponsruntime.Conver
 	if err != nil {
 		return ponsruntime.Conversation{}, fmt.Errorf("runtime: read conversation: %w", err)
 	}
-	conversation.CreatedAt, err = decodeTime(created)
-	return conversation, err
+	conversation.CreatedAt = decodeTime(created)
+	return conversation, nil
 }
 
 func insertMessageTx(ctx context.Context, tx *sql.Tx, message ponsruntime.Message) error {
@@ -255,7 +491,7 @@ func appendEventTx(ctx context.Context, tx *sql.Tx, event ponsruntime.Event) (po
 		return ponsruntime.Event{}, err
 	}
 	event.ID = next
-	event.CreatedAt = time.Now().UTC()
+	event.CreatedAt = canonicalTime(time.Now())
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return ponsruntime.Event{}, err
@@ -291,7 +527,7 @@ func (s *Store) Accept(ctx context.Context, conversationID, key string, parts []
 	if _, err := conversationTx(ctx, tx, conversationID); err != nil {
 		return ponsruntime.AcceptedMessage{}, nil, err
 	}
-	now := time.Now().UTC()
+	now := canonicalTime(time.Now())
 	id := newID()
 	messageParts := make([]ponsruntime.MessagePart, len(parts))
 	for i, part := range parts {
@@ -329,7 +565,7 @@ VALUES(?, ?, ?, ?, ?, ?)`, id, conversationID, key, message.ID, ponsruntime.RunQ
 
 func conversationTx(ctx context.Context, tx *sql.Tx, id string) (ponsruntime.Conversation, error) {
 	var conversation ponsruntime.Conversation
-	var created string
+	var created int64
 	err := tx.QueryRowContext(ctx,
 		`SELECT id, workspace, created_at FROM conversations WHERE id = ?`, id,
 	).Scan(&conversation.ID, &conversation.Workspace, &created)
@@ -339,8 +575,8 @@ func conversationTx(ctx context.Context, tx *sql.Tx, id string) (ponsruntime.Con
 	if err != nil {
 		return ponsruntime.Conversation{}, err
 	}
-	conversation.CreatedAt, err = decodeTime(created)
-	return conversation, err
+	conversation.CreatedAt = decodeTime(created)
+	return conversation, nil
 }
 
 func (s *Store) ClaimRunnable(ctx context.Context) (*ponsruntime.ClaimedRun, error) {
@@ -353,7 +589,8 @@ func (s *Store) ClaimRunnable(ctx context.Context) (*ponsruntime.ClaimedRun, err
 		return nil, err
 	}
 	defer tx.Rollback()
-	var id, conversationID, key, accepted, workspace, conversationCreated string
+	var id, conversationID, key, workspace string
+	var accepted, conversationCreated int64
 	err = tx.QueryRowContext(ctx, `
 SELECT queued.id, queued.conversation_id, queued.idempotency_key, queued.accepted_at,
        conversation.workspace, conversation.created_at
@@ -383,15 +620,9 @@ LIMIT 1`, ponsruntime.RunQueued, ponsruntime.RunRunning, ponsruntime.RunRunning,
 	if err != nil {
 		return nil, err
 	}
-	acceptedAt, err := decodeTime(accepted)
-	if err != nil {
-		return nil, err
-	}
-	createdAt, err := decodeTime(conversationCreated)
-	if err != nil {
-		return nil, err
-	}
-	now := time.Now().UTC()
+	acceptedAt := decodeTime(accepted)
+	createdAt := decodeTime(conversationCreated)
+	now := canonicalTime(time.Now())
 	run := ponsruntime.Run{
 		ID: newID(), ConversationID: conversationID, InboundMessageID: id,
 		Status: ponsruntime.RunRunning, StartedAt: now,
@@ -441,7 +672,7 @@ VALUES(?, ?, ?, ?, ?, ?)`, run.ID, conversationID, id, id, run.Status, encodeTim
 	}, nil
 }
 
-func loadHistoryThroughSubmissionTx(ctx context.Context, tx *sql.Tx, conversationID, acceptedAt, submissionID string) ([]ponsruntime.Message, error) {
+func loadHistoryThroughSubmissionTx(ctx context.Context, tx *sql.Tx, conversationID string, acceptedAt int64, submissionID string) ([]ponsruntime.Message, error) {
 	rows, err := tx.QueryContext(ctx, `
 SELECT messages.id
 FROM messages
@@ -503,7 +734,7 @@ func (s *Store) CommitAssistantTurn(ctx context.Context, run ponsruntime.Run, pa
 		return nil, err
 	}
 	defer tx.Rollback()
-	now := time.Now().UTC()
+	now := canonicalTime(time.Now())
 	normalizedParts := cloneMessageParts(parts)
 	toolParts := make([]ponsruntime.MessagePart, 0, len(parts))
 	for i := range normalizedParts {
@@ -586,7 +817,7 @@ func (s *Store) toolFinished(ctx context.Context, run ponsruntime.Run, result pr
 		return nil, err
 	}
 	defer tx.Rollback()
-	events, err := toolFinishedTx(ctx, tx, run, result, status, time.Now().UTC())
+	events, err := toolFinishedTx(ctx, tx, run, result, status, canonicalTime(time.Now()))
 	if err != nil {
 		return nil, err
 	}
@@ -682,7 +913,7 @@ func (s *Store) FinishRun(ctx context.Context, run ponsruntime.Run, answer strin
 		return ponsruntime.Message{}, nil, err
 	}
 	defer tx.Rollback()
-	now := time.Now().UTC()
+	now := canonicalTime(time.Now())
 	message := ponsruntime.Message{
 		ID: newID(), ConversationID: run.ConversationID, InboundMessageID: run.InboundMessageID,
 		RunID: run.ID, Role: "assistant", Complete: true, Final: true, CreatedAt: now,
@@ -699,14 +930,11 @@ func (s *Store) FinishRun(ctx context.Context, run ponsruntime.Run, answer strin
 	}
 	completed := run
 	completed.Status, completed.CompletedAt = ponsruntime.RunCompleted, &now
-	var accepted string
+	var accepted int64
 	if err := tx.QueryRowContext(ctx, `SELECT accepted_at FROM submissions WHERE id = ?`, run.InboundMessageID).Scan(&accepted); err != nil {
 		return ponsruntime.Message{}, nil, err
 	}
-	acceptedAt, err := decodeTime(accepted)
-	if err != nil {
-		return ponsruntime.Message{}, nil, err
-	}
+	acceptedAt := decodeTime(accepted)
 	submission := ponsruntime.Submission{ID: run.InboundMessageID, ConversationID: run.ConversationID, MessageID: run.InboundMessageID, Status: ponsruntime.RunCompleted, AcceptedAt: acceptedAt}
 	messageEvent, err := updateMessageEventTx(ctx, tx, message)
 	if err != nil {
@@ -738,7 +966,7 @@ func (s *Store) FailRun(ctx context.Context, run ponsruntime.Run, message string
 		return nil, err
 	}
 	defer tx.Rollback()
-	now := time.Now().UTC()
+	now := canonicalTime(time.Now())
 	events, err := interruptRequestedToolsTx(ctx, tx, run, now)
 	if err != nil {
 		return nil, err
@@ -751,14 +979,11 @@ func (s *Store) FailRun(ctx context.Context, run ponsruntime.Run, message string
 	}
 	failed := run
 	failed.Status, failed.Error, failed.CompletedAt = ponsruntime.RunFailed, message, &now
-	var accepted string
+	var accepted int64
 	if err := tx.QueryRowContext(ctx, `SELECT accepted_at FROM submissions WHERE id = ?`, run.InboundMessageID).Scan(&accepted); err != nil {
 		return nil, err
 	}
-	acceptedAt, err := decodeTime(accepted)
-	if err != nil {
-		return nil, err
-	}
+	acceptedAt := decodeTime(accepted)
 	submission := ponsruntime.Submission{ID: run.InboundMessageID, ConversationID: run.ConversationID, MessageID: run.InboundMessageID, Status: ponsruntime.RunFailed, Error: message, AcceptedAt: acceptedAt}
 	runEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
 		Type: ponsruntime.EventRunUpdated, ConversationID: run.ConversationID, RunID: run.ID,
@@ -833,7 +1058,10 @@ WHERE status = ? ORDER BY started_at`, ponsruntime.RunRunning)
 	if err != nil {
 		return err
 	}
-	type running struct{ id, conversation, inbound, started string }
+	type running struct {
+		id, conversation, inbound string
+		started                   int64
+	}
 	var values []running
 	for rows.Next() {
 		var value running
@@ -847,10 +1075,7 @@ WHERE status = ? ORDER BY started_at`, ponsruntime.RunRunning)
 		return err
 	}
 	for _, value := range values {
-		started, err := decodeTime(value.started)
-		if err != nil {
-			return err
-		}
+		started := decodeTime(value.started)
 		run := ponsruntime.Run{ID: value.id, ConversationID: value.conversation, InboundMessageID: value.inbound, Status: ponsruntime.RunRunning, StartedAt: started}
 		if _, err := s.FailRun(ctx, run, "execution was interrupted; outcome unknown"); err != nil {
 			return err
@@ -935,14 +1160,11 @@ FROM submissions WHERE conversation_id = ? ORDER BY accepted_at, rowid`, convers
 	var submissions []ponsruntime.Submission
 	for rows.Next() {
 		value := ponsruntime.Submission{ConversationID: conversationID}
-		var accepted string
+		var accepted int64
 		if err := rows.Scan(&value.ID, &value.MessageID, &value.Status, &value.Error, &accepted); err != nil {
 			return nil, err
 		}
-		value.AcceptedAt, err = decodeTime(accepted)
-		if err != nil {
-			return nil, err
-		}
+		value.AcceptedAt = decodeTime(accepted)
 		submissions = append(submissions, value)
 	}
 	return submissions, rows.Err()
@@ -983,7 +1205,7 @@ ORDER BY submissions.accepted_at, submissions.id, messages.created_at, messages.
 
 func loadMessageTx(ctx context.Context, tx *sql.Tx, id string) (ponsruntime.Message, error) {
 	var message ponsruntime.Message
-	var created string
+	var created int64
 	err := tx.QueryRowContext(ctx, `
 	SELECT id, conversation_id, inbound_message_id, run_id, role, complete, final, created_at
 	FROM messages WHERE id = ?`, id).Scan(&message.ID, &message.ConversationID, &message.InboundMessageID,
@@ -991,10 +1213,7 @@ func loadMessageTx(ctx context.Context, tx *sql.Tx, id string) (ponsruntime.Mess
 	if err != nil {
 		return ponsruntime.Message{}, err
 	}
-	message.CreatedAt, err = decodeTime(created)
-	if err != nil {
-		return ponsruntime.Message{}, err
-	}
+	message.CreatedAt = decodeTime(created)
 	rows, err := tx.QueryContext(ctx, `
 SELECT type, text, tool_call_id, tool_kind, arguments, result, metadata
 FROM message_parts WHERE message_id = ? ORDER BY position`, id)
@@ -1038,16 +1257,13 @@ FROM tool_calls WHERE conversation_id = ? ORDER BY updated_at, rowid`, conversat
 	for rows.Next() {
 		tool := ponsruntime.ToolCall{ConversationID: conversationID}
 		var arguments, result []byte
-		var updated string
+		var updated int64
 		if err := rows.Scan(&tool.ID, &tool.RunID, &tool.InboundMessageID, &tool.Kind, &arguments,
 			&tool.Status, &result, &updated); err != nil {
 			return nil, err
 		}
 		tool.Arguments = cloneRaw(arguments)
-		tool.UpdatedAt, err = decodeTime(updated)
-		if err != nil {
-			return nil, err
-		}
+		tool.UpdatedAt = decodeTime(updated)
 		if len(result) > 0 {
 			var decoded protocol.ToolResult
 			if err := json.Unmarshal(result, &decoded); err != nil {
@@ -1062,7 +1278,7 @@ FROM tool_calls WHERE conversation_id = ? ORDER BY updated_at, rowid`, conversat
 
 func loadActiveRunTx(ctx context.Context, tx *sql.Tx, conversationID string) (*ponsruntime.Run, error) {
 	var run ponsruntime.Run
-	var started string
+	var started int64
 	err := tx.QueryRowContext(ctx, `
 SELECT id, inbound_message_id, status, error, started_at
 FROM runs WHERE conversation_id = ? AND status = ? ORDER BY started_at DESC LIMIT 1`, conversationID, ponsruntime.RunRunning,
@@ -1074,8 +1290,8 @@ FROM runs WHERE conversation_id = ? AND status = ? ORDER BY started_at DESC LIMI
 		return nil, err
 	}
 	run.ConversationID = conversationID
-	run.StartedAt, err = decodeTime(started)
-	return &run, err
+	run.StartedAt = decodeTime(started)
+	return &run, nil
 }
 
 func cloneMessage(message ponsruntime.Message) ponsruntime.Message {
