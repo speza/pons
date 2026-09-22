@@ -16,9 +16,10 @@ import (
 )
 
 func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts serverOptions) (environment.Provider, environment.Spec, error) {
+	githubAppConfigured := opts.GitHubAppID != 0 || opts.GitHubAppInstallationID != 0 || opts.GitHubAppPrivateKey != ""
 	if backend == "" {
 		if allowNetwork || handsCommand != "" || opts.GitRepository != "" || opts.GitRevision != "" ||
-			opts.GitHubAppID != 0 || opts.GitHubAppPrivateKey != "" {
+			opts.GitAllRepositories || githubAppConfigured {
 			return nil, environment.Spec{}, errors.New("sandbox, Git workspace, and GitHub App options require --sandbox")
 		}
 		return nil, environment.Spec{}, nil
@@ -39,11 +40,14 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 		}
 		command := handsCommandArgs(handsPath, opts)
 		network := environment.NetworkDisabled
-		if allowNetwork || opts.GitRepository != "" {
+		if allowNetwork || opts.GitRepository != "" || opts.GitAllRepositories {
 			network = environment.NetworkEnabled
 		}
 		if (opts.GitRepository == "") != (opts.GitRevision == "") {
 			return nil, environment.Spec{}, errors.New("--git-repository and --git-revision must be set together")
+		}
+		if opts.GitAllRepositories && !githubAppConfigured {
+			return nil, environment.Spec{}, errors.New("--git-all-repositories requires GitHub App authentication")
 		}
 		var workspacePlan environment.WorkspacePlan
 		if opts.GitRepository != "" {
@@ -57,17 +61,17 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 			return nil, environment.Spec{}, errors.New("--sandbox-idle-timeout must not be negative")
 		}
 		provider := &e2b.Provider{
+			APIKey:      opts.E2BAPIKey,
 			Template:    opts.E2BTemplate,
 			HandsPath:   handsPath,
 			IdleTimeout: opts.SandboxIdleTimeout,
 			OnError:     opts.EnvironmentError,
+			OnDebug:     opts.EnvironmentDebug,
 		}
-		if opts.GitHubAppID != 0 || opts.GitHubAppPrivateKey != "" {
-			if opts.GitRepository == "" {
-				return nil, environment.Spec{}, errors.New("GitHub App authentication requires --git-repository and --git-revision")
-			}
+		if githubAppConfigured {
 			app, appErr := githubapp.New(githubapp.Config{
-				AppID: opts.GitHubAppID, PrivateKeyPath: opts.GitHubAppPrivateKey,
+				AppID: opts.GitHubAppID, InstallationID: opts.GitHubAppInstallationID,
+				PrivateKeyPath: opts.GitHubAppPrivateKey,
 			})
 			if appErr != nil {
 				return nil, environment.Spec{}, appErr
@@ -76,13 +80,14 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 		}
 		return provider, environment.Spec{
 			Command: command, Network: network, WorkspacePlan: workspacePlan,
+			GitAllRepositories: opts.GitAllRepositories,
 			Limits: environment.ResourceLimits{
 				CallTimeout:    60 * time.Second,
 				MaxResultBytes: opts.PluginMaxResultBytes,
 			},
 		}, nil
 	}
-	if opts.GitRepository != "" || opts.GitRevision != "" || opts.GitHubAppID != 0 || opts.GitHubAppPrivateKey != "" {
+	if opts.GitRepository != "" || opts.GitRevision != "" || opts.GitAllRepositories || githubAppConfigured {
 		return nil, environment.Spec{}, errors.New("git workspace provisioning and GitHub App authentication require --sandbox e2b")
 	}
 	commandPath := handsCommand

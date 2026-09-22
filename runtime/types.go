@@ -22,6 +22,7 @@ const (
 	// the durable reconnect cursor.
 	EventAssistantDelta = "assistant.delta"
 	EventToolProgress   = "tool.progress"
+	EventRunProgress    = "run.progress"
 	EventHeartbeat      = "heartbeat"
 
 	// Runner events are internal signals translated by Manager into the public
@@ -132,6 +133,7 @@ type Event struct {
 	Run              *Run                       `json:"run,omitempty"`
 	Delta            *TextDelta                 `json:"delta,omitempty"`
 	Progress         *ToolProgress              `json:"progress,omitempty"`
+	RunProgress      *RunProgress               `json:"run_progress,omitempty"`
 	Metadata         map[string]json.RawMessage `json:"metadata,omitempty"`
 	CreatedAt        time.Time                  `json:"created_at"`
 }
@@ -147,18 +149,26 @@ type ToolProgress struct {
 	Text       string `json:"text,omitempty"`
 }
 
+type RunProgress struct {
+	Stage string `json:"stage"`
+}
+
 type RunRequest struct {
-	ConversationID   string
-	RunID            string
-	InboundMessageID string
-	Workspace        string
-	Text             string
-	Messages         []Message
-	Emit             func(RunEvent) error
+	ConversationID     string
+	RunID              string
+	InboundMessageID   string
+	Workspace          string
+	GitRepository      string
+	GitRevision        string
+	GitAllRepositories bool
+	Text               string
+	Messages           []Message
+	Emit               func(RunEvent) error
 }
 
 type RunEvent struct {
 	Type       string
+	Stage      string
 	Text       string
 	MessageID  string
 	PartID     string
@@ -185,9 +195,19 @@ func (f RunnerFunc) Run(ctx context.Context, req RunRequest) (RunResult, error) 
 }
 
 type Conversation struct {
-	ID        string    `json:"conversation_id"`
-	Workspace string    `json:"workspace"`
-	CreatedAt time.Time `json:"created_at"`
+	ID                 string    `json:"conversation_id"`
+	Workspace          string    `json:"workspace"`
+	WorkspaceLock      string    `json:"-"`
+	GitRepository      string    `json:"git_repository,omitempty"`
+	GitRevision        string    `json:"git_revision,omitempty"`
+	GitAllRepositories bool      `json:"git_all_repositories,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+}
+
+type ConversationOptions struct {
+	GitRepository      string `json:"git_repository,omitempty"`
+	GitRevision        string `json:"git_revision,omitempty"`
+	GitAllRepositories bool   `json:"git_all_repositories,omitempty"`
 }
 
 type AcceptedMessage struct {

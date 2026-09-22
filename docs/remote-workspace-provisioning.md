@@ -240,32 +240,38 @@ commands including `git commit`, `fetch`, `rebase`, and authenticated `push`.
 The credential is therefore an intentional agent capability, not a value that
 can be hidden from unrestricted bash.
 
-Never pass developer credentials, organization-wide tokens, or `E2B_API_KEY`
+Never pass developer credentials or `E2B_API_KEY`
 to hands. The first authenticated source integration is specifically
 `github_app/v1`, which supplies a short-lived GitHub App installation token
 with:
 
-- access to one configured repository;
+- access to the conversation's primary repository by default, or every
+  repository granted to the installation when explicitly requested;
 - metadata read and contents read/write only;
-- no administration or organization-wide authority;
+- no administration authority;
 - no workflow authority unless separately justified;
 - short expiration; and
 - protected destination branches.
 
 Local pons installations do not depend on a centrally owned Pons GitHub App.
-The implemented first slice accepts a bring-your-own App ID and host-side
-private-key path. The owner installs that App only on selected repositories.
+The implemented first slice accepts a bring-your-own App ID, installation ID,
+and host-side private-key path. The owner chooses selected or all repositories
+when installing the App.
 GitHub's App Manifest flow can later create an app owned by the user or their
 organization and place its returned ID and private key into the local credential
 store, improving interactive setup without changing runtime authentication.
 
 For each run, the local host signs a GitHub App JWT and requests a one-hour
-installation token narrowed to the configured repository and required
-permissions. Only that installation token crosses into the microVM, through
+installation token with Contents write and Metadata read permissions. The
+token is restricted to the conversation's primary repository by default.
+An explicit cross-repository option requests access to every repository in the
+installation, allowing the agent to clone more repositories during its run.
+Each conversation stores its own primary source and pinned commit, so one server
+can place independent workspaces for different repositories. Only the
+installation token crosses into the microVM, through
 transient Git process configuration. The App private key never leaves the
 host. The repository may use an SSH remote in the developer's checkout; pons
-uses a derived HTTPS URL in the remote workspace and does not forward SSH keys
-or an SSH agent.
+uses HTTPS in the remote workspace and does not forward SSH keys or an SSH agent.
 
 The installation token is delegated authority available to unrestricted hands;
 an agent can inspect, transform, or write any credential it is able to use.

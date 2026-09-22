@@ -40,12 +40,16 @@ func (c Client) endpoint(path string) (string, error) {
 	return parsed.String(), nil
 }
 
-func (c Client) CreateConversation(ctx context.Context) (ponsruntime.Conversation, error) {
+func (c Client) CreateConversation(ctx context.Context, options ponsruntime.ConversationOptions) (ponsruntime.Conversation, error) {
 	endpoint, err := c.endpoint("/v1/conversations")
 	if err != nil {
 		return ponsruntime.Conversation{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader([]byte(`{}`)))
+	body, err := json.Marshal(options)
+	if err != nil {
+		return ponsruntime.Conversation{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return ponsruntime.Conversation{}, err
 	}
@@ -218,10 +222,14 @@ func (c Client) Events(ctx context.Context, conversationID string, after uint64)
 // Send opens the event stream before submitting the message and waits for
 // that message's terminal event.
 func (c Client) Send(ctx context.Context, conversationID, idempotencyKey, text string, onSnapshot func(ponsruntime.ConversationView), onEvent func(ponsruntime.Event)) (SendResult, error) {
+	return c.SendWithOptions(ctx, conversationID, idempotencyKey, text, ponsruntime.ConversationOptions{}, onSnapshot, onEvent)
+}
+
+func (c Client) SendWithOptions(ctx context.Context, conversationID, idempotencyKey, text string, options ponsruntime.ConversationOptions, onSnapshot func(ponsruntime.ConversationView), onEvent func(ponsruntime.Event)) (SendResult, error) {
 	var snapshot ponsruntime.ConversationView
 	after := uint64(0)
 	if conversationID == "" {
-		conversation, err := c.CreateConversation(ctx)
+		conversation, err := c.CreateConversation(ctx, options)
 		if err != nil {
 			return SendResult{}, err
 		}

@@ -197,7 +197,7 @@ func TestRepairScanFindsWorkAfterLostWake(t *testing.T) {
 	}
 	defer manager.Close()
 	waitUntil(t, func() bool { return store.claimCalls.Load() > 0 }, "initial runnable check did not run")
-	conversation, err := manager.CreateConversation(context.Background())
+	conversation, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +455,7 @@ func TestConversationSerializesMessagesAndDeduplicates(t *testing.T) {
 		return RunResult{Answer: "answer: " + request.Text}, nil
 	})
 	m := testManager(t, runner)
-	conversation, err := m.CreateConversation(context.Background())
+	conversation, err := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,7 +511,7 @@ func TestBackgroundStoreFailureIsReported(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	conversation, err := manager.CreateConversation(context.Background())
+	conversation, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,7 +541,7 @@ func TestSnapshotThenEventsHasNoDurableGap(t *testing.T) {
 			return RunResult{}, ctx.Err()
 		}
 	}))
-	conversation, _ := m.CreateConversation(context.Background())
+	conversation, _ := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{})
 	view, err := m.View(context.Background(), conversation.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -582,6 +582,9 @@ func TestSnapshotThenEventsHasNoDurableGap(t *testing.T) {
 func TestTransientDeltaIsLiveOnlyAndDoesNotAdvanceCursor(t *testing.T) {
 	release := make(chan struct{})
 	m := testManager(t, RunnerFunc(func(ctx context.Context, request RunRequest) (RunResult, error) {
+		if err := request.Emit(RunEvent{Type: ponsruntime.EventRunProgress, Stage: "Preparing sandbox…"}); err != nil {
+			return RunResult{}, err
+		}
 		if err := request.Emit(RunEvent{Type: EventAssistantDelta, MessageID: "draft", PartID: "text", Text: "hel"}); err != nil {
 			return RunResult{}, err
 		}
@@ -592,7 +595,7 @@ func TestTransientDeltaIsLiveOnlyAndDoesNotAdvanceCursor(t *testing.T) {
 			return RunResult{}, ctx.Err()
 		}
 	}))
-	conversation, _ := m.CreateConversation(context.Background())
+	conversation, _ := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{})
 	ctx := t.Context()
 	stream, err := m.Subscribe(ctx, conversation.ID, 0)
 	if err != nil {
@@ -602,10 +605,20 @@ func TestTransientDeltaIsLiveOnlyAndDoesNotAdvanceCursor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	seenProgress := false
 	for {
 		select {
 		case event := <-stream:
+			if event.Type == ponsruntime.EventRunProgress {
+				if event.ID != 0 || event.RunProgress == nil || event.RunProgress.Stage != "Preparing sandbox…" {
+					t.Fatalf("progress = %+v", event)
+				}
+				seenProgress = true
+			}
 			if event.Type == EventAssistantDelta {
+				if !seenProgress {
+					t.Fatal("run progress was not delivered")
+				}
 				if event.ID != 0 || event.Delta == nil || event.Delta.Text != "hel" {
 					t.Fatalf("delta = %+v", event)
 				}
@@ -614,8 +627,8 @@ func TestTransientDeltaIsLiveOnlyAndDoesNotAdvanceCursor(t *testing.T) {
 					t.Fatal(loadErr)
 				}
 				for _, durable := range persisted {
-					if durable.Type == EventAssistantDelta {
-						t.Fatal("transient delta was persisted")
+					if durable.Type == EventAssistantDelta || durable.Type == ponsruntime.EventRunProgress {
+						t.Fatal("transient event was persisted")
 					}
 				}
 				view, viewErr := m.View(context.Background(), conversation.ID)
@@ -648,7 +661,7 @@ func TestToolLifecycleUsesEntityUpserts(t *testing.T) {
 		}
 		return RunResult{Answer: "hello " + request.Text}, nil
 	}))
-	conversation, err := m.CreateConversation(context.Background())
+	conversation, err := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -687,7 +700,7 @@ func TestFailedRunIsDurableAndNotRetried(t *testing.T) {
 		}
 		return RunResult{}, errors.New("failed after intent")
 	}))
-	conversation, _ := m.CreateConversation(context.Background())
+	conversation, _ := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{})
 	_, err := m.Submit(context.Background(), conversation.ID, "once", []TextPart{{Type: "text", Text: "go"}})
 	if err != nil {
 		t.Fatal(err)

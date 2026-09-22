@@ -18,10 +18,10 @@ import (
 	"github.com/samperrin/pons/protocol"
 )
 
-// CredentialSource returns transient Git process credentials for one
-// repository. Long-lived provider credentials remain on the host.
+// CredentialSource returns transient Git process credentials for a run.
+// Long-lived provider credentials remain on the host.
 type CredentialSource interface {
-	RepositoryCredentials(context.Context, string) (Credentials, error)
+	Credentials(context.Context, string, bool) (Credentials, error)
 }
 
 // Credentials are explicit process environment and values to redact before a

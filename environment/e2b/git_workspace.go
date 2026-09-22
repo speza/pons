@@ -21,27 +21,35 @@ func provisionGitWorkspace(
 	env map[string]string,
 	limit int64,
 	onError func(error),
+	onDebug func(string),
 ) (environment.WorkspaceState, error) {
 	commands := []struct {
+		step          string
 		command       string
 		args          []string
 		cwd           string
 		authenticated bool
 	}{
-		{command: "/bin/rm", args: []string{"-rf", defaultE2BWorkspace}, cwd: "/home/user"},
-		{command: "/usr/bin/git", args: []string{"init", defaultE2BWorkspace}, cwd: "/home/user"},
-		{command: "/usr/bin/git", args: []string{"-C", defaultE2BWorkspace, "remote", "add", "origin", state.SourceRef}, cwd: "/home/user"},
-		{command: "/usr/bin/git", args: []string{"-C", defaultE2BWorkspace, "fetch", "--depth=1", "--no-tags", "origin", state.BaseRevision}, cwd: "/home/user", authenticated: true},
-		{command: "/usr/bin/git", args: []string{"-C", defaultE2BWorkspace, "checkout", "-b", gitworkspace.BranchName(state.ID), "FETCH_HEAD"}, cwd: "/home/user"},
-		{command: "/bin/tar", args: []string{"--hard-dereference", "-cf", workspaceCheckpointPath, "-C", defaultE2BWorkspace, "."}, cwd: "/home/user"},
+		{step: "prepare", command: "/bin/rm", args: []string{"-rf", defaultE2BWorkspace}, cwd: "/home/user"},
+		{step: "git init", command: "/usr/bin/git", args: []string{"init", defaultE2BWorkspace}, cwd: "/home/user"},
+		{step: "git remote add", command: "/usr/bin/git", args: []string{"-C", defaultE2BWorkspace, "remote", "add", "origin", state.SourceRef}, cwd: "/home/user"},
+		{step: "git fetch", command: "/usr/bin/git", args: []string{"-C", defaultE2BWorkspace, "fetch", "--depth=1", "--no-tags", "origin", state.BaseRevision}, cwd: "/home/user", authenticated: true},
+		{step: "git checkout", command: "/usr/bin/git", args: []string{"-C", defaultE2BWorkspace, "checkout", "-b", gitworkspace.BranchName(state.ID), "FETCH_HEAD"}, cwd: "/home/user"},
+		{step: "archive initial checkout", command: "/bin/tar", args: []string{"--hard-dereference", "-cf", workspaceCheckpointPath, "-C", defaultE2BWorkspace, "."}, cwd: "/home/user"},
 	}
 	for _, command := range commands {
+		if command.step == "git fetch" {
+			debugE2B(onDebug, "workspace=%q sandbox=%q git fetch started", state.ID, sandbox.ID)
+		}
 		var commandEnv map[string]string
 		if command.authenticated {
 			commandEnv = env
 		}
 		if _, _, err := client.run(ctx, sandbox, command.command, command.args, command.cwd, commandEnv); err != nil {
-			return environment.WorkspaceState{}, fmt.Errorf("environment: provision E2B Git workspace: %w", err)
+			return environment.WorkspaceState{}, fmt.Errorf("environment: provision E2B Git workspace step %q: %w", command.step, err)
+		}
+		if command.command == "/usr/bin/git" {
+			debugE2B(onDebug, "workspace=%q sandbox=%q %s completed", state.ID, sandbox.ID, command.step)
 		}
 	}
 	body, err := stageWorkspaceArchive(func(out io.Writer) error {
@@ -67,6 +75,7 @@ func provisionGitWorkspace(
 	if err := store.SaveWorkspaceState(ctx, state); err != nil {
 		return environment.WorkspaceState{}, err
 	}
+	debugE2B(onDebug, "workspace=%q sandbox=%q initial checkpoint=%s saved", state.ID, sandbox.ID, checkpointRef)
 	if err := checkpoints.PruneWorkspaceCheckpoints(ctx, state.ID, []string{checkpointRef}); err != nil && onError != nil {
 		onError(fmt.Errorf("environment: prune initial Git workspace checkpoints: %w", err))
 	}

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -100,6 +99,7 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 		Workspace:   workspace,
 		MaxTurns:    3,
 		Debug:       true,
+		Sandbox:     "e2b",
 		Environment: execution,
 		EnvironmentSpec: environment.Spec{
 			Command: []string{"/test/pons-hands"},
@@ -107,17 +107,24 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 		Brain: llm.Config{
 			Provider: "openai", Model: "test", APIKey: "test", BaseURL: provider.URL + "/v1",
 		},
-	}, logger: log.New(&debugLog, "", 0)}
+	}, logger: newServerLogger(&debugLog, true)}
 	requestNumber := 0
 	var history []ponsruntime.Message
+	var progress []string
 	request := func(text string) ponsruntime.RunRequest {
 		requestNumber++
 		inboundID := fmt.Sprintf("inbound-%d", requestNumber)
 		return ponsruntime.RunRequest{
 			ConversationID: "conversation-1", InboundMessageID: inboundID,
 			RunID: fmt.Sprintf("run-%d", requestNumber), Workspace: workspace, Text: text,
+			GitRepository: "https://github.com/acme/a.git", GitRevision: strings.Repeat("a", 40),
 			Messages: append([]ponsruntime.Message(nil), history...),
-			Emit:     func(ponsruntime.RunEvent) error { return nil },
+			Emit: func(event ponsruntime.RunEvent) error {
+				if event.Type == ponsruntime.EventRunProgress {
+					progress = append(progress, event.Stage)
+				}
+				return nil
+			},
 		}
 	}
 	first, err := runner.Run(context.Background(), request("first question"))
@@ -145,8 +152,11 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 	if execution.starts.Load() != 2 || execution.closes.Load() != 2 {
 		t.Fatalf("environment lifecycle: starts=%d closes=%d", execution.starts.Load(), execution.closes.Load())
 	}
-	if got := debugLog.String(); !strings.Contains(got, "sandbox=recording") || !strings.Contains(got, "workspace="+fmt.Sprintf("%q", workspace)) {
-		t.Fatalf("debug log omits effective environment: %s", got)
+	if got := debugLog.String(); !strings.Contains(got, `"sandbox":"recording"`) || !strings.Contains(got, `"workspace":"`+workspace+`"`) || !strings.Contains(got, `"conversation_id":"conversation-1"`) || strings.Contains(got, "answer 1") || strings.Contains(got, "answer 2") {
+		t.Fatalf("unexpected structured run log: %s", got)
+	}
+	if len(progress) != 6 || progress[0] != "Preparing sandbox…" || progress[1] != "Sandbox ready" || progress[2] != "Saving sandbox state…" {
+		t.Fatalf("run progress = %v", progress)
 	}
 	for i := 1; i <= 2; i++ {
 		spec := <-execution.specs
@@ -155,6 +165,12 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 		}
 		if want := fmt.Sprintf("run-%d", i); spec.RunID != want {
 			t.Fatalf("environment run ID = %q, want %q", spec.RunID, want)
+		}
+		if spec.WorkspacePlan.Strategy != environment.WorkspaceStrategyGit ||
+			spec.WorkspacePlan.SourceRef != "https://github.com/acme/a.git" ||
+			spec.WorkspacePlan.BaseRevision != strings.Repeat("a", 40) ||
+			spec.Network != environment.NetworkEnabled {
+			t.Fatalf("session Git plan = %+v, network = %q", spec.WorkspacePlan, spec.Network)
 		}
 	}
 }
@@ -166,7 +182,7 @@ func TestRuntimeServerConfiguresAndClosesStatefulEnvironment(t *testing.T) {
 	done := make(chan error, 1)
 	stateDir, workspace := t.TempDir(), t.TempDir()
 	go func() {
-		done <- runServerReady(ctx, log.New(io.Discard, "", 0), serverOptions{
+		done <- runServerReady(ctx, newServerLogger(io.Discard, false), serverOptions{
 			Address: "127.0.0.1:0", StateDir: stateDir, Workspace: workspace,
 			MaxConcurrent: 1, Environment: provider,
 		}, started)
@@ -186,7 +202,7 @@ func TestRuntimeServerConfiguresAndClosesStatefulEnvironment(t *testing.T) {
 
 func TestDebugConfigurationIncludesSandboxPolicy(t *testing.T) {
 	var output bytes.Buffer
-	logDebugConfiguration(log.New(&output, "", 0), serverOptions{
+	logDebugConfiguration(newServerLogger(&output, true), serverOptions{
 		Debug: true, Sandbox: "seatbelt", Workspace: "/workspace", MaxTurns: 12, MaxConcurrent: 4,
 		Brain:       llm.Config{Provider: "codex", Model: "gpt-5.6-luna"},
 		Environment: &recordingEnvironment{},
@@ -199,13 +215,25 @@ func TestDebugConfigurationIncludesSandboxPolicy(t *testing.T) {
 	})
 	got := output.String()
 	for _, want := range []string{
-		"provider=codex", "model=gpt-5.6-luna", `workspace="/workspace"`,
-		"sandbox=seatbelt", "network=disabled", `hands="/usr/local/bin/pons-hands"`,
-		"external_plugins=1", "read_only_paths=1",
+		`"provider":"codex"`, `"model":"gpt-5.6-luna"`, `"workspace":"/workspace"`,
+		`"sandbox":"seatbelt"`, `"network":"disabled"`, `"hands":"/usr/local/bin/pons-hands"`,
+		`"external_plugins":1`, `"read_only_paths":1`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("debug configuration missing %q: %s", want, got)
 		}
+	}
+}
+
+func TestE2BDebugLogHasWorkspaceAndSandboxFields(t *testing.T) {
+	var output bytes.Buffer
+	logE2BDebug(newServerLogger(&output, true), `workspace="workspace-1" sandbox="sandbox-1" checkpoint started`)
+	var record map[string]any
+	if err := json.Unmarshal(output.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record["workspace_id"] != "workspace-1" || record["sandbox_id"] != "sandbox-1" || record["event"] != "checkpoint started" {
+		t.Fatalf("E2B log = %+v", record)
 	}
 }
 
@@ -227,7 +255,7 @@ func TestRuntimeServerShutdownClosesActiveSSE(t *testing.T) {
 	done := make(chan error, 1)
 	stateDir, workspace := t.TempDir(), t.TempDir()
 	go func() {
-		done <- runServerReady(ctx, log.New(io.Discard, "", 0), serverOptions{
+		done <- runServerReady(ctx, newServerLogger(io.Discard, false), serverOptions{
 			Address: "127.0.0.1:0", StateDir: stateDir, Workspace: workspace, MaxConcurrent: 1,
 		}, started)
 	}()
@@ -340,13 +368,13 @@ func TestRemoteStateDirectoryMustBeOutsideWorkspace(t *testing.T) {
 
 func TestExecutionEnvironmentConfiguresE2B(t *testing.T) {
 	provider, spec, err := executionEnvironment("e2b", "", false, serverOptions{
-		E2BTemplate: "custom", E2BHandsPath: "/opt/pons-hands", BashTimeout: 9,
+		E2BTemplate: "custom", E2BHandsPath: "/opt/pons-hands", E2BAPIKey: "test-key", BashTimeout: 9,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	e2bProvider, ok := provider.(*e2b.Provider)
-	if !ok || e2bProvider.Template != "custom" || e2bProvider.HandsPath != "/opt/pons-hands" {
+	if !ok || e2bProvider.Template != "custom" || e2bProvider.HandsPath != "/opt/pons-hands" || e2bProvider.APIKey != "test-key" {
 		t.Fatalf("provider = %#v", provider)
 	}
 	if spec.Network != environment.NetworkDisabled || spec.Command[0] != "/opt/pons-hands" || !slices.Contains(spec.Command, "9") {
@@ -389,9 +417,10 @@ func TestExecutionEnvironmentRequiresCompleteE2BGitConfiguration(t *testing.T) {
 
 func TestExecutionEnvironmentRequiresCompleteGitHubAppConfiguration(t *testing.T) {
 	_, _, err := executionEnvironment("e2b", "", false, serverOptions{
-		GitRepository: "https://github.com/example/project.git",
-		GitRevision:   strings.Repeat("a", 40),
-		GitHubAppID:   1234,
+		GitRepository:           "https://github.com/example/project.git",
+		GitRevision:             strings.Repeat("a", 40),
+		GitHubAppID:             1234,
+		GitHubAppInstallationID: 99,
 	})
 	if err == nil || !strings.Contains(err.Error(), "private key path is required") {
 		t.Fatalf("incomplete GitHub App configuration error = %v", err)
@@ -399,8 +428,8 @@ func TestExecutionEnvironmentRequiresCompleteGitHubAppConfiguration(t *testing.T
 	_, _, err = executionEnvironment("e2b", "", false, serverOptions{
 		GitHubAppID: 1234, GitHubAppPrivateKey: "/private/key.pem",
 	})
-	if err == nil || !strings.Contains(err.Error(), "requires --git-repository") {
-		t.Fatalf("repository-less GitHub App configuration error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "installation ID must be positive") {
+		t.Fatalf("missing installation ID error = %v", err)
 	}
 	for name, test := range map[string]struct {
 		backend      string
@@ -470,7 +499,7 @@ func TestBundledCLIUsesRuntimeServerPath(t *testing.T) {
 	defer provider.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := runBundled(ctx, log.New(&bytes.Buffer{}, "", 0), serverOptions{
+	err := runBundled(ctx, newServerLogger(&bytes.Buffer{}, false), serverOptions{
 		StateDir: t.TempDir(), Workspace: t.TempDir(), MaxTurns: 3, MaxConcurrent: 1,
 		Brain: llm.Config{Provider: "openai", Model: "test", APIKey: "test", BaseURL: provider.URL + "/v1"},
 	}, "", "stable", "hello", false)

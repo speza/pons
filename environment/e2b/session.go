@@ -30,6 +30,7 @@ type e2bSession struct {
 	timeout           time.Duration
 	maxWorkspaceBytes int64
 	onError           func(error)
+	onDebug           func(string)
 	credentials       gitworkspace.Credentials
 	metadata          environment.Metadata
 	keepaliveCancel   context.CancelFunc
@@ -109,6 +110,14 @@ func (s *e2bSession) refreshTimeout(ctx context.Context) error {
 	return nil
 }
 
+func (s *e2bSession) debugf(format string, args ...any) {
+	if s.onDebug == nil {
+		return
+	}
+	prefix := fmt.Sprintf("workspace=%q sandbox=%q ", s.workspace.ID, s.sandbox.ID)
+	s.onDebug(prefix + fmt.Sprintf(format, args...))
+}
+
 func (s *e2bSession) persistCheckpoint(ctx context.Context, archive io.ReadSeeker) error {
 	if err := validateWorkspaceArchive(&contextReader{ctx: ctx, reader: archive}, s.maxWorkspaceBytes); err != nil {
 		return err
@@ -127,6 +136,7 @@ func (s *e2bSession) persistCheckpoint(ctx context.Context, archive io.ReadSeeke
 		return err
 	}
 	s.workspace = workspace
+	s.debugf("checkpoint=%s saved", checkpointRef)
 	// The new reference is durable before pruning. archive/v1's BaseRevision is
 	// a checkpoint reference; git/v1's is a Git object ID and must not be passed
 	// to the checkpoint store.
@@ -179,6 +189,7 @@ func (s *e2bSession) Close() error {
 			s.closeErr = errors.Join(s.closeErr, recoveryErr)
 		}
 		if s.closeErr == nil {
+			s.debugf("checkpoint started")
 			if _, _, err := s.client.run(ctx, s.sandbox, "/bin/tar", []string{
 				"--hard-dereference", "-cf", workspaceCheckpointPath, "-C", defaultE2BWorkspace, ".",
 			}, "/home/user", nil); err != nil {
@@ -210,6 +221,9 @@ func (s *e2bSession) Close() error {
 					ExpiresAt:     idleUntil.Add(time.Minute),
 					UpdatedAt:     now,
 				})
+				if s.closeErr == nil {
+					s.debugf("state=idle until=%s", idleUntil.Format(time.RFC3339))
+				}
 			}
 		}
 		if retain && s.closeErr != nil {
@@ -220,18 +234,25 @@ func (s *e2bSession) Close() error {
 			recoveryCancel()
 			s.closeErr = errors.Join(s.closeErr, recoveryErr)
 			if recoveryErr != nil {
+				s.debugf("state=recovery retention incomplete")
 				s.closeErr = fmt.Errorf("environment: sandbox %q was not deleted, but recovery retention could not be fully recorded or extended; recover files immediately (provider TTL may expire sooner): %w", s.sandbox.ID, s.closeErr)
 			} else {
+				s.debugf("state=recovery retained until=%s", recoveryUntil.Format(time.RFC3339))
 				s.closeErr = fmt.Errorf("environment: sandbox %q retained for manual recovery until %s; new runs are blocked until then: %w",
 					s.sandbox.ID, recoveryUntil.Format(time.RFC3339), s.closeErr)
 			}
 		} else if s.store == nil || s.closeErr != nil {
+			s.debugf("deleting after session close failure")
 			killCtx, killCancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer killCancel()
 			killErr := s.client.killSandbox(killCtx, s.sandbox.ID)
 			s.closeErr = errors.Join(s.closeErr, killErr)
 			if killErr == nil && s.store != nil {
-				s.closeErr = errors.Join(s.closeErr, s.store.DeleteEnvironmentState(killCtx, s.workspace.ID, s.sandbox.ID))
+				deleteErr := s.store.DeleteEnvironmentState(killCtx, s.workspace.ID, s.sandbox.ID)
+				s.closeErr = errors.Join(s.closeErr, deleteErr)
+				if deleteErr == nil {
+					s.debugf("deleted")
+				}
 			}
 		}
 		if s.owner != nil {

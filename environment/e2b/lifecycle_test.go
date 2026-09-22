@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -182,6 +183,13 @@ func testSessionCheckpoint(t *testing.T, fault string) {
 	defer server.Close()
 	store := &checkpointFailureStore{fault: fault}
 	provider := &Provider{APIKey: "key", APIURL: server.URL, EnvdURL: server.URL, HTTPClient: server.Client(), CleanupInterval: time.Hour}
+	var debugMu sync.Mutex
+	var debugEvents []string
+	provider.OnDebug = func(event string) {
+		debugMu.Lock()
+		debugEvents = append(debugEvents, event)
+		debugMu.Unlock()
+	}
 	if fault == "heartbeat" {
 		provider.Timeout = time.Second
 		provider.OnError = func(err error) {
@@ -222,6 +230,9 @@ func testSessionCheckpoint(t *testing.T, fault string) {
 	}
 	cancel()
 	closeErr := session.Close()
+	debugMu.Lock()
+	debug := strings.Join(debugEvents, "\n")
+	debugMu.Unlock()
 	wantFailure := fault != "" && fault != "heartbeat"
 	wantRetained := "seed"
 	if !wantFailure || fault == "idle" {
@@ -231,6 +242,9 @@ func testSessionCheckpoint(t *testing.T, fault string) {
 		t.Fatalf("pruning advanced without a durable checkpoint: retained=%v, want %q", retained, wantRetained)
 	}
 	if wantFailure {
+		if !strings.Contains(debug, "state=recovery") {
+			t.Fatalf("missing recovery lifecycle debug event: %s", debug)
+		}
 		if closeErr == nil || !strings.Contains(closeErr.Error(), `sandbox "sandbox"`) {
 			t.Fatalf("Close = %v", closeErr)
 		}
@@ -275,6 +289,9 @@ func testSessionCheckpoint(t *testing.T, fault string) {
 	if closeErr != nil {
 		t.Fatal(closeErr)
 	}
+	if !strings.Contains(debug, "checkpoint=updated saved") || !strings.Contains(debug, "state=idle") {
+		t.Fatalf("missing completed checkpoint or idle lifecycle debug event: %s", debug)
+	}
 	if deletes.Load() != 0 || store.environmentLast.Load().Status != environment.StateIdle {
 		t.Fatal("canceled run discarded its sandbox instead of checkpointing and marking idle")
 	}
@@ -299,6 +316,42 @@ type expiredStateStore struct{ recordingStateStore }
 
 func (*expiredStateStore) ExpiredEnvironmentStates(context.Context, string, time.Time, int) ([]environment.State, error) {
 	return []environment.State{{WorkspaceID: "workspace", EnvironmentID: "sandbox"}}, nil
+}
+
+type multipleExpiredStateStore struct {
+	recordingStateStore
+	states []environment.State
+}
+
+func (s *multipleExpiredStateStore) ExpiredEnvironmentStates(context.Context, string, time.Time, int) ([]environment.State, error) {
+	return s.states, nil
+}
+
+func TestJanitorLogsAllWorkspaceCleanup(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("unexpected cleanup request %s", r.Method)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	store := &multipleExpiredStateStore{states: []environment.State{
+		{WorkspaceID: "other", EnvironmentID: "other-sandbox", Status: environment.StateIdle},
+		{WorkspaceID: "current", EnvironmentID: "current-sandbox", Status: environment.StateIdle},
+	}}
+	var events []string
+	provider := &Provider{
+		stateStore: store,
+		OnDebug:    func(event string) { events = append(events, event) },
+	}
+	provider.cleanExpired(context.Background(), e2bConfig{apiURL: server.URL, http: server.Client()})
+	debug := strings.Join(events, "\n")
+	if !strings.Contains(debug, `workspace="current" sandbox="current-sandbox" deleted`) || !strings.Contains(debug, `workspace="other" sandbox="other-sandbox" deleted`) {
+		t.Fatalf("cleanup debug = %s", debug)
+	}
+	if got := store.environmentDeletes.Load(); got != 2 {
+		t.Fatalf("cleanup deleted %d workspaces, want 2", got)
+	}
 }
 
 func TestProviderCloseCancelsBlockedJanitor(t *testing.T) {

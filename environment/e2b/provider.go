@@ -50,6 +50,7 @@ type Provider struct {
 	APIURL            string
 	EnvdURL           string
 	OnError           func(error)
+	OnDebug           func(string)
 	GitCredentials    gitworkspace.CredentialSource
 
 	lifecycleMu     sync.Mutex
@@ -104,9 +105,14 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 	if err != nil {
 		return nil, err
 	}
+	p.debugf("workspace=%q strategy=%s checkpoint=%t", workspaceID, workspaceState.Strategy, workspaceState.CheckpointRef != "")
 	var credentials gitworkspace.Credentials
-	if spec.WorkspacePlan.Strategy == environment.WorkspaceStrategyGit && p.GitCredentials != nil {
-		credentials, err = p.GitCredentials.RepositoryCredentials(ctx, spec.WorkspacePlan.SourceRef)
+	if spec.GitAllRepositories && p.GitCredentials == nil {
+		return nil, errors.New("environment: installation-wide Git access requires GitHub App authentication")
+	}
+	if p.GitCredentials != nil && (spec.WorkspacePlan.Strategy == environment.WorkspaceStrategyGit || spec.GitAllRepositories) {
+		p.debugf("workspace=%q requesting GitHub credentials scope=%s", workspaceID, gitScope(spec.GitAllRepositories))
+		credentials, err = p.GitCredentials.Credentials(ctx, spec.WorkspacePlan.SourceRef, spec.GitAllRepositories)
 		if err != nil {
 			return nil, err
 		}
@@ -117,19 +123,33 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 		return nil, err
 	}
 	cleanup := func() error {
+		p.debugf("workspace=%q sandbox=%q deleting after startup failure", workspaceID, sandbox.ID)
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := client.killSandbox(cleanupCtx, sandbox.ID); err != nil {
 			return err
 		}
-		return store.DeleteEnvironmentState(cleanupCtx, workspaceID, sandbox.ID)
+		if err := store.DeleteEnvironmentState(cleanupCtx, workspaceID, sandbox.ID); err != nil {
+			return err
+		}
+		p.debugf("workspace=%q sandbox=%q deleted", workspaceID, sandbox.ID)
+		return nil
 	}
 	if !resumed {
+		initialCheckout := workspaceState.CheckpointRef == ""
+		if initialCheckout {
+			p.debugf("workspace=%q sandbox=%q provisioning Git checkout repository=%q revision=%s", workspaceID, sandbox.ID, workspaceState.SourceRef, workspaceState.BaseRevision)
+		} else {
+			p.debugf("workspace=%q sandbox=%q restoring checkpoint=%s", workspaceID, sandbox.ID, workspaceState.CheckpointRef)
+		}
 		workspaceState, err = placeWorkspace(
-			ctx, client, sandbox, store, checkpoints, workspaceState, env, cfg.maxWorkspaceBytes, cfg.onError,
+			ctx, client, sandbox, store, checkpoints, workspaceState, env, cfg.maxWorkspaceBytes, cfg.onError, p.OnDebug,
 		)
 		if err != nil {
 			return nil, errors.Join(err, cleanup())
+		}
+		if !initialCheckout {
+			p.debugf("workspace=%q sandbox=%q checkpoint=%s restored", workspaceID, sandbox.ID, workspaceState.CheckpointRef)
 		}
 		now := time.Now().UTC()
 		if err := store.SaveEnvironmentState(ctx, environment.State{
@@ -145,6 +165,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 		}); err != nil {
 			return nil, errors.Join(err, cleanup())
 		}
+		p.debugf("workspace=%q sandbox=%q state=active", workspaceID, sandbox.ID)
 	}
 	remoteArgs := append([]string(nil), args...)
 	remoteArgs = append(remoteArgs, "--workspace", defaultE2BWorkspace)
@@ -206,6 +227,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 		timeout:           cfg.timeout,
 		maxWorkspaceBytes: cfg.maxWorkspaceBytes,
 		onError:           cfg.onError,
+		onDebug:           p.OnDebug,
 		credentials:       credentials,
 		metadata: environment.Metadata{
 			Provider:      "e2b",
@@ -226,6 +248,23 @@ type e2bConfig struct {
 	maxWorkspaceBytes                            int64
 	http                                         *http.Client
 	onError                                      func(error)
+}
+
+func (p *Provider) debugf(format string, args ...any) {
+	debugE2B(p.OnDebug, format, args...)
+}
+
+func debugE2B(debug func(string), format string, args ...any) {
+	if debug != nil {
+		debug(fmt.Sprintf(format, args...))
+	}
+}
+
+func gitScope(all bool) string {
+	if all {
+		return "installation"
+	}
+	return "repository"
 }
 
 func (p *Provider) config() (e2bConfig, error) {
@@ -341,11 +380,13 @@ func (p *Provider) acquireSandbox(
 		state, err := store.EnvironmentState(ctx, key)
 		switch {
 		case err == nil && state.Status != environment.StateIdle && time.Now().Before(state.ExpiresAt):
+			p.debugf("workspace=%q sandbox=%q state=%s blocked_until=%s", key, state.EnvironmentID, state.Status, state.ExpiresAt.UTC().Format(time.RFC3339))
 			// A failed metadata write may leave an active record instead of a
 			// recovery record. Neither may be replaced before its recorded expiry.
 			return e2bSandbox{}, false, fmt.Errorf("environment: sandbox %q is %s; recover workspace %q manually before %s; new runs are blocked until then",
 				state.EnvironmentID, state.Status, key, state.ExpiresAt.UTC().Format(time.RFC3339))
 		case err == nil && reusableState(state, cfg, network):
+			p.debugf("workspace=%q sandbox=%q reconnecting state=idle", key, state.EnvironmentID)
 			sandbox, connectErr := client.connectSandbox(ctx, state.EnvironmentID, cfg.timeout)
 			if connectErr == nil {
 				state.Status = environment.StateActive
@@ -356,6 +397,7 @@ func (p *Provider) acquireSandbox(
 				if saveErr := store.SaveEnvironmentState(ctx, state); saveErr != nil {
 					return e2bSandbox{}, false, saveErr
 				}
+				p.debugf("workspace=%q sandbox=%q reconnected state=active", key, sandbox.ID)
 				return sandbox, true, nil
 			}
 			if !hasHTTPStatus(connectErr, http.StatusNotFound) {
@@ -364,7 +406,9 @@ func (p *Provider) acquireSandbox(
 			if deleteErr := store.DeleteEnvironmentState(ctx, key, state.EnvironmentID); deleteErr != nil {
 				return e2bSandbox{}, false, deleteErr
 			}
+			p.debugf("workspace=%q sandbox=%q missing at provider; creating replacement", key, state.EnvironmentID)
 		case err == nil:
+			p.debugf("workspace=%q sandbox=%q removing prior state=%s idle_until=%s", key, state.EnvironmentID, state.Status, state.IdleUntil.UTC().Format(time.RFC3339))
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			if err := client.killSandbox(cleanupCtx, state.EnvironmentID); err != nil {
 				cancel()
@@ -375,16 +419,19 @@ func (p *Provider) acquireSandbox(
 			if deleteErr != nil {
 				return e2bSandbox{}, false, deleteErr
 			}
+			p.debugf("workspace=%q sandbox=%q removed", key, state.EnvironmentID)
 		case !errors.Is(err, environment.ErrStateNotFound):
 			return e2bSandbox{}, false, err
 		}
 	}
 	// Explicit hands variables belong to the short-lived pons-hands process,
 	// not the retained sandbox's ambient environment.
+	p.debugf("workspace=%q creating sandbox template=%q network=%s", key, cfg.template, network)
 	sandbox, err := client.createSandbox(ctx, cfg.template, cfg.timeout, network, nil)
 	if err != nil {
 		return e2bSandbox{}, false, err
 	}
+	p.debugf("workspace=%q sandbox=%q created", key, sandbox.ID)
 	return sandbox, false, nil
 }
 
@@ -432,12 +479,15 @@ func (p *Provider) cleanExpired(ctx context.Context, cfg e2bConfig) {
 		if p.active[state.WorkspaceID] != "" {
 			continue
 		}
+		p.debugf("workspace=%q sandbox=%q cleanup expired state=%s", state.WorkspaceID, state.EnvironmentID, state.Status)
 		if err := client.killSandbox(ctx, state.EnvironmentID); err != nil {
 			p.report(cfg, err)
 			continue
 		}
 		if err := p.stateStore.DeleteEnvironmentState(ctx, state.WorkspaceID, state.EnvironmentID); err != nil {
 			p.report(cfg, err)
+		} else {
+			p.debugf("workspace=%q sandbox=%q deleted", state.WorkspaceID, state.EnvironmentID)
 		}
 	}
 }
@@ -475,8 +525,8 @@ func validateE2BSpec(spec environment.Spec) (string, []string, environment.Netwo
 	if err := gitworkspace.ValidatePlan(spec.WorkspacePlan); err != nil {
 		return "", nil, "", nil, err
 	}
-	if spec.WorkspacePlan.Strategy == environment.WorkspaceStrategyGit && network != environment.NetworkEnabled {
-		return "", nil, "", nil, errors.New("environment: git/v1 workspace requires network access")
+	if (spec.WorkspacePlan.Strategy == environment.WorkspaceStrategyGit || spec.GitAllRepositories) && network != environment.NetworkEnabled {
+		return "", nil, "", nil, errors.New("environment: Git workspace access requires network access")
 	}
 	env := make(map[string]string, len(spec.Environment))
 	for _, entry := range spec.Environment {

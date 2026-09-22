@@ -10,7 +10,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,13 +30,14 @@ func writeTestKey(t *testing.T, key *rsa.PrivateKey, mode os.FileMode) string {
 	return path
 }
 
-func TestRepositoryTokenIsSignedAndRestrictedToRepository(t *testing.T) {
+func TestInstallationTokenIsSignedAndAvailableToInstallationRepositories(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, time.September, 22, 12, 0, 0, 0, time.UTC)
 	var requests atomic.Int32
+	var allRepositories bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
 		jwt := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -64,19 +64,25 @@ func TestRepositoryTokenIsSignedAndRestrictedToRepository(t *testing.T) {
 			t.Errorf("API version = %q", r.Header.Get("X-GitHub-Api-Version"))
 		}
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/installation":
-			_, _ = io.WriteString(w, `{"id":99}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/99/access_tokens":
-			var payload struct {
-				Repositories []string          `json:"repositories"`
-				Permissions  map[string]string `json:"permissions"`
-			}
+			var payload map[string]json.RawMessage
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Error(err)
 			}
-			if len(payload.Repositories) != 1 || payload.Repositories[0] != "widgets" ||
-				payload.Permissions["contents"] != "write" || payload.Permissions["metadata"] != "read" {
+			var permissions map[string]string
+			if err := json.Unmarshal(payload["permissions"], &permissions); err != nil {
+				t.Error(err)
+			}
+			_, repositoriesRestricted := payload["repositories"]
+			_, repositoryIDsRestricted := payload["repository_ids"]
+			if repositoryIDsRestricted || permissions["contents"] != "write" || permissions["metadata"] != "read" {
 				t.Errorf("token request = %+v", payload)
+			}
+			if allRepositories && repositoriesRestricted {
+				t.Errorf("installation-wide token was repository restricted: %+v", payload)
+			}
+			if !allRepositories && string(payload["repositories"]) != `["widgets"]` {
+				t.Errorf("repository token scope = %s", payload["repositories"])
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"token": "installation-secret", "expires_at": now.Add(time.Hour),
@@ -87,32 +93,45 @@ func TestRepositoryTokenIsSignedAndRestrictedToRepository(t *testing.T) {
 	}))
 	defer server.Close()
 	app, err := New(Config{
-		AppID: 1234, PrivateKeyPath: writeTestKey(t, key, 0o600),
+		AppID: 1234, InstallationID: 99, PrivateKeyPath: writeTestKey(t, key, 0o600),
 		APIURL: server.URL, HTTPClient: server.Client(), Now: func() time.Time { return now },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := app.RepositoryToken(context.Background(), "https://github.com/acme/widgets.git")
+	allRepositories = true
+	token, err := app.InstallationToken(context.Background(), "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if token != "installation-secret" || requests.Load() != 2 {
+	if token != "installation-secret" || requests.Load() != 1 {
 		t.Fatalf("token = %q, requests = %d", token, requests.Load())
+	}
+	allRepositories = false
+	if _, err := app.InstallationToken(context.Background(), "https://github.com/acme/widgets.git", false); err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("requests = %d", requests.Load())
+	}
+	scoped, err := app.Credentials(context.Background(), "https://github.com/acme/widgets.git", false)
+	if err != nil || scoped.Environment()["GIT_CONFIG_KEY_0"] != "http.https://github.com/acme/widgets.git.extraheader" {
+		t.Fatalf("scoped Git credentials = %v, error = %v", scoped.Environment(), err)
+	}
+	allRepositories = true
+	broad, err := app.Credentials(context.Background(), "", true)
+	if err != nil || broad.Environment()["GIT_CONFIG_KEY_0"] != "http.https://github.com/.extraheader" {
+		t.Fatalf("installation Git credentials = %v, error = %v", broad.Environment(), err)
 	}
 }
 
-func TestRepositoryTokenRejectsNonGitHubSourceBeforeRequest(t *testing.T) {
+func TestNewRequiresInstallationID(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
-	app, err := New(Config{AppID: 1, PrivateKeyPath: writeTestKey(t, key, 0o600)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := app.RepositoryToken(context.Background(), "https://git.example.com/acme/widgets.git"); err == nil {
-		t.Fatal("non-GitHub repository was accepted")
+	if _, err := New(Config{AppID: 1, PrivateKeyPath: writeTestKey(t, key, 0o600)}); err == nil {
+		t.Fatal("missing installation ID was accepted")
 	}
 }
 
@@ -121,7 +140,7 @@ func TestNewRejectsInsecurePrivateKeyPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(Config{AppID: 1, PrivateKeyPath: writeTestKey(t, key, 0o644)}); err == nil {
+	if _, err := New(Config{AppID: 1, InstallationID: 99, PrivateKeyPath: writeTestKey(t, key, 0o644)}); err == nil {
 		t.Fatal("world-readable private key was accepted")
 	}
 }

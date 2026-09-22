@@ -12,10 +12,12 @@ import (
 var ErrClosed = errors.New("runtime: manager is closed")
 
 type Config struct {
-	Store         Store
-	Workspace     string
-	Runner        Runner
-	MaxConcurrent int
+	Store                 Store
+	Workspace             string
+	IndependentWorkspaces bool
+	Runner                Runner
+	ValidateConversation  func(ConversationOptions) error
+	MaxConcurrent         int
 	// RepairInterval controls the low-frequency runnable-work reconciliation
 	// scan. Zero uses 30 seconds; wake signals remain the primary path.
 	RepairInterval time.Duration
@@ -73,14 +75,26 @@ func New(cfg Config) (*Manager, error) {
 	return m, nil
 }
 
-func (m *Manager) CreateConversation(ctx context.Context) (Conversation, error) {
+func (m *Manager) CreateConversation(ctx context.Context, selected ConversationOptions) (Conversation, error) {
 	if err := m.checkOpen(); err != nil {
 		return Conversation{}, err
 	}
+	if m.cfg.ValidateConversation != nil {
+		if err := m.cfg.ValidateConversation(selected); err != nil {
+			return Conversation{}, fmt.Errorf("%w: %w", ErrInvalidConversation, err)
+		}
+	}
 	value := Conversation{
-		ID:        NewID(),
-		Workspace: m.cfg.Workspace,
-		CreatedAt: time.Now().UTC().Truncate(time.Microsecond),
+		ID:                 NewID(),
+		Workspace:          m.cfg.Workspace,
+		GitRepository:      selected.GitRepository,
+		GitRevision:        selected.GitRevision,
+		GitAllRepositories: selected.GitAllRepositories,
+		CreatedAt:          time.Now().UTC().Truncate(time.Microsecond),
+	}
+	value.WorkspaceLock = value.Workspace
+	if m.cfg.IndependentWorkspaces {
+		value.WorkspaceLock = value.ID
 	}
 	if err := m.store.CreateConversation(ctx, value); err != nil {
 		return Conversation{}, err

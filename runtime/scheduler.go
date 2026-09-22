@@ -87,12 +87,15 @@ func (c *liveConversation) execute(
 ) (RunResult, error) {
 	m := c.manager
 	return m.cfg.Runner.Run(ctx, RunRequest{
-		ConversationID:   c.conversation.ID,
-		RunID:            run.ID,
-		InboundMessageID: message.ID,
-		Workspace:        c.conversation.Workspace,
-		Text:             messageText(message.Parts),
-		Messages:         history,
+		ConversationID:     c.conversation.ID,
+		RunID:              run.ID,
+		InboundMessageID:   message.ID,
+		Workspace:          c.conversation.Workspace,
+		GitRepository:      c.conversation.GitRepository,
+		GitRevision:        c.conversation.GitRevision,
+		GitAllRepositories: c.conversation.GitAllRepositories,
+		Text:               messageText(message.Parts),
+		Messages:           history,
 		Emit: func(event RunEvent) error {
 			return c.emitRunEvent(run, event)
 		},
@@ -103,6 +106,16 @@ func (c *liveConversation) emitRunEvent(run Run, source RunEvent) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	switch source.Type {
+	case EventRunProgress:
+		c.broadcastLocked(Event{
+			Type:             EventRunProgress,
+			ConversationID:   run.ConversationID,
+			RunID:            run.ID,
+			InboundMessageID: run.InboundMessageID,
+			RunProgress:      &RunProgress{Stage: source.Stage},
+			CreatedAt:        time.Now().UTC(),
+		})
+		return nil
 	case EventAssistantDelta:
 		messageID, partID := source.MessageID, source.PartID
 		if messageID == "" {

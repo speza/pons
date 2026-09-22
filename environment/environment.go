@@ -54,15 +54,16 @@ type WorkspacePlan struct {
 // Environment is a clean, explicit list of KEY=VALUE entries; the parent
 // environment is never inherited.
 type Spec struct {
-	WorkspaceID   string
-	WorkspacePath string
-	RunID         string
-	Command       []string
-	ReadOnly      []string
-	Network       NetworkPolicy
-	Environment   []string
-	Limits        ResourceLimits
-	WorkspacePlan WorkspacePlan
+	WorkspaceID        string
+	WorkspacePath      string
+	RunID              string
+	Command            []string
+	ReadOnly           []string
+	Network            NetworkPolicy
+	Environment        []string
+	Limits             ResourceLimits
+	WorkspacePlan      WorkspacePlan
+	GitAllRepositories bool
 }
 
 // Metadata identifies the effective backend and policy for audit and UI use.

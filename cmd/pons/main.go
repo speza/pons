@@ -22,6 +22,7 @@ import (
 
 	"github.com/samperrin/pons/plugins/brain/llm"
 	"github.com/samperrin/pons/protocol"
+	ponsruntime "github.com/samperrin/pons/runtime"
 )
 
 func main() {
@@ -40,10 +41,10 @@ func main() {
 	provider := flag.String("provider", "anthropic", "LLM provider: anthropic | openai | codex | openai-responses")
 	model := flag.String("model", "", "model id (default: provider default)")
 	baseURL := flag.String("base-url", "", "override provider endpoint (for OpenAI-compatible servers)")
-	workspace := flag.String("workspace", "", "workspace root the tools are jailed to (default: current directory)")
+	workspace := flag.String("workspace", "", "host workspace and archive seed (default: current directory; Git E2B sessions clone remotely)")
 	stateDir := flag.String("state-dir", "", "runtime state directory (default: ~/.pons/runtime/<munged-project-path>/)")
 	compactChars := flag.Int("compact-chars", 0, "conversation size (chars) before auto-compaction; 0 = default ~400k, negative = off")
-	debug := flag.Bool("debug", false, "verbose: raw tool results, provider turn details")
+	debug := flag.Bool("debug", false, "verbose client tool results and structured server lifecycle logs")
 	message := flag.String("message", "", "task to submit to the runtime")
 	asAuth := flag.String("as", "", "codex login: store credentials under this auth id (default: codex)")
 	login := flag.Bool("login", false, "codex only: authenticate with ChatGPT (browser flow), save credentials, and exit")
@@ -66,7 +67,9 @@ func main() {
 	e2bHandsPath := flag.String("e2b-hands-path", "", "absolute pons-hands path inside the E2B template (default: /usr/local/bin/pons-hands)")
 	gitRepository := flag.String("git-repository", "", "credential-free HTTPS repository to clone into a new E2B workspace")
 	gitRevision := flag.String("git-revision", "", "full immutable commit ID to check out in a new E2B Git workspace")
+	gitAllRepositories := flag.Bool("git-all-repositories", false, "allow this session to clone any repository available to the GitHub App installation")
 	githubAppID := flag.Int64("github-app-id", 0, "deployment-owned GitHub App ID for private repository access")
+	githubAppInstallationID := flag.Int64("github-app-installation-id", 0, "GitHub App installation ID whose repositories are available to E2B hands")
 	githubAppPrivateKey := flag.String("github-app-private-key", "", "host path to the GitHub App private key PEM")
 	sandboxIdleTimeout := flag.Duration("sandbox-idle-timeout", 10*time.Minute, "idle time before a retained remote sandbox is deleted")
 	runtimeAddress := flag.String("addr", "127.0.0.1:7337", "runtime server listen address (serve mode; loopback only)")
@@ -77,16 +80,20 @@ func main() {
 	var pluginPaths repeatableStrings
 	flag.Var(&pluginPaths, "plugin", "explicit external hands plugin manifest (repeatable; never discovered implicitly)")
 	flag.Parse()
+	conversationOptions := ponsruntime.ConversationOptions{
+		GitRepository: *gitRepository, GitRevision: *gitRevision,
+		GitAllRepositories: *gitAllRepositories,
+	}
 
 	if mode == "client" {
-		if err := runClient(rootCtx, *serverURL, *conversationID, *idempotencyKey, *message, *interactive, *debug); err != nil && !errors.Is(err, context.Canceled) {
+		if err := runClient(rootCtx, *serverURL, *conversationID, *idempotencyKey, *message, *interactive, *debug, conversationOptions); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Printf("client: %v", err)
 			os.Exit(1)
 		}
 		return
 	}
 
-	// Workspace: each server-managed run works on this directory.
+	// Host workspace: local tools use it directly; E2B archive sessions seed from it.
 	ws := *workspace
 	if ws == "" {
 		ws = "."
@@ -103,6 +110,7 @@ func main() {
 		logger.Printf("%v", err)
 		os.Exit(1)
 	}
+	e2bAPIKey := ""
 	setFlags := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
 	applyString := func(name string, dst *string, v *string) {
@@ -119,6 +127,32 @@ func main() {
 	applyString("model", model, cfg.Model)
 	applyString("base-url", baseURL, cfg.BaseURL)
 	applyString("state-dir", stateDir, cfg.StateDir)
+	if cfg.Environment != nil {
+		applyString("sandbox", sandbox, cfg.Environment.Sandbox)
+		if cfg.Environment.E2B != nil {
+			applyString("e2b-template", e2bTemplate, cfg.Environment.E2B.Template)
+			if cfg.Environment.E2B.APIKey != nil {
+				e2bAPIKey = *cfg.Environment.E2B.APIKey
+			}
+			if !setFlags["sandbox-idle-timeout"] && cfg.Environment.E2B.IdleTimeout != nil {
+				*sandboxIdleTimeout, err = time.ParseDuration(*cfg.Environment.E2B.IdleTimeout)
+				if err != nil {
+					logger.Printf("config environment.e2b.idle_timeout: %v", err)
+					os.Exit(1)
+				}
+			}
+		}
+		if cfg.Environment.GitHubApp != nil {
+			app := cfg.Environment.GitHubApp
+			applyString("github-app-private-key", githubAppPrivateKey, app.PrivateKey)
+			if !setFlags["github-app-id"] && app.AppID != nil {
+				*githubAppID = *app.AppID
+			}
+			if !setFlags["github-app-installation-id"] && app.InstallationID != nil {
+				*githubAppInstallationID = *app.InstallationID
+			}
+		}
+	}
 	applyInt("max-turns", maxTurns, cfg.MaxTurns)
 	applyInt("compact-chars", compactChars, cfg.CompactChars)
 	applyInt("fs-read-bytes", fsReadBytes, cfg.FsReadBytes)
@@ -136,10 +170,6 @@ func main() {
 	}
 	primary, fallbacks := slots[0], slots[1:]
 
-	brainLogger := logger
-	if !*debug {
-		brainLogger = nil // quiet: no provider chatter
-	}
 	if *asAuth != "" && !*login {
 		logger.Printf("--as applies to --login")
 		os.Exit(1)
@@ -163,7 +193,6 @@ func main() {
 		Model:        primary.Model,
 		BaseURL:      primary.BaseURL,
 		APIKey:       primary.APIKey,
-		Logger:       brainLogger,
 		CompactChars: *compactChars,
 		Fallbacks:    fallbacks,
 	}
@@ -172,11 +201,16 @@ func main() {
 		logger.Printf("serve: --message and -i are client options")
 		os.Exit(1)
 	}
+	if mode == "serve" && (conversationOptions.GitRepository != "" || conversationOptions.GitRevision != "" || conversationOptions.GitAllRepositories) {
+		logger.Printf("serve: Git repository and access options belong to the client creating a conversation")
+		os.Exit(1)
+	}
 	statePath := *stateDir
 	if statePath == "" {
 		statePath = filepath.Join(home, ".pons", "runtime", strings.ReplaceAll(ws, "/", "-"))
 	}
-	logger.Printf("runtime state: %s", statePath)
+	serverLogger := newServerLogger(os.Stderr, *debug)
+	serverLogger.Info("runtime state selected", "state_dir", statePath)
 	serverOpts := serverOptions{
 		Address: *runtimeAddress, StateDir: statePath, Workspace: ws,
 		MaxConcurrent: *runtimeConcurrency, MaxTurns: *maxTurns, Brain: brainConfig,
@@ -184,11 +218,18 @@ func main() {
 		PluginPaths: pluginPaths, PluginPath: *pluginPath, PluginMaxResultBytes: *pluginMaxResultBytes, Debug: *debug,
 		Sandbox: *sandbox, E2BTemplate: *e2bTemplate, E2BHandsPath: *e2bHandsPath,
 		GitRepository: *gitRepository, GitRevision: *gitRevision,
-		GitHubAppID: *githubAppID, GitHubAppPrivateKey: *githubAppPrivateKey,
+		GitAllRepositories: *gitAllRepositories,
+		GitHubAppID:        *githubAppID, GitHubAppInstallationID: *githubAppInstallationID, GitHubAppPrivateKey: *githubAppPrivateKey,
+		E2BAPIKey:          e2bAPIKey,
 		SandboxIdleTimeout: *sandboxIdleTimeout,
 		EnvironmentError: func(err error) {
-			logger.Printf("environment: %v", err)
+			serverLogger.Error("environment failure", "error", err)
 		},
+	}
+	if *debug {
+		serverOpts.EnvironmentDebug = func(event string) {
+			logE2BDebug(serverLogger, event)
+		}
 	}
 	serverOpts.Environment, serverOpts.EnvironmentSpec, err = executionEnvironment(*sandbox, *handsCommand, *sandboxNetwork, serverOpts)
 	if err != nil {
@@ -196,14 +237,14 @@ func main() {
 		os.Exit(1)
 	}
 	if mode == "serve" {
-		if err := runServer(rootCtx, logger, serverOpts); err != nil {
-			logger.Printf("serve: %v", err)
+		if err := runServer(rootCtx, serverLogger, serverOpts); err != nil {
+			serverLogger.Error("server stopped with error", "error", err)
 			os.Exit(1)
 		}
 		return
 	}
 	bundledInteractive := *interactive || *message == ""
-	if err := runBundled(rootCtx, logger, serverOpts, *conversationID, *idempotencyKey, *message, bundledInteractive); err != nil && !errors.Is(err, context.Canceled) {
+	if err := runBundled(rootCtx, serverLogger, serverOpts, *conversationID, *idempotencyKey, *message, bundledInteractive); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Printf("run: %v", err)
 		os.Exit(1)
 	}

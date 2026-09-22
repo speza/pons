@@ -1,4 +1,4 @@
-// Package githubapp mints repository-scoped GitHub App installation tokens.
+// Package githubapp mints GitHub App installation tokens.
 // The App private key remains on the pons host; callers pass only short-lived
 // installation tokens across the hands boundary.
 package githubapp
@@ -38,6 +38,7 @@ const (
 // file readable only by its owner.
 type Config struct {
 	AppID          int64
+	InstallationID int64
 	PrivateKeyPath string
 	APIURL         string
 	HTTPClient     *http.Client
@@ -46,29 +47,37 @@ type Config struct {
 
 // App authenticates as one deployment-owned GitHub App.
 type App struct {
-	id     int64
-	key    *rsa.PrivateKey
-	apiURL string
-	http   *http.Client
-	now    func() time.Time
+	id             int64
+	installationID int64
+	key            *rsa.PrivateKey
+	apiURL         string
+	http           *http.Client
+	now            func() time.Time
 }
 
 var _ gitworkspace.CredentialSource = (*App)(nil)
 
-// RepositoryCredentials mints a repository-scoped installation token and
-// exposes it only as transient Git HTTPS process configuration.
-func (a *App) RepositoryCredentials(ctx context.Context, repositoryURL string) (gitworkspace.Credentials, error) {
-	token, err := a.RepositoryToken(ctx, repositoryURL)
+// Credentials mints a token restricted to repository unless all is requested.
+// The Git header uses the same URL scope as the token.
+func (a *App) Credentials(ctx context.Context, repositoryURL string, all bool) (gitworkspace.Credentials, error) {
+	token, err := a.InstallationToken(ctx, repositoryURL, all)
 	if err != nil {
 		return gitworkspace.Credentials{}, err
 	}
-	return gitworkspace.HTTPSBasicCredentials("https://github.com/", "x-access-token", token), nil
+	scope := repositoryURL
+	if all {
+		scope = "https://github.com/"
+	}
+	return gitworkspace.HTTPSBasicCredentials(scope, "x-access-token", token), nil
 }
 
 // New loads and validates a GitHub App private key from the host.
 func New(cfg Config) (*App, error) {
 	if cfg.AppID <= 0 {
 		return nil, errors.New("github app: app ID must be positive")
+	}
+	if cfg.InstallationID <= 0 {
+		return nil, errors.New("github app: installation ID must be positive")
 	}
 	if cfg.PrivateKeyPath == "" {
 		return nil, errors.New("github app: private key path is required")
@@ -107,7 +116,7 @@ func New(cfg Config) (*App, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &App{id: cfg.AppID, key: key, apiURL: apiURL, http: client, now: now}, nil
+	return &App{id: cfg.AppID, installationID: cfg.InstallationID, key: key, apiURL: apiURL, http: client, now: now}, nil
 }
 
 func parsePrivateKey(body []byte) (*rsa.PrivateKey, error) {
@@ -129,42 +138,32 @@ func parsePrivateKey(body []byte) (*rsa.PrivateKey, error) {
 	return key, nil
 }
 
-// RepositoryToken returns a one-hour installation token narrowed to the
-// repository named by repositoryURL.
-func (a *App) RepositoryToken(ctx context.Context, repositoryURL string) (string, error) {
-	owner, repository, err := githubRepository(repositoryURL)
-	if err != nil {
-		return "", err
+// InstallationToken returns a one-hour token with contents write and metadata
+// read, restricted to repository unless all installation repositories are requested.
+func (a *App) InstallationToken(ctx context.Context, repositoryURL string, all bool) (string, error) {
+	var repository string
+	if !all {
+		var err error
+		repository, err = githubRepository(repositoryURL)
+		if err != nil {
+			return "", err
+		}
 	}
 	jwt, err := a.jwt()
 	if err != nil {
 		return "", err
 	}
-	var installation struct {
-		ID int64 `json:"id"`
-	}
-	if err := a.request(
-		ctx,
-		http.MethodGet,
-		a.apiURL+"/repos/"+url.PathEscape(owner)+"/"+url.PathEscape(repository)+"/installation",
-		nil,
-		jwt,
-		&installation,
-	); err != nil {
-		return "", fmt.Errorf("github app: find repository installation: %w", err)
-	}
-	if installation.ID <= 0 {
-		return "", errors.New("github app: repository installation response omitted its ID")
-	}
 	payload := struct {
-		Repositories []string          `json:"repositories"`
+		Repositories []string          `json:"repositories,omitempty"`
 		Permissions  map[string]string `json:"permissions"`
 	}{
-		Repositories: []string{repository},
 		Permissions: map[string]string{
 			"contents": "write",
 			"metadata": "read",
 		},
+	}
+	if !all {
+		payload.Repositories = []string{repository}
 	}
 	var token struct {
 		Value     string    `json:"token"`
@@ -173,12 +172,12 @@ func (a *App) RepositoryToken(ctx context.Context, repositoryURL string) (string
 	if err := a.request(
 		ctx,
 		http.MethodPost,
-		a.apiURL+"/app/installations/"+strconv.FormatInt(installation.ID, 10)+"/access_tokens",
+		a.apiURL+"/app/installations/"+strconv.FormatInt(a.installationID, 10)+"/access_tokens",
 		payload,
 		jwt,
 		&token,
 	); err != nil {
-		return "", fmt.Errorf("github app: create repository installation token: %w", err)
+		return "", fmt.Errorf("github app: create installation token: %w", err)
 	}
 	if token.Value == "" || !token.ExpiresAt.After(a.now().Add(time.Minute)) || token.ExpiresAt.After(a.now().Add(installationTokenTTL+time.Minute)) {
 		return "", errors.New("github app: installation token response is invalid")
@@ -186,25 +185,25 @@ func (a *App) RepositoryToken(ctx context.Context, repositoryURL string) (string
 	return token.Value, nil
 }
 
-func githubRepository(repositoryURL string) (string, string, error) {
+func githubRepository(repositoryURL string) (string, error) {
 	parsed, err := url.Parse(repositoryURL)
 	if err != nil || parsed.Scheme != "https" || !strings.EqualFold(parsed.Hostname(), "github.com") || parsed.Port() != "" ||
 		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", "", errors.New("github app: repository must use https://github.com/OWNER/REPOSITORY")
+		return "", errors.New("github app: repository must use https://github.com/OWNER/REPOSITORY")
 	}
 	parts := strings.Split(strings.Trim(parsed.EscapedPath(), "/"), "/")
 	if len(parts) != 2 {
-		return "", "", errors.New("github app: repository must use https://github.com/OWNER/REPOSITORY")
+		return "", errors.New("github app: repository must use https://github.com/OWNER/REPOSITORY")
 	}
 	owner, err := url.PathUnescape(parts[0])
-	if err != nil {
-		return "", "", errors.New("github app: repository owner is invalid")
+	if err != nil || owner == "" {
+		return "", errors.New("github app: repository owner is invalid")
 	}
 	repository, err := url.PathUnescape(strings.TrimSuffix(parts[1], ".git"))
-	if err != nil || owner == "" || repository == "" || strings.ContainsAny(owner+repository, "\x00/") {
-		return "", "", errors.New("github app: repository name is invalid")
+	if err != nil || repository == "" || strings.ContainsAny(owner+repository, "\x00/") {
+		return "", errors.New("github app: repository name is invalid")
 	}
-	return owner, repository, nil
+	return repository, nil
 }
 
 func (a *App) jwt() (string, error) {

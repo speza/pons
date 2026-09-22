@@ -26,10 +26,10 @@ import (
 	checkpointstore "github.com/samperrin/pons/runtime/checkpoint"
 )
 
-type gitCredentialSourceFunc func(context.Context, string) (gitworkspace.Credentials, error)
+type gitCredentialSourceFunc func(context.Context, string, bool) (gitworkspace.Credentials, error)
 
-func (f gitCredentialSourceFunc) RepositoryCredentials(ctx context.Context, repository string) (gitworkspace.Credentials, error) {
-	return f(ctx, repository)
+func (f gitCredentialSourceFunc) Credentials(ctx context.Context, repository string, all bool) (gitworkspace.Credentials, error) {
+	return f(ctx, repository, all)
 }
 
 func TestE2BConfigUsesRestrictiveDefaults(t *testing.T) {
@@ -96,14 +96,17 @@ func TestValidateE2BGitWorkspaceRequiresNetwork(t *testing.T) {
 	}
 }
 
-func TestE2BGitWorkspaceGetsCredentialsBeforeCreatingSandbox(t *testing.T) {
+func TestE2BWorkspaceGetsCredentialsBeforeCreatingSandbox(t *testing.T) {
 	wantErr := errors.New("token unavailable")
-	var gotRepository string
+	var called bool
 	store := &recordingStateStore{}
 	provider := &Provider{
 		APIKey: "key", CleanupInterval: time.Hour,
-		GitCredentials: gitCredentialSourceFunc(func(_ context.Context, repository string) (gitworkspace.Credentials, error) {
-			gotRepository = repository
+		GitCredentials: gitCredentialSourceFunc(func(_ context.Context, _ string, all bool) (gitworkspace.Credentials, error) {
+			called = true
+			if !all {
+				t.Error("archive workspace did not request installation access")
+			}
 			return gitworkspace.Credentials{}, wantErr
 		}),
 	}
@@ -111,17 +114,13 @@ func TestE2BGitWorkspaceGetsCredentialsBeforeCreatingSandbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer provider.Close()
-	repository := "https://github.com/acme/widgets.git"
 	_, err := provider.Start(context.Background(), environment.Spec{
 		WorkspaceID: "workspace", WorkspacePath: t.TempDir(), RunID: "run",
 		Command: []string{defaultE2BHandsPath}, Network: environment.NetworkEnabled,
-		WorkspacePlan: environment.WorkspacePlan{
-			Strategy: environment.WorkspaceStrategyGit, SourceRef: repository,
-			BaseRevision: strings.Repeat("a", 40),
-		},
+		GitAllRepositories: true,
 	})
-	if !errors.Is(err, wantErr) || gotRepository != repository {
-		t.Fatalf("Start error = %v, repository = %q", err, gotRepository)
+	if !errors.Is(err, wantErr) || !called {
+		t.Fatalf("Start error = %v, credential source called = %v", err, called)
 	}
 	if store.environmentSaves.Load() != 0 {
 		t.Fatal("sandbox state was saved before GitHub authentication succeeded")
@@ -221,6 +220,7 @@ func TestProvisionGitWorkspaceUsesImmutableRevisionAndPersistsCheckpoint(t *test
 	defer server.Close()
 	store := &recordingStateStore{}
 	revision := strings.Repeat("b", 40)
+	var debugEvents []string
 	state, err := provisionGitWorkspace(
 		context.Background(),
 		&e2bClient{envdURL: server.URL, http: server.Client()},
@@ -231,9 +231,10 @@ func TestProvisionGitWorkspaceUsesImmutableRevisionAndPersistsCheckpoint(t *test
 			ID: "workspace", Strategy: environment.WorkspaceStrategyGit,
 			SourceRef: "https://github.com/example/project.git", BaseRevision: revision,
 		},
-		nil,
+		map[string]string{"GIT_CONFIG_VALUE_0": "secret-token"},
 		1<<20,
 		nil,
+		func(event string) { debugEvents = append(debugEvents, event) },
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -245,6 +246,15 @@ func TestProvisionGitWorkspaceUsesImmutableRevisionAndPersistsCheckpoint(t *test
 	}
 	if state.CheckpointRef != "checkpoint" || store.workspaceLast.Load().CheckpointRef != "checkpoint" {
 		t.Fatalf("workspace state = %+v, stored = %+v", state, store.workspaceLast.Load())
+	}
+	debug := strings.Join(debugEvents, "\n")
+	for _, step := range []string{"git init", "git remote add", "git fetch", "git checkout", "initial checkpoint=checkpoint saved"} {
+		if !strings.Contains(debug, step) {
+			t.Fatalf("missing debug step %q: %s", step, debug)
+		}
+	}
+	if strings.Contains(debug, "secret-token") {
+		t.Fatalf("Git credential leaked in debug events: %s", debug)
 	}
 }
 

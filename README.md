@@ -87,8 +87,9 @@ go run ./cmd/pons -provider codex -i
 
 ## Long-lived runtime
 
-`serve` owns conversations and agent runs; `client` submits messages and
-consumes SSE events:
+Without a subcommand, `pons` runs the server and client in one process, so
+interactive output and server logs share a terminal. `serve` runs the server
+separately; `client` submits messages and consumes SSE events:
 
 ```sh
 go run ./cmd/pons serve -provider codex
@@ -143,9 +144,10 @@ Git provisioning enables sandbox networking and checks out the commit on an
 independent `pons/<workspace>/work` branch before hands starts. Subsequent Git
 commands use the existing bash tool.
 
-For a private GitHub repository, create a deployment-owned GitHub App with
-Metadata read and Contents read/write permissions, install it on the repository,
-and provide its ID and private key. The key must be readable only by its owner:
+For private GitHub repositories, create a deployment-owned GitHub App with
+Metadata read and Contents read/write permissions, install it on the repositories
+the agent may use, and provide its App ID, installation ID, and private key.
+The key must be readable only by its owner:
 
 ```sh
 chmod 600 /secure/pons-github-app.pem
@@ -153,13 +155,44 @@ go run ./cmd/pons -provider codex -sandbox e2b \
   -git-repository https://github.com/OWNER/REPOSITORY.git \
   -git-revision COMMIT_SHA \
   -github-app-id APP_ID \
+  -github-app-installation-id INSTALLATION_ID \
   -github-app-private-key /secure/pons-github-app.pem \
   -message "inspect this project"
 ```
 
-Pons discovers the repository installation and mints a one-hour token narrowed
-to that repository for each run. The App private key stays on the host; the
-token is deliberately delegated to unrestricted hands through its process
+One server can create separate Git workspaces for separate conversations.
+Choose each conversation's primary repository and pinned commit in the client:
+
+```sh
+go run ./cmd/pons serve -provider codex -sandbox e2b \
+  -github-app-id APP_ID \
+  -github-app-installation-id INSTALLATION_ID \
+  -github-app-private-key /secure/pons-github-app.pem
+
+go run ./cmd/pons client \
+  -git-repository https://github.com/OWNER/repo-a.git -git-revision REPO_A_SHA \
+  -message "Work in repo-a"
+go run ./cmd/pons client \
+  -git-repository https://github.com/OWNER/repo-b.git -git-revision REPO_B_SHA \
+  -message "Work in repo-b"
+go run ./cmd/pons client \
+  -git-repository https://github.com/OWNER/repo-a.git -git-revision REPO_A_SHA \
+  -message "Work independently in repo-a"
+```
+
+Each client command without `-conversation` creates an independent workspace.
+Git sessions clone inside E2B; the host `-workspace` is not uploaded for them.
+It defaults to the directory where the server starts and is used for local
+configuration and as the seed only for archive sessions without a primary repo.
+By default, Pons mints a one-hour token restricted to that conversation's
+primary repository. For a cross-repository task, pass `-git-all-repositories`
+when creating the conversation. This grants the agent access to every
+repository available to the installation, including repositories it clones
+during a run. A conversation without a primary repository can also use this
+option and start from the archive seed.
+
+The App private key stays on the host; the token is deliberately delegated
+to unrestricted hands through its process
 environment, so the agent can use, inspect, or copy it. Pons does not itself
 write the token to the remote URL, Git configuration, workspace, checkpoint,
 or sandbox-wide environment, and exact token values in tool results are
@@ -188,6 +221,17 @@ superseded intermediate checkpoints are pruned for archive workspaces; Git
 workspaces retain only the latest full checkpoint because their immutable base
 is a Git object ID, not a checkpoint reference. Idle sandboxes are deleted after
 `-sandbox-idle-timeout` (10 minutes by default).
+With `--debug`, the server writes JSON logs for sandbox creation or reuse, Git
+provisioning steps, checkpoint and recovery transitions, and idle cleanup.
+Run logs include conversation and run IDs; E2B lifecycle logs include workspace
+and sandbox IDs. Server logs contain run outcomes and answer lengths, not answer
+text or tool results. Lifecycle logging does not include Git credentials or
+authenticated command output. The interactive client receives progress for
+its own run and can show full tool results with `--debug`. Server debug logs
+include maintenance for all workspaces, including when the server and
+interactive client run together. To keep server logs and the interactive
+prompt in separate terminals, run `serve --debug` in one terminal and
+`client -i` in another.
 If hands stops cleanly but checkpointing fails, the sandbox is quarantined for
 manual recovery for one hour, not deleted immediately. The error includes its
 ID and deadline. New runs for that workspace are blocked during that window;
@@ -210,7 +254,7 @@ discovered implicitly. Example providers are in
 Useful flags include `-workspace`, `-state-dir`, `-max-turns`,
 `-compact-chars`, repeatable `-plugin`, `-plugin-path`, `-sandbox`,
 `-hands-command`, `-e2b-template`, `-e2b-hands-path`,
-`-git-repository`, `-git-revision`, `-github-app-id`,
+`-git-repository`, `-git-revision`, `-git-all-repositories`, `-github-app-id`, `-github-app-installation-id`,
 `-github-app-private-key`, `-sandbox-idle-timeout`, `-fallback`, and `-debug`.
 
 ## Configuration
@@ -220,6 +264,35 @@ overrides them, and explicit flags win. Configuration supports provider/model
 settings, runtime limits, tool output limits, named provider slots, and
 failover. Use repeatable `-fallback provider[:model]` flags for a temporary
 failover chain.
+
+For a reusable E2B server with one GitHub App installation, put the following
+JSON in `~/.pons/config.json` (substitute your values and an absolute key path):
+
+```json
+{
+  "provider": "codex",
+  "environment": {
+    "sandbox": "e2b",
+    "e2b": {
+      "template": "pons-hands",
+      "api_key": "YOUR_E2B_API_KEY"
+    },
+    "github_app": {
+      "app_id": 123456,
+      "installation_id": 789012,
+      "private_key": "/absolute/path/to/github-app.pem"
+    }
+  }
+}
+```
+
+Keep the API key in this global file, not in a repository's `.pons.json`, and
+run `chmod 600 ~/.pons/config.json` and `chmod 600` on the PEM. Pons rejects a
+config containing `environment.e2b.api_key` if group or other users can read
+it. The E2B template build and smoke test still use `E2B_API_KEY` in the shell;
+this is a one-time setup step. Once the template exists, `go run ./cmd/pons serve` uses
+the configured E2B and GitHub App settings. Client commands still select the
+repository and revision per conversation.
 
 Codex credentials are stored with restrictive permissions in
 `~/.pons/auth.json`. Multiple named credentials and provider slots are
