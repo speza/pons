@@ -63,6 +63,41 @@ func TestValidateE2BSpecDoesNotRequireLocalRemoteCommand(t *testing.T) {
 	}
 }
 
+func TestInvalidEnvironmentDoesNotExposeValue(t *testing.T) {
+	_, _, _, _, err := validateE2BSpec(environment.Spec{
+		WorkspaceID: "workspace", WorkspacePath: t.TempDir(), Command: []string{defaultE2BHandsPath},
+		Environment: []string{"TOKEN=secret-value\x00"},
+	})
+	if err == nil || strings.Contains(err.Error(), "secret-value") {
+		t.Fatalf("invalid environment error = %v", err)
+	}
+}
+
+func TestConnectSandboxAcceptsBoundedSuccessResponses(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusCreated} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			for _, size := range []int{70 << 10, maxE2BJSONResponseBytes} {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(status)
+					_ = json.NewEncoder(w).Encode(map[string]string{
+						"sandboxID": "sandbox", "envdAccessToken": "access", "extra": strings.Repeat("x", size),
+					})
+				}))
+				client := &e2bClient{apiURL: server.URL, http: server.Client()}
+				sandbox, err := client.connectSandbox(context.Background(), "sandbox", time.Minute)
+				server.Close()
+				if size == maxE2BJSONResponseBytes {
+					if err == nil || !strings.Contains(err.Error(), "JSON response exceeds") {
+						t.Fatalf("oversized response = %v", err)
+					}
+				} else if err != nil || sandbox.ID != "sandbox" || sandbox.AccessToken != "access" {
+					t.Fatalf("connect failed: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestArchiveWorkspaceUsesSourceOnlyForInitialSeed(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "source")
 	if err := os.Mkdir(source, 0o755); err != nil {
@@ -495,6 +530,7 @@ func TestArchiveWorkspaceRejectsSpecialEntries(t *testing.T) {
 
 type recordingStateStore struct {
 	environmentSaves     atomic.Int32
+	environmentDeletes   atomic.Int32
 	environmentLast      atomic.Pointer[environment.State]
 	workspaceLast        atomic.Pointer[environment.WorkspaceState]
 	prunedCheckpointRefs atomic.Pointer[string]
@@ -540,7 +576,8 @@ func (s *recordingStateStore) SaveEnvironmentState(_ context.Context, state envi
 	s.environmentLast.Store(&state)
 	return nil
 }
-func (*recordingStateStore) DeleteEnvironmentState(context.Context, string, string) error {
+func (s *recordingStateStore) DeleteEnvironmentState(context.Context, string, string) error {
+	s.environmentDeletes.Add(1)
 	return nil
 }
 func (*recordingStateStore) ExpiredEnvironmentStates(context.Context, string, time.Time, int) ([]environment.State, error) {

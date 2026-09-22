@@ -52,8 +52,8 @@ source checkout. The state directory must be outside that source; the provider
 retains the immutable base and latest checkpoint and prunes superseded
 intermediate archives after advancing durable metadata. If checkpoint
 download, validation, or persistence fails,
-closing the session reports an error and the sandbox is discarded rather than
-reused.
+closing the session reports an error and the sandbox is reserved for manual
+recovery rather than reused or immediately deleted.
 
 Logical workspace state and sandbox affinity are separate durable resources.
 SQLite stores strategy, source, base revision, checkpoint reference, and setup
@@ -70,10 +70,43 @@ active records are removed after that expiry. A server restart can therefore
 reuse an idle sandbox without preserving process memory or an open protocol
 connection.
 
-A reconnected sandbox must successfully stop any stale `pons-hands` process
-before starting the new protocol session. Checkpointing begins only after the
-current hands process has stopped cleanly; otherwise the sandbox is discarded
-and the original local workspace remains unchanged.
+Only idle placements are reconnected. Unexpired active or recovery placements
+block new runs, even after a host restart or a template/network-policy change.
+An active record might remain when a recovery reservation could not be written,
+so it must also be protected until its recorded expiry. Expired placements are
+destroyed and replaced from the last durable checkpoint. Interrupted tool calls
+are never replayed automatically.
+Checkpointing begins only after the current hands process has stopped cleanly;
+a lost envd stream is not evidence of process exit. Failed shutdown discards
+the sandbox and leaves the original local workspace unchanged.
+
+After confirmed hands shutdown, the provider stops heartbeats and records a
+`recovery` reservation before checkpointing. The reservation has no run ID or
+idle deadline and expires one hour after shutdown. E2B's TTL is set slightly
+longer as a cleanup backstop. Only a successful checkpoint and idle transition
+release the reservation. Failures retain the original deadline, report the
+sandbox ID for manual file recovery, and do not automatically retry a tool or
+checkpoint. The janitor deletes recovery placements at their deadline. If the
+database or timeout update fails, retention is best-effort and the error warns
+operators to recover immediately; the sandbox is not explicitly deleted.
+
+Run cancellation cancels startup and tool calls, but an established transport
+has a session-owned lifetime so normal shutdown can checkpoint completed edits.
+Heartbeat requests have bounded deadlines; failures are reported but do not
+prevent a fresh checkpoint attempt during shutdown. Janitor sweeps have bounded
+deadlines and skip busy lifecycle transitions rather than blocking shutdown.
+Placement records are removed only after sandbox deletion succeeds (or the
+sandbox is already absent), so failed deletions remain retryable.
+Control-command stdout and stderr are each capped at 1 MiB.
+
+Seed and checkpoint archives share the same symlink policy. Host validation
+uses root-confined filesystem operations and rejects duplicate normalized
+paths. Checkpoint files and their containing directory hierarchy are synced
+before a reference is published to SQLite.
+
+These guarantees concern the hands protocol process. Background services in a
+retained sandbox are not promised to survive replacement or to be included in
+a transactionally consistent filesystem snapshot.
 
 External hands plugins are rejected by the first implementation. Their local
 manifests and executables are not portable into a remote Linux template without

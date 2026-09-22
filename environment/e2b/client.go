@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -33,7 +34,6 @@ type e2bClient struct {
 
 type e2bSandbox struct {
 	ID          string `json:"sandboxID"`
-	Template    string `json:"templateID"`
 	AccessToken string `json:"envdAccessToken"`
 }
 
@@ -48,14 +48,11 @@ func (c *e2bClient) connectSandbox(ctx context.Context, id string, timeout time.
 		c.apiURL+"/sandboxes/"+url.PathEscape(id)+"/connect",
 		payload,
 		&sandbox,
-		http.StatusOK,
 		false,
 		e2bSandbox{},
+		http.StatusOK,
+		http.StatusCreated, // A paused sandbox returns 201 when resumed.
 	)
-	if statusErr := new(httpStatusError); errors.As(err, &statusErr) && statusErr.Status == http.StatusCreated {
-		// A paused sandbox returns 201 after it is resumed.
-		err = json.Unmarshal(statusErr.Body, &sandbox)
-	}
 	if err != nil {
 		return sandbox, err
 	}
@@ -86,7 +83,7 @@ func (c *e2bClient) createSandbox(
 		Env:      env,
 	}
 	var sandbox e2bSandbox
-	if err := c.jsonRequest(ctx, http.MethodPost, c.apiURL+"/sandboxes", payload, &sandbox, http.StatusCreated, false, e2bSandbox{}); err != nil {
+	if err := c.jsonRequest(ctx, http.MethodPost, c.apiURL+"/sandboxes", payload, &sandbox, false, e2bSandbox{}, http.StatusCreated); err != nil {
 		return sandbox, fmt.Errorf("environment: create E2B sandbox: %w", err)
 	}
 	if sandbox.ID == "" || sandbox.AccessToken == "" {
@@ -111,9 +108,9 @@ func (c *e2bClient) setSandboxTimeout(ctx context.Context, id string, timeout ti
 		c.apiURL+"/sandboxes/"+url.PathEscape(id)+"/timeout",
 		payload,
 		nil,
-		http.StatusNoContent,
 		false,
 		e2bSandbox{},
+		http.StatusNoContent,
 	); err != nil {
 		return fmt.Errorf("environment: set E2B sandbox timeout: %w", err)
 	}
@@ -194,6 +191,8 @@ func (c *e2bClient) run(ctx context.Context, sandbox e2bSandbox, command string,
 		return nil, nil, err
 	}
 	defer stream.body.Close()
+	// Maintenance commands are sandbox-controlled too. Bound total output,
+	// not just individual envd frames, before retaining it on the host.
 	stdout := boundedProcessBuffer{remaining: maxE2BProcessOutputBytes}
 	stderr := boundedProcessBuffer{remaining: maxE2BProcessOutputBytes}
 	for {
@@ -202,7 +201,7 @@ func (c *e2bClient) run(ctx context.Context, sandbox e2bSandbox, command string,
 			return stdout.Bytes(), stderr.Bytes(), err
 		}
 		if err := writeProcessData(event.Event.Data, &stdout, &stderr); err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("environment: E2B control process output: %w", err)
 		}
 		if event.Event.End != nil {
 			if err := e2bProcessEndError(event.Event.End, stderr.String()); err != nil {
@@ -282,18 +281,29 @@ type e2bProcessWriter struct {
 	client  *e2bClient
 	sandbox e2bSandbox
 	pid     int
+	writeMu sync.Mutex
 	mu      sync.Mutex
 	closed  bool
+	cancel  context.CancelFunc
 }
 
 func (w *e2bProcessWriter) Write(data []byte) (int, error) {
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if w.closed {
+		w.mu.Unlock()
 		return 0, os.ErrClosed
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	w.cancel = cancel
+	w.mu.Unlock()
+	defer func() {
+		cancel()
+		w.mu.Lock()
+		w.cancel = nil
+		w.mu.Unlock()
+	}()
 	payload := map[string]any{
 		"process": map[string]int{"pid": w.pid},
 		"input": map[string]string{
@@ -308,15 +318,13 @@ func (w *e2bProcessWriter) Write(data []byte) (int, error) {
 func (w *e2bProcessWriter) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.closed {
-		return nil
-	}
 	w.closed = true
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	return w.client.unary(ctx, w.sandbox, "/process.Process/CloseStdin", map[string]any{
-		"process": map[string]int{"pid": w.pid},
-	})
+	if w.cancel != nil {
+		w.cancel()
+	}
+	// Closing the local writer must never wait on envd. The protocol shutdown
+	// exchange stops hands normally; Connection.Kill handles failed shutdown.
+	return nil
 }
 
 func (c *e2bClient) signal(ctx context.Context, sandbox e2bSandbox, pid int, signal string) error {
@@ -327,10 +335,10 @@ func (c *e2bClient) signal(ctx context.Context, sandbox e2bSandbox, pid int, sig
 }
 
 func (c *e2bClient) unary(ctx context.Context, sandbox e2bSandbox, path string, payload any) error {
-	return c.jsonRequest(ctx, http.MethodPost, c.envdURL+path, payload, nil, http.StatusOK, true, sandbox)
+	return c.jsonRequest(ctx, http.MethodPost, c.envdURL+path, payload, nil, true, sandbox, http.StatusOK)
 }
 
-func (c *e2bClient) jsonRequest(ctx context.Context, method, target string, payload, result any, status int, envd bool, sandbox e2bSandbox) error {
+func (c *e2bClient) jsonRequest(ctx context.Context, method, target string, payload, result any, envd bool, sandbox e2bSandbox, statuses ...int) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -351,7 +359,7 @@ func (c *e2bClient) jsonRequest(ctx context.Context, method, target string, payl
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != status {
+	if !slices.Contains(statuses, resp.StatusCode) {
 		return responseError("E2B request", resp)
 	}
 	if result != nil {

@@ -41,6 +41,9 @@ func archiveWorkspace(workspace string, limit int64) ([]byte, error) {
 			if err != nil {
 				return err
 			}
+			if err := validateCheckpointSymlink(rel, link); err != nil {
+				return err
+			}
 		}
 		header, err := tar.FileInfoHeader(info, link)
 		if err != nil {
@@ -77,7 +80,7 @@ type limitedWriter struct {
 
 func (w *limitedWriter) Write(data []byte) (int, error) {
 	if int64(len(data)) > w.remaining {
-		return 0, errors.New("workspace archive exceeds configured limit")
+		return 0, errors.New("data exceeds configured limit")
 	}
 	n, err := w.writer.Write(data)
 	w.remaining -= int64(n)
@@ -94,12 +97,18 @@ func restoreWorkspace(workspace string, archive []byte, limit int64) error {
 		return fmt.Errorf("environment: stage E2B checkpoint: %w", err)
 	}
 	defer removeWorkspaceTree(staging)
+	root, err := os.OpenRoot(staging)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	rootInfo, err := os.Stat(workspace)
 	if err != nil {
 		return fmt.Errorf("environment: inspect existing workspace: %w", err)
 	}
 	rootMode := rootInfo.Mode().Perm()
 	directoryModes := make(map[string]os.FileMode)
+	seen := make(map[string]string)
 	reader := tar.NewReader(bytes.NewReader(archive))
 	var total int64
 	entries := 0
@@ -116,6 +125,10 @@ func restoreWorkspace(workspace string, archive []byte, limit int64) error {
 			return fmt.Errorf("environment: E2B checkpoint exceeds %d entries", maxWorkspaceArchiveEntries)
 		}
 		name := filepath.Clean(filepath.FromSlash(header.Name))
+		if previous, ok := seen[name]; ok {
+			return fmt.Errorf("environment: duplicate E2B checkpoint path %q (previously %q)", header.Name, previous)
+		}
+		seen[name] = header.Name
 		if name == "." {
 			if header.Typeflag != tar.TypeDir {
 				return fmt.Errorf("environment: unsupported checkpoint root entry %q", header.Name)
@@ -130,22 +143,22 @@ func restoreWorkspace(workspace string, archive []byte, limit int64) error {
 		if err := safeCheckpointParent(staging, filepath.Dir(target)); err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		if err := root.MkdirAll(filepath.Dir(name), 0o700); err != nil {
 			return err
 		}
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o700); err != nil {
+			if err := root.MkdirAll(name, 0o700); err != nil {
 				return err
 			}
-			directoryModes[target] = os.FileMode(header.Mode).Perm()
+			directoryModes[name] = os.FileMode(header.Mode).Perm()
 		case tar.TypeReg, 0:
 			if header.Size < 0 || total > limit || header.Size > limit-total {
 				return fmt.Errorf("environment: E2B checkpoint exceeds %d bytes", limit)
 			}
 			total += header.Size
 			mode := os.FileMode(header.Mode).Perm()
-			file, openErr := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+			file, openErr := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_EXCL, mode)
 			if openErr != nil {
 				return openErr
 			}
@@ -156,11 +169,10 @@ func restoreWorkspace(workspace string, archive []byte, limit int64) error {
 				return err
 			}
 		case tar.TypeSymlink:
-			linkTarget := filepath.Clean(filepath.Join(filepath.Dir(name), filepath.FromSlash(header.Linkname)))
-			if filepath.IsAbs(header.Linkname) || linkTarget == ".." || strings.HasPrefix(linkTarget, ".."+string(filepath.Separator)) {
-				return fmt.Errorf("environment: unsafe symlink %q", header.Linkname)
+			if err := validateCheckpointSymlink(name, header.Linkname); err != nil {
+				return err
 			}
-			if err := os.Symlink(header.Linkname, target); err != nil {
+			if err := root.Symlink(header.Linkname, name); err != nil {
 				return err
 			}
 		default:
@@ -173,11 +185,11 @@ func restoreWorkspace(workspace string, archive []byte, limit int64) error {
 	}
 	sort.Slice(paths, func(i, j int) bool { return len(paths[i]) > len(paths[j]) })
 	for _, path := range paths {
-		if err := os.Chmod(path, directoryModes[path]); err != nil {
+		if err := root.Chmod(path, directoryModes[path]); err != nil {
 			return fmt.Errorf("environment: restore directory mode: %w", err)
 		}
 	}
-	if err := os.Chmod(staging, rootMode); err != nil {
+	if err := root.Chmod(".", rootMode); err != nil {
 		return fmt.Errorf("environment: restore workspace mode: %w", err)
 	}
 	backup := workspace + ".pons-e2b-backup-" + strconv.FormatInt(time.Now().UnixNano(), 10)
@@ -193,6 +205,15 @@ func restoreWorkspace(workspace string, archive []byte, limit int64) error {
 	}
 	if err := removeWorkspaceTree(backup); err != nil {
 		return fmt.Errorf("environment: remove workspace backup: %w", err)
+	}
+	return nil
+}
+
+func validateCheckpointSymlink(name, link string) error {
+	target := filepath.FromSlash(link)
+	resolved := filepath.Clean(filepath.Join(filepath.Dir(name), target))
+	if filepath.IsAbs(target) || resolved == ".." || strings.HasPrefix(resolved, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("environment: unsafe symlink %q", link)
 	}
 	return nil
 }

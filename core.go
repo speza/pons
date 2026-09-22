@@ -107,8 +107,9 @@ type Core struct {
 	// duplicate brain registration cannot bypass the additive contract.
 	brain ControlPort
 
-	// Workspace / MaxTurns / Log tune the loop.
+	// Workspace and Platform describe the hands execution environment.
 	Workspace string
+	Platform  string
 	MaxTurns  int
 	Log       *log.Logger
 
@@ -337,7 +338,7 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 	brain := c.brain
 	port := c.buildToolPort()
 
-	obs := protocol.Observation{Message: message, Workspace: c.Workspace}
+	obs := protocol.Observation{Message: message, Workspace: c.Workspace, Platform: c.Platform}
 	result := RunResult{}
 	maxTurns := c.MaxTurns
 	if maxTurns <= 0 {

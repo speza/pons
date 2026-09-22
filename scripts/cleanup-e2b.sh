@@ -74,10 +74,7 @@ for state in running paused; do
 	"${cli[@]}" "${args[@]}" >"$tmp_dir/$state.json"
 done
 
-sandbox_ids=()
-while IFS= read -r sandbox_id; do
-	[[ -n "$sandbox_id" ]] && sandbox_ids+=("$sandbox_id")
-done < <(python3 - "$tmp_dir/running.json" "$tmp_dir/paused.json" <<'PY'
+python3 - "$tmp_dir/running.json" "$tmp_dir/paused.json" >"$tmp_dir/ids" <<'PY'
 import json
 import sys
 
@@ -90,7 +87,11 @@ for path in sys.argv[1:]:
                 seen.add(sandbox_id)
                 print(sandbox_id)
 PY
-)
+
+sandbox_ids=()
+while IFS= read -r sandbox_id; do
+	[[ -n "$sandbox_id" ]] && sandbox_ids+=("$sandbox_id")
+done <"$tmp_dir/ids"
 
 if ((${#sandbox_ids[@]} == 0)); then
 	if [[ "$all" == true ]]; then

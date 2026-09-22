@@ -88,6 +88,9 @@ Defaults are restrictive:
 
 A provider may offer stronger or weaker guarantees, but it must report enough
 metadata for the host and UI to identify the backend and policy in use.
+`Metadata.WorkspacePath` is the hands-side working directory, not the host seed
+path, and `Metadata.Platform` is the execution `GOOS/GOARCH`. Brain observations
+and hydrated prompts use those values. The E2B template/build targets Linux amd64.
 
 ## Local Seatbelt backend
 

@@ -14,8 +14,9 @@ var ErrStateNotFound = errors.New("environment: state not found")
 type LifecycleStatus string
 
 const (
-	StateActive LifecycleStatus = "active"
-	StateIdle   LifecycleStatus = "idle"
+	StateActive   LifecycleStatus = "active"
+	StateIdle     LifecycleStatus = "idle"
+	StateRecovery LifecycleStatus = "recovery"
 )
 
 // WorkspaceStrategy identifies versioned workspace provisioning behavior.
@@ -39,7 +40,8 @@ type WorkspaceState struct {
 
 // State is non-secret durable placement metadata. Active states have a RunID
 // and no IdleUntil; idle states have an IdleUntil and no RunID. Provider access
-// tokens and API keys must never be stored here.
+// tokens and API keys must never be stored here. Recovery states have neither
+// RunID nor IdleUntil, and reserve a sandbox for manual recovery until ExpiresAt.
 type State struct {
 	WorkspaceID   string
 	Provider      string

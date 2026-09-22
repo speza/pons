@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -29,14 +28,10 @@ const (
 	prepareWorkspaceScript  = "rm -rf " + defaultE2BWorkspace +
 		" && mkdir -p " + defaultE2BWorkspace +
 		" && tar -xf " + workspaceUploadPath + " -C " + defaultE2BWorkspace
-	stopStaleHandsScript = `
-pkill -f -- "$1"
-status=$?
-[ "$status" -eq 0 ] || [ "$status" -eq 1 ]
-`
-	defaultE2BTimeout        = 15 * time.Minute
-	defaultE2BWorkspaceBytes = 256 << 20
-	e2bSetupGeneration       = 1
+	defaultE2BTimeout         = 15 * time.Minute
+	defaultE2BWorkspaceBytes  = 256 << 20
+	checkpointRecoveryTimeout = time.Hour
+	e2bSetupGeneration        = 1
 )
 
 // Provider provisions or reconnects a workspace-affine E2B sandbox. The
@@ -59,6 +54,7 @@ type Provider struct {
 	lifecycleMu     sync.Mutex
 	stateStore      environment.StateStore
 	checkpointStore environment.CheckpointStore
+	janitorMu       sync.Mutex
 	stopJanitor     context.CancelFunc
 	janitorDone     chan struct{}
 	active          map[string]string
@@ -113,8 +109,10 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 	cleanup := func() error {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		stateErr := store.DeleteEnvironmentState(cleanupCtx, workspaceID, sandbox.ID)
-		return errors.Join(client.killSandbox(cleanupCtx, sandbox.ID), stateErr)
+		if err := client.killSandbox(cleanupCtx, sandbox.ID); err != nil {
+			return err
+		}
+		return store.DeleteEnvironmentState(cleanupCtx, workspaceID, sandbox.ID)
 	}
 	if !resumed {
 		archive, archiveErr := checkpoints.WorkspaceCheckpoint(
@@ -148,16 +146,6 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 		}); err != nil {
 			return nil, errors.Join(err, cleanup())
 		}
-	} else {
-		// A host crash may leave the prior protocol process alive. Runs are
-		// recovered as interrupted before they can reacquire this workspace, so
-		// it is safe to replace that idle/stale endpoint without retrying a call.
-		pattern := "^" + regexp.QuoteMeta(cfg.handsPath) + "( |$)"
-		if _, _, err := client.run(ctx, sandbox, "/bin/sh", []string{
-			"-c", stopStaleHandsScript, "pons-stop-stale-hands", pattern,
-		}, "/home/user", nil); err != nil {
-			return nil, errors.Join(fmt.Errorf("environment: stop stale E2B hands: %w", err), cleanup())
-		}
 	}
 	remoteArgs := append([]string(nil), args...)
 	remoteArgs = append(remoteArgs, "--workspace", defaultE2BWorkspace)
@@ -168,6 +156,17 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 		Args:            remoteArgs,
 		RuntimeProtocol: external.RuntimeProtocol,
 	}
+	// Cancellation owns startup and tool calls, but a successfully started
+	// transport must stay alive for the bounded shutdown/checkpoint sequence.
+	sessionCtx, cancelSession := context.WithCancel(context.WithoutCancel(ctx))
+	stopStartupCancel := context.AfterFunc(ctx, cancelSession)
+	started := false
+	defer func() {
+		stopStartupCancel()
+		if !started {
+			cancelSession()
+		}
+	}()
 	host, err := external.NewConnectionHost(manifest, external.HostConfig{
 		Workspace:   defaultE2BWorkspace,
 		CallTimeout: spec.Limits.CallTimeout,
@@ -179,8 +178,8 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 			MaxPendingRequests: spec.Limits.MaxPendingRequests,
 			MaxConcurrency:     spec.Limits.MaxConcurrency,
 		},
-	}, func(connectCtx context.Context) (external.Connection, error) {
-		return client.startConnection(connectCtx, sandbox, cfg.handsPath, remoteArgs, defaultE2BWorkspace, env)
+	}, func(context.Context) (external.Connection, error) {
+		return client.startConnection(sessionCtx, sandbox, cfg.handsPath, remoteArgs, defaultE2BWorkspace, env)
 	})
 	if err != nil {
 		return nil, errors.Join(err, cleanup())
@@ -188,9 +187,14 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 	if err := host.Start(ctx); err != nil {
 		return nil, errors.Join(err, host.Close(), cleanup())
 	}
+	if !stopStartupCancel() || ctx.Err() != nil {
+		return nil, errors.Join(ctx.Err(), host.Close(), cleanup())
+	}
+	started = true
 	p.active[workspaceID] = runID
 	session := &e2bSession{
 		host:              host,
+		cancelTransport:   cancelSession,
 		client:            client,
 		sandbox:           sandbox,
 		workspace:         workspaceState,
@@ -207,7 +211,8 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 			Provider:      "e2b",
 			EnvironmentID: sandbox.ID,
 			WorkspaceID:   workspaceID,
-			WorkspacePath: workspace,
+			WorkspacePath: defaultE2BWorkspace,
+			Platform:      "linux/amd64",
 			Network:       network,
 		},
 	}
@@ -300,6 +305,8 @@ func (p *Provider) SetStores(store environment.StateStore, checkpoints environme
 	ctx, cancel := context.WithCancel(context.Background())
 	p.stateStore = store
 	p.checkpointStore = checkpoints
+	p.janitorMu.Lock()
+	defer p.janitorMu.Unlock()
 	p.stopJanitor = cancel
 	p.janitorDone = make(chan struct{})
 	go p.janitor(ctx, cfg)
@@ -309,17 +316,16 @@ func (p *Provider) SetStores(store environment.StateStore, checkpoints environme
 // Close stops process-local maintenance. Durable idle sandboxes remain owned
 // by the database and can be reconnected after a server restart.
 func (p *Provider) Close() error {
-	p.lifecycleMu.Lock()
+	// Never acquire the lock held by maintenance I/O before canceling it.
+	p.janitorMu.Lock()
+	defer p.janitorMu.Unlock()
 	cancel, done := p.stopJanitor, p.janitorDone
-	p.lifecycleMu.Unlock()
 	if cancel == nil {
 		return nil
 	}
 	cancel()
 	<-done
-	p.lifecycleMu.Lock()
 	p.stopJanitor, p.janitorDone = nil, nil
-	p.lifecycleMu.Unlock()
 	return nil
 }
 
@@ -394,6 +400,11 @@ func (p *Provider) acquireSandbox(
 	if store != nil {
 		state, err := store.EnvironmentState(ctx, key)
 		switch {
+		case err == nil && state.Status != environment.StateIdle && time.Now().Before(state.ExpiresAt):
+			// A failed metadata write may leave an active record instead of a
+			// recovery record. Neither may be replaced before its recorded expiry.
+			return e2bSandbox{}, false, fmt.Errorf("environment: sandbox %q is %s; recover workspace %q manually before %s; new runs are blocked until then",
+				state.EnvironmentID, state.Status, key, state.ExpiresAt.UTC().Format(time.RFC3339))
 		case err == nil && reusableState(state, cfg, network):
 			sandbox, connectErr := client.connectSandbox(ctx, state.EnvironmentID, cfg.timeout)
 			if connectErr == nil {
@@ -405,9 +416,6 @@ func (p *Provider) acquireSandbox(
 				if saveErr := store.SaveEnvironmentState(ctx, state); saveErr != nil {
 					return e2bSandbox{}, false, saveErr
 				}
-				if sandbox.Template == "" {
-					sandbox.Template = cfg.template
-				}
 				return sandbox, true, nil
 			}
 			if !hasHTTPStatus(connectErr, http.StatusNotFound) {
@@ -418,11 +426,14 @@ func (p *Provider) acquireSandbox(
 			}
 		case err == nil:
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			killErr := client.killSandbox(cleanupCtx, state.EnvironmentID)
+			if err := client.killSandbox(cleanupCtx, state.EnvironmentID); err != nil {
+				cancel()
+				return e2bSandbox{}, false, err
+			}
 			deleteErr := store.DeleteEnvironmentState(cleanupCtx, key, state.EnvironmentID)
 			cancel()
-			if err := errors.Join(killErr, deleteErr); err != nil {
-				return e2bSandbox{}, false, err
+			if deleteErr != nil {
+				return e2bSandbox{}, false, deleteErr
 			}
 		case !errors.Is(err, environment.ErrStateNotFound):
 			return e2bSandbox{}, false, err
@@ -439,6 +450,7 @@ func (p *Provider) acquireSandbox(
 
 func reusableState(state environment.State, cfg e2bConfig, network environment.NetworkPolicy) bool {
 	return state.Provider == "e2b" &&
+		state.Status == environment.StateIdle &&
 		state.Template == cfg.template &&
 		state.Network == network
 }
@@ -459,7 +471,13 @@ func (p *Provider) janitor(ctx context.Context, cfg e2bConfig) {
 }
 
 func (p *Provider) cleanExpired(ctx context.Context, cfg e2bConfig) {
-	p.lifecycleMu.Lock()
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	// Maintenance can wait for the next sweep. Never block shutdown behind a
+	// startup holding the lifecycle lock while doing network I/O.
+	if !p.lifecycleMu.TryLock() {
+		return
+	}
 	defer p.lifecycleMu.Unlock()
 	if p.stateStore == nil {
 		return
@@ -518,7 +536,7 @@ func validateE2BSpec(spec environment.Spec) (string, []string, environment.Netwo
 	for _, entry := range spec.Environment {
 		key, value, ok := strings.Cut(entry, "=")
 		if !ok || key == "" || strings.ContainsAny(key, "\x00\n=") || strings.ContainsRune(value, '\x00') {
-			return "", nil, "", nil, fmt.Errorf("environment: invalid environment entry %q", entry)
+			return "", nil, "", nil, errors.New("environment: invalid E2B environment entry")
 		}
 		env[key] = value
 	}
@@ -527,6 +545,7 @@ func validateE2BSpec(spec environment.Spec) (string, []string, environment.Netwo
 
 type e2bSession struct {
 	host              *external.Host
+	cancelTransport   context.CancelFunc
 	client            *e2bClient
 	sandbox           e2bSandbox
 	workspace         environment.WorkspaceState
@@ -542,8 +561,6 @@ type e2bSession struct {
 	metadata          environment.Metadata
 	keepaliveCancel   context.CancelFunc
 	keepaliveDone     chan struct{}
-	keepaliveMu       sync.Mutex
-	keepaliveErr      error
 	closeOnce         sync.Once
 	closeErr          error
 }
@@ -574,13 +591,12 @@ func (s *e2bSession) keepalive(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			err := s.refreshTimeout(ctx)
+			refreshCtx, cancel := context.WithTimeout(ctx, min(s.timeout/3, 15*time.Second))
+			err := s.refreshTimeout(refreshCtx)
+			cancel()
 			if ctx.Err() != nil {
 				return
 			}
-			s.keepaliveMu.Lock()
-			s.keepaliveErr = err
-			s.keepaliveMu.Unlock()
 			if err != nil && s.onError != nil {
 				s.onError(err)
 			}
@@ -620,11 +636,13 @@ func (s *e2bSession) persistCheckpoint(ctx context.Context, archive []byte) erro
 	if err != nil {
 		return err
 	}
-	s.workspace.CheckpointRef = checkpointRef
-	s.workspace.UpdatedAt = time.Now().UTC()
-	if err := s.store.SaveWorkspaceState(ctx, s.workspace); err != nil {
+	workspace := s.workspace
+	workspace.CheckpointRef = checkpointRef
+	workspace.UpdatedAt = time.Now().UTC()
+	if err := s.store.SaveWorkspaceState(ctx, workspace); err != nil {
 		return err
 	}
+	s.workspace = workspace
 	// The new reference is durable before pruning. Retain the immutable base
 	// checkpoint and report best-effort cleanup without invalidating the run.
 	keep := []string{s.workspace.BaseRevision, s.workspace.CheckpointRef}
@@ -634,22 +652,44 @@ func (s *e2bSession) persistCheckpoint(ctx context.Context, archive []byte) erro
 	return nil
 }
 
-func (s *e2bSession) stopKeepalive() error {
+// Reserve recovery before attempting a checkpoint, so a crash or storage
+// failure cannot make the next run discard the only remaining copy of edits.
+func (s *e2bSession) reserveRecovery(ctx context.Context, until time.Time) error {
+	stateErr := s.store.SaveEnvironmentState(ctx, environment.State{
+		WorkspaceID: s.workspace.ID, Provider: "e2b", EnvironmentID: s.sandbox.ID,
+		Template: s.template, Network: s.metadata.Network, Status: environment.StateRecovery,
+		ExpiresAt: until, UpdatedAt: time.Now().UTC(),
+	})
+	timeoutErr := s.client.setSandboxTimeout(ctx, s.sandbox.ID, time.Until(until)+time.Minute)
+	return errors.Join(stateErr, timeoutErr)
+}
+
+func (s *e2bSession) stopKeepalive() {
 	if s.keepaliveCancel == nil {
-		return nil
+		return
 	}
 	s.keepaliveCancel()
 	<-s.keepaliveDone
-	s.keepaliveMu.Lock()
-	defer s.keepaliveMu.Unlock()
-	return s.keepaliveErr
 }
 
 func (s *e2bSession) Close() error {
 	s.closeOnce.Do(func() {
+		if s.cancelTransport != nil {
+			defer s.cancelTransport()
+		}
 		s.closeErr = s.host.Close()
+		retain := s.closeErr == nil && s.store != nil
+		// Stop active-state writes before publishing the recovery reservation.
+		// A past heartbeat failure does not prevent a fresh checkpoint attempt.
+		s.stopKeepalive()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
+		recoveryUntil := time.Now().UTC().Add(checkpointRecoveryTimeout)
+		var recoveryErr error
+		if retain {
+			recoveryErr = s.reserveRecovery(ctx, recoveryUntil)
+			s.closeErr = errors.Join(s.closeErr, recoveryErr)
+		}
 		if s.closeErr == nil {
 			if _, _, err := s.client.run(ctx, s.sandbox, "/bin/tar", []string{
 				"--hard-dereference", "-cf", workspaceCheckpointPath, "-C", defaultE2BWorkspace, ".",
@@ -661,7 +701,6 @@ func (s *e2bSession) Close() error {
 				s.closeErr = s.persistCheckpoint(ctx, body)
 			}
 		}
-		s.closeErr = errors.Join(s.closeErr, s.stopKeepalive())
 		if s.closeErr == nil && s.store != nil {
 			now := time.Now().UTC()
 			idleUntil := now.Add(s.idleTimeout)
@@ -681,11 +720,25 @@ func (s *e2bSession) Close() error {
 				})
 			}
 		}
-		if s.store == nil || s.closeErr != nil {
+		if retain && s.closeErr != nil {
+			// Idle transition may have shortened the provider TTL before its
+			// metadata write failed. Restore the original, non-renewing window.
+			recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			recoveryErr = s.reserveRecovery(recoveryCtx, recoveryUntil)
+			recoveryCancel()
+			s.closeErr = errors.Join(s.closeErr, recoveryErr)
+			if recoveryErr != nil {
+				s.closeErr = fmt.Errorf("environment: sandbox %q was not deleted, but recovery retention could not be fully recorded or extended; recover files immediately (provider TTL may expire sooner): %w", s.sandbox.ID, s.closeErr)
+			} else {
+				s.closeErr = fmt.Errorf("environment: sandbox %q retained for manual recovery until %s; new runs are blocked until then: %w",
+					s.sandbox.ID, recoveryUntil.Format(time.RFC3339), s.closeErr)
+			}
+		} else if s.store == nil || s.closeErr != nil {
 			killCtx, killCancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer killCancel()
-			s.closeErr = errors.Join(s.closeErr, s.client.killSandbox(killCtx, s.sandbox.ID))
-			if s.store != nil {
+			killErr := s.client.killSandbox(killCtx, s.sandbox.ID)
+			s.closeErr = errors.Join(s.closeErr, killErr)
+			if killErr == nil && s.store != nil {
 				s.closeErr = errors.Join(s.closeErr, s.store.DeleteEnvironmentState(killCtx, s.workspace.ID, s.sandbox.ID))
 			}
 		}

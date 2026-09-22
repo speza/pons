@@ -29,6 +29,7 @@ import (
 	"github.com/samperrin/pons/plugins/fs"
 	"github.com/samperrin/pons/protocol"
 	ponsruntime "github.com/samperrin/pons/runtime"
+	"github.com/samperrin/pons/runtime/checkpoint"
 	"github.com/samperrin/pons/runtime/httptransport"
 	runtimesqlite "github.com/samperrin/pons/runtime/sqlite"
 )
@@ -77,7 +78,8 @@ func runServerReady(ctx context.Context, logger *log.Logger, opts serverOptions,
 	}
 	defer store.Close()
 	if durable, ok := opts.Environment.(environment.DurableProvider); ok {
-		if err := durable.SetStores(store, store); err != nil {
+		checkpoints := checkpoint.New(filepath.Join(opts.StateDir, "workspaces"))
+		if err := durable.SetStores(store, checkpoints); err != nil {
 			return fmt.Errorf("configure environment state: %w", err)
 		}
 	}
@@ -335,11 +337,7 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 			Template:    opts.E2BTemplate,
 			HandsPath:   handsPath,
 			IdleTimeout: opts.SandboxIdleTimeout,
-			OnError: func(err error) {
-				if opts.EnvironmentError != nil {
-					opts.EnvironmentError(err)
-				}
-			},
+			OnError:     opts.EnvironmentError,
 		}, environment.Spec{
 			Command: command, Network: network,
 			Limits: environment.ResourceLimits{
@@ -434,8 +432,6 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	if turnsErr != nil {
 		return result, turnsErr
 	}
-	brain.Seed(turns, request.Text, request.Workspace)
-
 	core := pons.New()
 	core.Workspace, core.MaxTurns = request.Workspace, r.opts.MaxTurns
 	if r.opts.Debug {
@@ -461,6 +457,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		}
 		defer func() { err = errors.Join(err, session.Close()) }()
 		metadata := session.Metadata()
+		core.Workspace, core.Platform = metadata.WorkspacePath, metadata.Platform
 		effectiveSandbox = metadata.Provider
 		effectiveNetwork = string(metadata.Network)
 		effectiveEnvironmentID = metadata.EnvironmentID
@@ -494,6 +491,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 			plugins = append(plugins, plugin)
 		}
 	}
+	brain.Seed(turns, request.Text, core.Workspace, core.Platform)
 	plugins = append(plugins, brain)
 	if err := core.Use(plugins...); err != nil {
 		return result, err

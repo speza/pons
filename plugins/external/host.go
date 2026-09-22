@@ -180,6 +180,7 @@ type Host struct {
 
 	processDone     chan struct{}
 	processDoneOnce sync.Once
+	waitErr         error
 	readerDone      chan struct{}
 	stderrDone      chan struct{}
 	startMu         sync.Mutex
@@ -808,8 +809,14 @@ func (h *Host) Stderr() string {
 
 func (h *Host) waitLoop(wait func() error) {
 	err := wait()
+	h.mu.Lock()
+	h.waitErr = err
+	h.mu.Unlock()
 	h.markProcessDone()
 	if h.isClosing() {
+		// A fast exit can race the reader delivering the buffered shutdown
+		// acknowledgement. Drain it before rejecting any unanswered request.
+		waitForReaders(h.cfg.ShutdownTimeout, h.readerDone)
 		h.rejectPending(errors.New("external: plugin exited during shutdown"))
 		return
 	}
@@ -924,6 +931,14 @@ func (h *Host) Close() error {
 		case <-time.After(wait):
 			h.closeErr = errors.Join(h.closeErr, h.terminate())
 			<-processDone
+		}
+		h.mu.Lock()
+		waitErr := h.waitErr
+		h.mu.Unlock()
+		if waitErr != nil {
+			// A remote stream failure does not establish that its process exited.
+			// Preserve the error so callers cannot checkpoint/reuse uncertain state.
+			h.closeErr = errors.Join(h.closeErr, fmt.Errorf("external: wait for plugin: %w", waitErr), h.terminate())
 		}
 		// cmd.Wait closes the child pipes. Drain both readers before exposing
 		// final diagnostics so a fast startup failure cannot lose stderr.

@@ -143,6 +143,16 @@ directory must remain outside the source workspace; pons rejects unsafe nested
 configuration. The immutable base and latest checkpoint are retained while
 superseded intermediate checkpoints are pruned. Idle sandboxes are deleted
 after `-sandbox-idle-timeout` (10 minutes by default).
+If hands stops cleanly but checkpointing fails, the sandbox is quarantined for
+manual recovery for one hour, not deleted immediately. The error includes its
+ID and deadline. New runs for that workspace are blocked during that window;
+use E2B's dashboard or SDK to copy `/home/user/pons-workspace` to a safe location
+before the deadline. Do not run the cleanup scripts on a sandbox being recovered.
+There is no automatic checkpoint retry or early release command yet. After
+expiry, cleanup removes the sandbox and future runs restore the last successful
+checkpoint. If metadata or provider timeout updates also fail, the error warns
+that the recovery window could be shorter. Unexpired active placements after
+a crash are likewise protected until their recorded expiry.
 The initial E2B backend does not support external plugin manifests.
 
 External tools are enabled explicitly with a manifest; they are never

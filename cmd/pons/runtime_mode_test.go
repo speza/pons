@@ -71,7 +71,7 @@ type recordingSession struct{ closes *atomic.Int32 }
 
 func (s recordingSession) Catalog() []external.ToolDescription { return nil }
 func (s recordingSession) Metadata() environment.Metadata {
-	return environment.Metadata{Provider: "recording"}
+	return environment.Metadata{Provider: "recording", WorkspacePath: "/remote/workspace", Platform: "linux/arm64"}
 }
 func (s recordingSession) Execute(_ context.Context, action protocol.Action) (protocol.ToolResult, error) {
 	return protocol.ToolResult{ActionID: action.ID, Kind: string(action.Kind), OK: true}, nil
@@ -136,6 +136,11 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 	defer mu.Unlock()
 	if len(bodies) != 2 || !strings.Contains(bodies[1], "answer 1") || !strings.Contains(bodies[1], "second question") {
 		t.Fatalf("second provider request was not hydrated: %v", bodies)
+	}
+	for _, body := range bodies {
+		if !strings.Contains(body, "cwd: /remote/workspace") || !strings.Contains(body, "os: linux/arm64") || strings.Contains(body, workspace) {
+			t.Fatalf("brain received host rather than hands context: %s", body)
+		}
 	}
 	if execution.starts.Load() != 2 || execution.closes.Load() != 2 {
 		t.Fatalf("environment lifecycle: starts=%d closes=%d", execution.starts.Load(), execution.closes.Load())

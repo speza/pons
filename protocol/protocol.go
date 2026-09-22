@@ -174,6 +174,7 @@ type Observation struct {
 	Turn      int       `json:"turn"`
 	Message   string    `json:"message"`
 	Workspace string    `json:"workspace"`
+	Platform  string    `json:"platform,omitempty"` // execution GOOS/GOARCH; empty means host-local
 	History   []TurnLog `json:"history,omitempty"`
 	Now       time.Time `json:"now"`
 }

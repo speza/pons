@@ -119,6 +119,13 @@ itself is disposable; it does not imply rollback or snapshot semantics. A
 remote provider owns its workspace synchronization strategy and must expose
 an equivalent workspace contract before it can be used as a backend.
 
+Session metadata reports the hands working directory and `GOOS/GOARCH`
+platform separately from the host-local source path in the launch specification.
+The runtime passes these through `Core` and `protocol.Observation` (`workspace`
+and optional `platform`) to brain prompts. An omitted platform means host-local
+execution; remote providers must supply it. Seeding a hydrated conversation uses
+the same effective execution context as subsequent observations.
+
 ### 6. Credentials and network access are opt-in
 
 The tool host receives an empty environment by default. Credentials are

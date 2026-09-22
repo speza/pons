@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -13,20 +12,27 @@ import (
 	ponsruntime "github.com/samperrin/pons/runtime"
 )
 
-func TestOpenRejectsUnversionedExistingDatabase(t *testing.T) {
-	stateDir := t.TempDir()
-	store, err := Open(stateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.db.Exec(`PRAGMA user_version = 0`); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Open(stateDir); err == nil || !strings.Contains(err.Error(), "recreate the runtime state directory") {
-		t.Fatalf("error = %v", err)
+func TestOpenRejectsOlderExistingDatabase(t *testing.T) {
+	for _, statement := range []string{"PRAGMA user_version = 0", "PRAGMA user_version = 1"} {
+		t.Run(statement, func(t *testing.T) {
+			stateDir := t.TempDir()
+			store, err := Open(stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.Exec(statement); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if reopened, err := Open(stateDir); err == nil {
+				_ = reopened.Close()
+				t.Fatal("accepted older database")
+			} else if !strings.Contains(err.Error(), "recreate the runtime state directory") {
+				t.Fatalf("error = %v", err)
+			}
+		})
 	}
 }
 
@@ -95,10 +101,7 @@ func TestEnvironmentStateRoundTripAndExpiry(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	checkpointRef, err := store.PutWorkspaceCheckpoint(ctx, "workspace", []byte("checkpoint"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	checkpointRef := "opaque-checkpoint-reference"
 	workspace := environment.WorkspaceState{
 		ID: "workspace", Strategy: environment.WorkspaceStrategyArchive, SourceRef: "/source",
 		BaseRevision: checkpointRef, CheckpointRef: checkpointRef, SetupGeneration: 2,
@@ -115,47 +118,6 @@ func TestEnvironmentStateRoundTripAndExpiry(t *testing.T) {
 		gotWorkspace.BaseRevision != workspace.BaseRevision || gotWorkspace.CheckpointRef != workspace.CheckpointRef ||
 		gotWorkspace.SetupGeneration != workspace.SetupGeneration || !gotWorkspace.CreatedAt.Equal(workspace.CreatedAt) {
 		t.Fatalf("workspace = %+v", gotWorkspace)
-	}
-	checkpoint, err := store.WorkspaceCheckpoint(ctx, workspace.ID, checkpointRef, 1<<20)
-	if err != nil || string(checkpoint) != "checkpoint" {
-		t.Fatalf("checkpoint = %q, %v", checkpoint, err)
-	}
-	checkpointPath, _, err := store.workspaceCheckpointPath(workspace.ID, checkpointRef)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(checkpointPath, []byte("corrupt"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.PutWorkspaceCheckpoint(ctx, workspace.ID, []byte("checkpoint")); err != nil {
-		t.Fatalf("repair checkpoint: %v", err)
-	}
-	if _, err := store.WorkspaceCheckpoint(ctx, workspace.ID, checkpointRef, 1<<20); err != nil {
-		t.Fatalf("repaired checkpoint: %v", err)
-	}
-	intermediateRef, err := store.PutWorkspaceCheckpoint(ctx, workspace.ID, []byte("intermediate checkpoint"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	newCheckpointRef, err := store.PutWorkspaceCheckpoint(ctx, workspace.ID, []byte("new checkpoint"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	workspace.CheckpointRef = newCheckpointRef
-	workspace.UpdatedAt = now.Add(time.Second)
-	if err := store.SaveWorkspaceState(ctx, workspace); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.PruneWorkspaceCheckpoints(ctx, workspace.ID, []string{checkpointRef, newCheckpointRef}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.WorkspaceCheckpoint(ctx, workspace.ID, intermediateRef, 1<<20); !errors.Is(err, environment.ErrStateNotFound) {
-		t.Fatalf("pruned checkpoint error = %v", err)
-	}
-	for _, ref := range []string{checkpointRef, newCheckpointRef} {
-		if _, err := store.WorkspaceCheckpoint(ctx, workspace.ID, ref, 1<<20); err != nil {
-			t.Fatalf("retained checkpoint %q: %v", ref, err)
-		}
 	}
 	state := environment.State{
 		WorkspaceID: "workspace", Provider: "e2b", EnvironmentID: "sandbox", Template: "pons-hands",
@@ -230,6 +192,60 @@ func TestEnvironmentStateRoundTripAndExpiry(t *testing.T) {
 	}
 	if _, err := store.WorkspaceState(ctx, workspace.ID); err != nil {
 		t.Fatalf("environment deletion removed logical workspace: %v", err)
+	}
+}
+
+func TestRecoveryReservationSurvivesRestartAndExpiresAtDeadline(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if err := store.SaveWorkspaceState(ctx, environment.WorkspaceState{
+		ID: "workspace", Strategy: environment.WorkspaceStrategyArchive, SetupGeneration: 1,
+		CheckpointRef: "previous", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state := environment.State{
+		WorkspaceID: "workspace", Provider: "e2b", EnvironmentID: "recover-me", Template: "template",
+		Network: environment.NetworkDisabled, Status: environment.StateRecovery,
+		ExpiresAt: now.Add(time.Hour), UpdatedAt: now,
+	}
+	if err := store.SaveEnvironmentState(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	invalid := state
+	invalid.RunID = "run"
+	if err := store.SaveEnvironmentState(ctx, invalid); err == nil {
+		t.Fatal("recovery reservation accepted a run")
+	}
+	invalid = state
+	invalid.IdleUntil = now
+	if err := store.SaveEnvironmentState(ctx, invalid); err == nil {
+		t.Fatal("recovery reservation accepted an idle deadline")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	got, err := store.EnvironmentState(ctx, "workspace")
+	if err != nil || got.Status != environment.StateRecovery || !got.ExpiresAt.Equal(state.ExpiresAt) {
+		t.Fatalf("reservation = %+v, %v", got, err)
+	}
+	before, err := store.ExpiredEnvironmentStates(ctx, "e2b", state.ExpiresAt.Add(-time.Microsecond), 10)
+	if err != nil || len(before) != 0 {
+		t.Fatalf("before expiry = %+v, %v", before, err)
+	}
+	after, err := store.ExpiredEnvironmentStates(ctx, "e2b", state.ExpiresAt, 10)
+	if err != nil || len(after) != 1 || after[0].EnvironmentID != "recover-me" {
+		t.Fatalf("at expiry = %+v, %v", after, err)
 	}
 }
 

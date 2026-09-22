@@ -55,11 +55,13 @@ type Spec struct {
 }
 
 // Metadata identifies the effective backend and policy for audit and UI use.
+// WorkspacePath and Platform describe hands, not the host-local source checkout.
 type Metadata struct {
 	Provider      string
 	EnvironmentID string
 	WorkspaceID   string
 	WorkspacePath string
+	Platform      string // GOOS/GOARCH of the execution environment
 	Network       NetworkPolicy
 }
 

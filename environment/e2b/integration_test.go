@@ -16,6 +16,7 @@ import (
 	"github.com/samperrin/pons/environment/e2b"
 	"github.com/samperrin/pons/plugins/bash"
 	"github.com/samperrin/pons/protocol"
+	"github.com/samperrin/pons/runtime/checkpoint"
 	runtimesqlite "github.com/samperrin/pons/runtime/sqlite"
 )
 
@@ -32,13 +33,15 @@ func TestE2BWorkspaceCheckpointRecovery(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	store, err := runtimesqlite.Open(t.TempDir())
+	stateDir := t.TempDir()
+	store, err := runtimesqlite.Open(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	checkpoints := checkpoint.New(filepath.Join(stateDir, "workspaces"))
 	provider := &e2b.Provider{IdleTimeout: time.Second, CleanupInterval: 100 * time.Millisecond}
-	if err := provider.SetStores(store, store); err != nil {
+	if err := provider.SetStores(store, checkpoints); err != nil {
 		t.Fatal(err)
 	}
 	defer provider.Close()
@@ -76,10 +79,10 @@ func TestE2BWorkspaceCheckpointRecovery(t *testing.T) {
 	if err := provider.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// A new provider instance simulates a server restart: only SQLite and the
-	// host-side API key carry over.
+	// A new provider instance simulates a server restart: only SQLite, the
+	// filesystem checkpoints, and the host-side API key carry over.
 	provider = &e2b.Provider{IdleTimeout: time.Second, CleanupInterval: 100 * time.Millisecond}
-	if err := provider.SetStores(store, store); err != nil {
+	if err := provider.SetStores(store, checkpoint.New(filepath.Join(stateDir, "workspaces"))); err != nil {
 		t.Fatal(err)
 	}
 	defer provider.Close()
