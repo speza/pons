@@ -3,6 +3,8 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +12,23 @@ import (
 	"github.com/samperrin/pons/protocol"
 	ponsruntime "github.com/samperrin/pons/runtime"
 )
+
+func TestOpenRejectsUnversionedExistingDatabase(t *testing.T) {
+	stateDir := t.TempDir()
+	store, err := Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`PRAGMA user_version = 0`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(stateDir); err == nil || !strings.Contains(err.Error(), "recreate the runtime state directory") {
+		t.Fatalf("error = %v", err)
+	}
+}
 
 func TestOpenConfiguresBusyTimeout(t *testing.T) {
 	store, err := Open(t.TempDir())
@@ -100,6 +119,43 @@ func TestEnvironmentStateRoundTripAndExpiry(t *testing.T) {
 	checkpoint, err := store.WorkspaceCheckpoint(ctx, workspace.ID, checkpointRef, 1<<20)
 	if err != nil || string(checkpoint) != "checkpoint" {
 		t.Fatalf("checkpoint = %q, %v", checkpoint, err)
+	}
+	checkpointPath, _, err := store.workspaceCheckpointPath(workspace.ID, checkpointRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(checkpointPath, []byte("corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutWorkspaceCheckpoint(ctx, workspace.ID, []byte("checkpoint")); err != nil {
+		t.Fatalf("repair checkpoint: %v", err)
+	}
+	if _, err := store.WorkspaceCheckpoint(ctx, workspace.ID, checkpointRef, 1<<20); err != nil {
+		t.Fatalf("repaired checkpoint: %v", err)
+	}
+	intermediateRef, err := store.PutWorkspaceCheckpoint(ctx, workspace.ID, []byte("intermediate checkpoint"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newCheckpointRef, err := store.PutWorkspaceCheckpoint(ctx, workspace.ID, []byte("new checkpoint"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace.CheckpointRef = newCheckpointRef
+	workspace.UpdatedAt = now.Add(time.Second)
+	if err := store.SaveWorkspaceState(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PruneWorkspaceCheckpoints(ctx, workspace.ID, []string{checkpointRef, newCheckpointRef}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.WorkspaceCheckpoint(ctx, workspace.ID, intermediateRef, 1<<20); !errors.Is(err, environment.ErrStateNotFound) {
+		t.Fatalf("pruned checkpoint error = %v", err)
+	}
+	for _, ref := range []string{checkpointRef, newCheckpointRef} {
+		if _, err := store.WorkspaceCheckpoint(ctx, workspace.ID, ref, 1<<20); err != nil {
+			t.Fatalf("retained checkpoint %q: %v", ref, err)
+		}
 	}
 	state := environment.State{
 		WorkspaceID: "workspace", Provider: "e2b", EnvironmentID: "sandbox", Template: "pons-hands",

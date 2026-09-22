@@ -66,11 +66,13 @@ type StateStore interface {
 }
 
 // CheckpointStore persists bounded workspace archives outside source
-// checkouts. A local filesystem implementation may be replaced by object
-// storage without changing workspace or environment state.
+// checkouts. Pruning removes every checkpoint for a workspace except the
+// supplied references. A local filesystem implementation may be replaced by
+// object storage without changing workspace or environment state.
 type CheckpointStore interface {
 	PutWorkspaceCheckpoint(context.Context, string, []byte) (string, error)
 	WorkspaceCheckpoint(context.Context, string, string, int64) ([]byte, error)
+	PruneWorkspaceCheckpoints(context.Context, string, []string) error
 }
 
 // DurableProvider receives the runtime's metadata and checkpoint stores after

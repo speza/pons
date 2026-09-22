@@ -39,7 +39,7 @@ test-integration-seatbelt:
 
 test-integration-e2b:
 	@test -n "$$E2B_API_KEY" || (echo "E2B_API_KEY is required"; exit 1)
-	PONS_E2B_TEST=1 go test -tags integration -count=1 -run TestE2BHandsRoundTrip ./environment/e2b
+	PONS_E2B_TEST=1 go test -tags integration -count=1 -run '^TestE2BWorkspaceCheckpointRecovery$$' ./environment/e2b
 
 vet:
 	go vet ./...

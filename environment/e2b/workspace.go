@@ -14,12 +14,19 @@ import (
 	"time"
 )
 
+const maxWorkspaceArchiveEntries = 100_000
+
 func archiveWorkspace(workspace string, limit int64) ([]byte, error) {
 	var out bytes.Buffer
+	entries := 0
 	writer := tar.NewWriter(&limitedWriter{writer: &out, remaining: limit})
 	err := filepath.Walk(workspace, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		entries++
+		if entries > maxWorkspaceArchiveEntries {
+			return fmt.Errorf("workspace archive exceeds %d entries", maxWorkspaceArchiveEntries)
 		}
 		rel, err := filepath.Rel(workspace, path)
 		if err != nil {
@@ -95,6 +102,7 @@ func restoreWorkspace(workspace string, archive []byte, limit int64) error {
 	directoryModes := make(map[string]os.FileMode)
 	reader := tar.NewReader(bytes.NewReader(archive))
 	var total int64
+	entries := 0
 	for {
 		header, nextErr := reader.Next()
 		if errors.Is(nextErr, io.EOF) {
@@ -102,6 +110,10 @@ func restoreWorkspace(workspace string, archive []byte, limit int64) error {
 		}
 		if nextErr != nil {
 			return fmt.Errorf("environment: read E2B checkpoint: %w", nextErr)
+		}
+		entries++
+		if entries > maxWorkspaceArchiveEntries {
+			return fmt.Errorf("environment: E2B checkpoint exceeds %d entries", maxWorkspaceArchiveEntries)
 		}
 		name := filepath.Clean(filepath.FromSlash(header.Name))
 		if name == "." {

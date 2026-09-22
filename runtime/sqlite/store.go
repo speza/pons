@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -23,7 +24,10 @@ import (
 	ponsruntime "github.com/samperrin/pons/runtime"
 )
 
-const runtimeDBName = "runtime.db"
+const (
+	runtimeDBName        = "runtime.db"
+	currentSchemaVersion = 1
+)
 
 // Store is the local, exclusive-manager runtime backend. Its transactions
 // prevent duplicate claims and concurrent conversation/workspace ownership,
@@ -71,6 +75,21 @@ func Open(stateDir string) (*Store, error) {
 }
 
 func (s *Store) initializeSchema(ctx context.Context) error {
+	var version, tableCount int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return fmt.Errorf("runtime: read schema version: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM sqlite_schema
+WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`).Scan(&tableCount); err != nil {
+		return fmt.Errorf("runtime: inspect schema: %w", err)
+	}
+	if version != currentSchemaVersion && (version != 0 || tableCount != 0) {
+		return fmt.Errorf(
+			"runtime: database schema version %d is unsupported; recreate the runtime state directory",
+			version,
+		)
+	}
 	const schema = `
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
@@ -189,8 +208,20 @@ CREATE INDEX IF NOT EXISTS execution_environments_provider_expiry
 CREATE UNIQUE INDEX IF NOT EXISTS execution_environments_provider_id
   ON execution_environments(provider, environment_id);
 `
-	if _, err := s.db.ExecContext(ctx, schema); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("runtime: begin schema initialization: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("runtime: initialize database: %w", err)
+	}
+	versionStatement := fmt.Sprintf("PRAGMA user_version = %d", currentSchemaVersion)
+	if _, err := tx.ExecContext(ctx, versionStatement); err != nil {
+		return fmt.Errorf("runtime: record schema version: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("runtime: commit schema initialization: %w", err)
 	}
 	return nil
 }
@@ -281,7 +312,16 @@ func (s *Store) PutWorkspaceCheckpoint(ctx context.Context, workspaceID string, 
 	}
 	path := filepath.Join(dir, strings.TrimPrefix(ref, "sha256:")+".tar")
 	if _, err := os.Stat(path); err == nil {
-		return ref, nil
+		matches, matchErr := checkpointFileMatches(path, digest)
+		if matchErr != nil {
+			return "", matchErr
+		}
+		if matches {
+			if err := os.Chmod(path, 0o600); err != nil {
+				return "", fmt.Errorf("runtime: secure workspace checkpoint: %w", err)
+			}
+			return ref, nil
+		}
 	} else if !os.IsNotExist(err) {
 		return "", fmt.Errorf("runtime: inspect workspace checkpoint: %w", err)
 	}
@@ -307,7 +347,32 @@ func (s *Store) PutWorkspaceCheckpoint(ctx context.Context, workspaceID string, 
 	if err := os.Rename(temporary, path); err != nil {
 		return "", fmt.Errorf("runtime: install workspace checkpoint: %w", err)
 	}
+	if err := syncDirectory(dir); err != nil {
+		return "", fmt.Errorf("runtime: sync workspace checkpoint directory: %w", err)
+	}
 	return ref, nil
+}
+
+func checkpointFileMatches(path string, want [sha256.Size]byte) (bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("runtime: open existing workspace checkpoint: %w", err)
+	}
+	hash := sha256.New()
+	_, copyErr := io.Copy(hash, file)
+	closeErr := file.Close()
+	if err := errors.Join(copyErr, closeErr); err != nil {
+		return false, fmt.Errorf("runtime: verify existing workspace checkpoint: %w", err)
+	}
+	return bytes.Equal(hash.Sum(nil), want[:]), nil
+}
+
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	return errors.Join(directory.Sync(), directory.Close())
 }
 
 func (s *Store) WorkspaceCheckpoint(
@@ -316,15 +381,13 @@ func (s *Store) WorkspaceCheckpoint(
 	ref string,
 	limit int64,
 ) ([]byte, error) {
-	if workspaceID == "" || limit < 0 {
+	if workspaceID == "" || limit < 0 || limit == math.MaxInt64 {
 		return nil, errors.New("runtime: invalid workspace checkpoint request")
 	}
-	algorithm, encoded, ok := strings.Cut(ref, ":")
-	decoded, decodeErr := hex.DecodeString(encoded)
-	if !ok || algorithm != "sha256" || decodeErr != nil || len(decoded) != sha256.Size {
-		return nil, errors.New("runtime: invalid workspace checkpoint reference")
+	path, decoded, err := s.workspaceCheckpointPath(workspaceID, ref)
+	if err != nil {
+		return nil, err
 	}
-	path := filepath.Join(s.workspaceCheckpointDir(workspaceID), encoded+".tar")
 	file, err := os.Open(path)
 	if os.IsNotExist(err) {
 		return nil, environment.ErrStateNotFound
@@ -348,6 +411,62 @@ func (s *Store) WorkspaceCheckpoint(
 		return nil, errors.New("runtime: workspace checkpoint digest mismatch")
 	}
 	return archive, nil
+}
+
+func (s *Store) PruneWorkspaceCheckpoints(ctx context.Context, workspaceID string, keepRefs []string) error {
+	if workspaceID == "" {
+		return errors.New("runtime: workspace ID is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	keep := make(map[string]struct{}, len(keepRefs))
+	for _, ref := range keepRefs {
+		path, _, err := s.workspaceCheckpointPath(workspaceID, ref)
+		if err != nil {
+			return err
+		}
+		keep[filepath.Base(path)] = struct{}{}
+	}
+	dir := s.workspaceCheckpointDir(workspaceID)
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("runtime: list workspace checkpoints: %w", err)
+	}
+	removed := false
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, retained := keep[entry.Name()]; retained || !strings.HasSuffix(entry.Name(), ".tar") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("runtime: prune workspace checkpoint: %w", err)
+		}
+		removed = true
+	}
+	if removed {
+		if err := syncDirectory(dir); err != nil {
+			return fmt.Errorf("runtime: sync workspace checkpoint pruning: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) workspaceCheckpointPath(workspaceID, ref string) (string, []byte, error) {
+	if workspaceID == "" {
+		return "", nil, errors.New("runtime: workspace ID is required")
+	}
+	algorithm, encoded, ok := strings.Cut(ref, ":")
+	decoded, err := hex.DecodeString(encoded)
+	if !ok || algorithm != "sha256" || err != nil || len(decoded) != sha256.Size {
+		return "", nil, errors.New("runtime: invalid workspace checkpoint reference")
+	}
+	return filepath.Join(s.workspaceCheckpointDir(workspaceID), encoded+".tar"), decoded, nil
 }
 
 func (s *Store) workspaceCheckpointDir(workspaceID string) string {

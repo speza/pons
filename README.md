@@ -138,8 +138,11 @@ The E2B API key remains on the host, internet access is disabled unless
 logical workspace. Bounded checkpoints are stored under the runtime state
 directory after every run; the source checkout is never replaced. Workspace
 metadata and sandbox placement are persisted separately in SQLite, so a
-workspace survives sandbox deletion and can be restored in a new VM. Idle
-sandboxes are deleted after `-sandbox-idle-timeout` (10 minutes by default).
+workspace survives sandbox deletion and can be restored in a new VM. The state
+directory must remain outside the source workspace; pons rejects unsafe nested
+configuration. The immutable base and latest checkpoint are retained while
+superseded intermediate checkpoints are pruned. Idle sandboxes are deleted
+after `-sandbox-idle-timeout` (10 minutes by default).
 The initial E2B backend does not support external plugin manifests.
 
 External tools are enabled explicitly with a manifest; they are never

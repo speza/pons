@@ -69,7 +69,12 @@ state directory:
 
 A future implementation may place the same bounded objects in S3 or another
 object store. Object-store credentials remain host-side; the host carries the
-archive through envd.
+archive through envd. The immutable base and current checkpoint are retained;
+after advancing workspace metadata, the provider prunes the superseded
+intermediate checkpoint on a best-effort basis.
+
+The runtime state directory must be outside the source workspace so the initial
+seed cannot capture runtime history or recursively include checkpoint objects.
 
 ## Current strategy: `archive/v1`
 
@@ -240,7 +245,7 @@ control-plane credentials remain host-only.
 ## Next stages
 
 1. Keep `archive/v1` checkpoints bounded, validated, and content-addressed.
-2. Add explicit checkpoint export and workspace deletion/retention policy.
+2. Add explicit checkpoint export and logical workspace deletion policy.
 3. Add an S3-compatible `CheckpointStore` when multi-host durability is needed.
 4. Add non-secret Git workspace plans and in-VM clone.
 5. Add short-lived repository-scoped Git credentials.

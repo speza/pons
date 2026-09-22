@@ -65,6 +65,11 @@ func runServerReady(ctx context.Context, logger *log.Logger, opts serverOptions,
 	if err := validateLoopbackAddress(opts.Address); err != nil {
 		return err
 	}
+	if _, ok := opts.Environment.(environment.DurableProvider); ok {
+		if err := validateRemoteStateDirectory(opts.Workspace, opts.StateDir); err != nil {
+			return err
+		}
+	}
 	logDebugConfiguration(logger, opts)
 	store, err := runtimesqlite.Open(opts.StateDir)
 	if err != nil {
@@ -221,6 +226,80 @@ func validateLoopbackAddress(address string) error {
 		return errors.New("runtime server: v1 must bind to a loopback address")
 	}
 	return nil
+}
+
+func validateRemoteStateDirectory(workspace, stateDir string) error {
+	workspacePath, err := resolvePathWithMissingLeaf(workspace)
+	if err != nil {
+		return fmt.Errorf("runtime server: resolve workspace: %w", err)
+	}
+	statePath, err := resolvePathWithMissingLeaf(stateDir)
+	if err != nil {
+		return fmt.Errorf("runtime server: resolve state directory: %w", err)
+	}
+	contained, err := pathContains(workspacePath, statePath)
+	if err != nil {
+		return fmt.Errorf("runtime server: compare workspace and state directory: %w", err)
+	}
+	if contained {
+		return errors.New("runtime server: remote workspace state directory must be outside the source workspace")
+	}
+	return nil
+}
+
+func pathContains(parent, child string) (bool, error) {
+	relative, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false, err
+	}
+	if relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
+		return true, nil
+	}
+	parentInfo, err := os.Stat(parent)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	for current := child; ; current = filepath.Dir(current) {
+		info, statErr := os.Stat(current)
+		if statErr == nil && os.SameFile(parentInfo, info) {
+			return true, nil
+		}
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return false, statErr
+		}
+		if next := filepath.Dir(current); next == current {
+			return false, nil
+		}
+	}
+}
+
+func resolvePathWithMissingLeaf(path string) (string, error) {
+	current, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	var missing []string
+	for {
+		resolved, resolveErr := filepath.EvalSymlinks(current)
+		if resolveErr == nil {
+			for _, part := range slices.Backward(missing) {
+				resolved = filepath.Join(resolved, part)
+			}
+			return filepath.Clean(resolved), nil
+		}
+		if !os.IsNotExist(resolveErr) {
+			return "", resolveErr
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", resolveErr
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
 }
 
 func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts serverOptions) (environment.Provider, environment.Spec, error) {

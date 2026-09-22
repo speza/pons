@@ -48,7 +48,10 @@ The local source workspace is a one-time seed, not a synchronization target.
 After each run, the provider downloads and validates a bounded checkpoint,
 stores it under the runtime state directory, and advances the logical
 workspace's content-addressed checkpoint reference. It never replaces the
-source checkout. If checkpoint download, validation, or persistence fails,
+source checkout. The state directory must be outside that source; the provider
+retains the immutable base and latest checkpoint and prunes superseded
+intermediate archives after advancing durable metadata. If checkpoint
+download, validation, or persistence fails,
 closing the session reports an error and the sandbox is discarded rather than
 reused.
 

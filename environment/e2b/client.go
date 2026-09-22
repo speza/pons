@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,6 +19,11 @@ import (
 
 	"github.com/samperrin/pons/environment"
 	"github.com/samperrin/pons/plugins/external"
+)
+
+const (
+	maxE2BJSONResponseBytes  = 1 << 20
+	maxE2BProcessOutputBytes = 1 << 20
 )
 
 type e2bClient struct {
@@ -150,6 +156,9 @@ func (c *e2bClient) upload(ctx context.Context, sandbox e2bSandbox, path string,
 }
 
 func (c *e2bClient) download(ctx context.Context, sandbox e2bSandbox, path string, limit int64) ([]byte, error) {
+	if limit < 0 || limit == math.MaxInt64 {
+		return nil, errors.New("environment: invalid E2B download limit")
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.envdURL+"/files?path="+url.QueryEscape(path), nil)
 	if err != nil {
 		return nil, err
@@ -185,7 +194,8 @@ func (c *e2bClient) run(ctx context.Context, sandbox e2bSandbox, command string,
 		return nil, nil, err
 	}
 	defer stream.body.Close()
-	var stdout, stderr bytes.Buffer
+	stdout := boundedProcessBuffer{remaining: maxE2BProcessOutputBytes}
+	stderr := boundedProcessBuffer{remaining: maxE2BProcessOutputBytes}
 	for {
 		event, err := stream.next()
 		if err != nil {
@@ -345,7 +355,14 @@ func (c *e2bClient) jsonRequest(ctx context.Context, method, target string, payl
 		return responseError("E2B request", resp)
 	}
 	if result != nil {
-		return json.NewDecoder(resp.Body).Decode(result)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxE2BJSONResponseBytes+1))
+		if err != nil {
+			return err
+		}
+		if len(body) > maxE2BJSONResponseBytes {
+			return fmt.Errorf("environment: E2B JSON response exceeds %d bytes", maxE2BJSONResponseBytes)
+		}
+		return json.Unmarshal(body, result)
 	}
 	return nil
 }
@@ -377,6 +394,20 @@ func e2bProcessEndError(end *e2bProcessEnd, stderr string) error {
 type e2bProcessData struct {
 	Stdout string `json:"stdout,omitempty"`
 	Stderr string `json:"stderr,omitempty"`
+}
+
+type boundedProcessBuffer struct {
+	bytes.Buffer
+	remaining int
+}
+
+func (b *boundedProcessBuffer) Write(data []byte) (int, error) {
+	if len(data) > b.remaining {
+		return 0, fmt.Errorf("environment: E2B process output exceeds %d bytes", maxE2BProcessOutputBytes)
+	}
+	n, err := b.Buffer.Write(data)
+	b.remaining -= n
+	return n, err
 }
 
 func writeProcessData(data *e2bProcessData, stdout, stderr io.Writer) error {

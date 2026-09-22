@@ -305,6 +305,34 @@ func TestRuntimeTurnsNormalizeEmptyToolArguments(t *testing.T) {
 	}
 }
 
+func TestRemoteStateDirectoryMustBeOutsideWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	for _, stateDir := range []string{workspace, filepath.Join(workspace, ".pons", "runtime")} {
+		if err := validateRemoteStateDirectory(workspace, stateDir); err == nil {
+			t.Fatalf("state directory %q was accepted", stateDir)
+		}
+	}
+	if err := validateRemoteStateDirectory(workspace, t.TempDir()); err != nil {
+		t.Fatalf("separate state directory rejected: %v", err)
+	}
+	missingSource := filepath.Join(t.TempDir(), "removed-source")
+	if err := validateRemoteStateDirectory(missingSource, t.TempDir()); err != nil {
+		t.Fatalf("missing one-time source rejected: %v", err)
+	}
+	stateTarget := filepath.Join(workspace, "state")
+	if err := os.Mkdir(stateTarget, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	link := filepath.Join(outside, "linked-state")
+	if err := os.Symlink(stateTarget, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRemoteStateDirectory(workspace, filepath.Join(link, "runtime")); err == nil {
+		t.Fatal("state directory reached through symlink was accepted")
+	}
+}
+
 func TestExecutionEnvironmentConfiguresE2B(t *testing.T) {
 	provider, spec, err := executionEnvironment("e2b", "", false, serverOptions{
 		E2BTemplate: "custom", E2BHandsPath: "/opt/pons-hands", BashTimeout: 9,

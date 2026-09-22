@@ -41,7 +41,8 @@ status=$?
 
 // Provider provisions or reconnects a workspace-affine E2B sandbox. The
 // selected template must contain a Linux pons-hands executable at HandsPath.
-// Workspace contents are uploaded on creation and checkpointed after every run.
+// A local source seeds each logical workspace once; replacement sandboxes load
+// its latest durable checkpoint. Completed runs produce a new checkpoint.
 type Provider struct {
 	APIKey            string
 	Template          string
@@ -93,7 +94,15 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 	if runID == "" {
 		return nil, errors.New("environment: durable E2B session requires a run ID")
 	}
-	workspaceState, err := p.loadOrCreateWorkspace(ctx, store, checkpoints, workspaceID, workspace, cfg.maxWorkspaceBytes)
+	workspaceState, err := loadOrCreateWorkspace(
+		ctx,
+		store,
+		checkpoints,
+		workspaceID,
+		workspace,
+		cfg.maxWorkspaceBytes,
+		cfg.onError,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -314,13 +323,14 @@ func (p *Provider) Close() error {
 	return nil
 }
 
-func (p *Provider) loadOrCreateWorkspace(
+func loadOrCreateWorkspace(
 	ctx context.Context,
 	store environment.StateStore,
 	checkpoints environment.CheckpointStore,
 	workspaceID string,
 	sourcePath string,
 	limit int64,
+	onError func(error),
 ) (environment.WorkspaceState, error) {
 	state, err := store.WorkspaceState(ctx, workspaceID)
 	if err == nil {
@@ -366,6 +376,9 @@ func (p *Provider) loadOrCreateWorkspace(
 	}
 	if err := store.SaveWorkspaceState(ctx, state); err != nil {
 		return environment.WorkspaceState{}, err
+	}
+	if err := checkpoints.PruneWorkspaceCheckpoints(ctx, workspaceID, []string{checkpointRef}); err != nil && onError != nil {
+		onError(fmt.Errorf("environment: prune initial workspace checkpoints: %w", err))
 	}
 	return state, nil
 }
@@ -609,7 +622,16 @@ func (s *e2bSession) persistCheckpoint(ctx context.Context, archive []byte) erro
 	}
 	s.workspace.CheckpointRef = checkpointRef
 	s.workspace.UpdatedAt = time.Now().UTC()
-	return s.store.SaveWorkspaceState(ctx, s.workspace)
+	if err := s.store.SaveWorkspaceState(ctx, s.workspace); err != nil {
+		return err
+	}
+	// The new reference is durable before pruning. Retain the immutable base
+	// checkpoint and report best-effort cleanup without invalidating the run.
+	keep := []string{s.workspace.BaseRevision, s.workspace.CheckpointRef}
+	if err := s.checkpoints.PruneWorkspaceCheckpoints(ctx, s.workspace.ID, keep); err != nil && s.onError != nil {
+		s.onError(fmt.Errorf("environment: prune superseded workspace checkpoints: %w", err))
+	}
+	return nil
 }
 
 func (s *e2bSession) stopKeepalive() error {

@@ -72,15 +72,14 @@ func TestArchiveWorkspaceUsesSourceOnlyForInitialSeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := &recordingStateStore{}
-	provider := &Provider{}
-	first, err := provider.loadOrCreateWorkspace(context.Background(), store, store, "workspace", source, 1<<20)
+	first, err := loadOrCreateWorkspace(context.Background(), store, store, "workspace", source, 1<<20, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.RemoveAll(source); err != nil {
 		t.Fatal(err)
 	}
-	second, err := provider.loadOrCreateWorkspace(context.Background(), store, store, "workspace", source, 1<<20)
+	second, err := loadOrCreateWorkspace(context.Background(), store, store, "workspace", source, 1<<20, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,6 +148,16 @@ func TestE2BCreateSandboxKeepsCredentialOnPlatformRequest(t *testing.T) {
 	}
 	if sandbox.ID != "sandbox" || got["allow_internet_access"] != false || got["secure"] != true {
 		t.Fatalf("sandbox = %+v payload = %#v", sandbox, got)
+	}
+}
+
+func TestE2BProcessOutputIsBounded(t *testing.T) {
+	buffer := boundedProcessBuffer{remaining: maxE2BProcessOutputBytes}
+	if _, err := buffer.Write(make([]byte, maxE2BProcessOutputBytes)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buffer.Write([]byte("overflow")); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
@@ -329,6 +338,7 @@ func TestSessionCheckpointDoesNotReplaceSourceWorkspace(t *testing.T) {
 		checkpoints: store,
 		workspace: environment.WorkspaceState{
 			ID: "workspace", Strategy: environment.WorkspaceStrategyArchive, SourceRef: source,
+			BaseRevision: "base", CheckpointRef: "old-checkpoint",
 		},
 		maxWorkspaceBytes: 1 << 20,
 	}
@@ -341,8 +351,11 @@ func TestSessionCheckpointDoesNotReplaceSourceWorkspace(t *testing.T) {
 	if body, err := os.ReadFile(filepath.Join(source, "source.txt")); err != nil || string(body) != "source" {
 		t.Fatalf("source workspace = %q, %v", body, err)
 	}
-	if state := store.workspaceLast.Load(); state == nil || state.CheckpointRef == "" {
+	if state := store.workspaceLast.Load(); state == nil || state.CheckpointRef != "checkpoint" {
 		t.Fatalf("workspace state = %+v", state)
+	}
+	if pruned := store.prunedCheckpointRefs.Load(); pruned == nil || *pruned != "base,checkpoint" {
+		t.Fatalf("retained checkpoint refs = %v", pruned)
 	}
 }
 
@@ -481,11 +494,12 @@ func TestArchiveWorkspaceRejectsSpecialEntries(t *testing.T) {
 }
 
 type recordingStateStore struct {
-	environmentSaves atomic.Int32
-	environmentLast  atomic.Pointer[environment.State]
-	workspaceLast    atomic.Pointer[environment.WorkspaceState]
-	checkpointMu     sync.Mutex
-	checkpoint       []byte
+	environmentSaves     atomic.Int32
+	environmentLast      atomic.Pointer[environment.State]
+	workspaceLast        atomic.Pointer[environment.WorkspaceState]
+	prunedCheckpointRefs atomic.Pointer[string]
+	checkpointMu         sync.Mutex
+	checkpoint           []byte
 }
 
 func (s *recordingStateStore) WorkspaceState(context.Context, string) (environment.WorkspaceState, error) {
@@ -512,6 +526,11 @@ func (s *recordingStateStore) WorkspaceCheckpoint(context.Context, string, strin
 		return nil, environment.ErrStateNotFound
 	}
 	return append([]byte(nil), s.checkpoint...), nil
+}
+func (s *recordingStateStore) PruneWorkspaceCheckpoints(_ context.Context, _ string, refs []string) error {
+	retained := strings.Join(refs, ",")
+	s.prunedCheckpointRefs.Store(&retained)
+	return nil
 }
 func (*recordingStateStore) EnvironmentState(context.Context, string) (environment.State, error) {
 	return environment.State{}, environment.ErrStateNotFound
