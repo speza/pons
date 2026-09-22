@@ -84,6 +84,16 @@ func TestCreateConversationPassesGitSelection(t *testing.T) {
 	}
 }
 
+func TestCreateConversationPassesHostWorkspace(t *testing.T) {
+	runtime := &fakeRuntime{created: ponsruntime.Conversation{ID: "session-1"}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/conversations", strings.NewReader(`{"workspace":"/projects/repo-a"}`))
+	recorder := httptest.NewRecorder()
+	Handler(runtime).ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusCreated || runtime.createdOptions.Workspace != "/projects/repo-a" {
+		t.Fatalf("status = %d, options = %+v", recorder.Code, runtime.createdOptions)
+	}
+}
+
 func TestHandlerUsesIDsOnlyForDurableSSEEvents(t *testing.T) {
 	runtime := &fakeRuntime{events: []ponsruntime.Event{
 		{ID: 7, Type: ponsruntime.EventRunUpdated, ConversationID: "conversation-1", CreatedAt: time.Now()},

@@ -1,6 +1,6 @@
-// Durable CLI configuration: ~/.pons/config.json (global defaults) and
-// .pons.json in the workspace (project overrides), with command-line flags
-// winning over both. Same decoding rules as external plugin manifests:
+// Durable CLI configuration: ~/.pons/config.json (global defaults) and,
+// in bundled mode, .pons.json in the current directory (project overrides),
+// with command-line flags winning over both. Same decoding rules as external plugin manifests:
 // strict, stdlib-only, fail loudly on malformed files.
 package main
 
@@ -61,6 +61,7 @@ type settings struct {
 	Model                *string              `json:"model,omitempty"`
 	BaseURL              *string              `json:"base_url,omitempty"`
 	StateDir             *string              `json:"state_dir,omitempty"`
+	WorkspaceRoot        *string              `json:"workspace_root,omitempty"`
 	Environment          *environmentSettings `json:"environment,omitempty"`
 	MaxTurns             *int                 `json:"max_turns,omitempty"`
 	CompactChars         *int                 `json:"compact_chars,omitempty"`
@@ -126,15 +127,17 @@ func (s settings) validate() error {
 	return nil
 }
 
-// loadSettings merges the global config and the workspace's .pons.json,
-// project file winning per key. Missing files are fine; a malformed file
-// is an error naming the file.
+// loadSettings merges the global config and an optional project's .pons.json,
+// project file winning per key. Missing files are fine; a malformed file is an
+// error naming the file.
 func loadSettings(home, workspace string) (settings, error) {
 	var paths []string
 	if home != "" {
 		paths = append(paths, filepath.Join(home, ".pons", "config.json"))
 	}
-	paths = append(paths, filepath.Join(workspace, ".pons.json"))
+	if workspace != "" {
+		paths = append(paths, filepath.Join(workspace, ".pons.json"))
+	}
 
 	merged := map[string]json.RawMessage{}
 	for _, path := range paths {

@@ -41,8 +41,9 @@ func main() {
 	provider := flag.String("provider", "anthropic", "LLM provider: anthropic | openai | codex | openai-responses")
 	model := flag.String("model", "", "model id (default: provider default)")
 	baseURL := flag.String("base-url", "", "override provider endpoint (for OpenAI-compatible servers)")
-	workspace := flag.String("workspace", "", "host workspace and archive seed (default: current directory; Git E2B sessions clone remotely)")
-	stateDir := flag.String("state-dir", "", "runtime state directory (default: ~/.pons/runtime/<munged-project-path>/)")
+	workspace := flag.String("workspace", "", "host workspace selected for a new local, Seatbelt, or E2B archive conversation (default: current directory)")
+	workspaceRoot := flag.String("workspace-root", "", "server-approved root for client-selected host workspaces (default: home directory)")
+	stateDir := flag.String("state-dir", "", "runtime state directory (default: ~/.pons/runtime/server/)")
 	compactChars := flag.Int("compact-chars", 0, "conversation size (chars) before auto-compaction; 0 = default ~400k, negative = off")
 	debug := flag.Bool("debug", false, "verbose client tool results and structured server lifecycle logs")
 	message := flag.String("message", "", "task to submit to the runtime")
@@ -84,6 +85,26 @@ func main() {
 		GitRepository: *gitRepository, GitRevision: *gitRevision,
 		GitAllRepositories: *gitAllRepositories,
 	}
+	if *conversationID == "" && *gitRepository == "" {
+		selected := *workspace
+		if selected == "" {
+			selected = "."
+		}
+		var err error
+		conversationOptions.Workspace, err = filepath.Abs(selected)
+		if err != nil {
+			logger.Printf("workspace: %v", err)
+			os.Exit(1)
+		}
+	}
+	if *gitRepository != "" && *workspace != "" {
+		logger.Print("--workspace and --git-repository cannot be combined")
+		os.Exit(1)
+	}
+	if *conversationID != "" && *workspace != "" {
+		logger.Print("--workspace applies only when creating a conversation")
+		os.Exit(1)
+	}
 
 	if mode == "client" {
 		if err := runClient(rootCtx, *serverURL, *conversationID, *idempotencyKey, *message, *interactive, *debug, conversationOptions); err != nil && !errors.Is(err, context.Canceled) {
@@ -93,7 +114,7 @@ func main() {
 		return
 	}
 
-	// Host workspace: local tools use it directly; E2B archive sessions seed from it.
+	// The current directory supplies bundled project settings, not a server-owned workspace.
 	ws := *workspace
 	if ws == "" {
 		ws = "."
@@ -102,10 +123,14 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	// Durable settings: ~/.pons/config.json (global) + .pons.json in the
-	// workspace (project). Explicit flags always win over both.
+	// Standalone servers use global settings. Bundled mode also reads the
+	// current directory's .pons.json; explicit flags win over both files.
 	home, _ := os.UserHomeDir()
-	cfg, err := loadSettings(home, ws)
+	settingsWorkspace := ws
+	if mode == "serve" {
+		settingsWorkspace = ""
+	}
+	cfg, err := loadSettings(home, settingsWorkspace)
 	if err != nil {
 		logger.Printf("%v", err)
 		os.Exit(1)
@@ -127,6 +152,7 @@ func main() {
 	applyString("model", model, cfg.Model)
 	applyString("base-url", baseURL, cfg.BaseURL)
 	applyString("state-dir", stateDir, cfg.StateDir)
+	applyString("workspace-root", workspaceRoot, cfg.WorkspaceRoot)
 	if cfg.Environment != nil {
 		applyString("sandbox", sandbox, cfg.Environment.Sandbox)
 		if cfg.Environment.E2B != nil {
@@ -201,18 +227,31 @@ func main() {
 		logger.Printf("serve: --message and -i are client options")
 		os.Exit(1)
 	}
+	if mode == "serve" && *workspace != "" {
+		logger.Print("serve: --workspace belongs to the client creating a conversation; use --workspace-root to allow host paths")
+		os.Exit(1)
+	}
 	if mode == "serve" && (conversationOptions.GitRepository != "" || conversationOptions.GitRevision != "" || conversationOptions.GitAllRepositories) {
 		logger.Printf("serve: Git repository and access options belong to the client creating a conversation")
 		os.Exit(1)
 	}
 	statePath := *stateDir
 	if statePath == "" {
-		statePath = filepath.Join(home, ".pons", "runtime", strings.ReplaceAll(ws, "/", "-"))
+		statePath = filepath.Join(home, ".pons", "runtime", "server")
+	}
+	root := *workspaceRoot
+	if root == "" {
+		root = home
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		logger.Printf("workspace root: %v", err)
+		os.Exit(1)
 	}
 	serverLogger := newServerLogger(os.Stderr, *debug)
 	serverLogger.Info("runtime state selected", "state_dir", statePath)
 	serverOpts := serverOptions{
-		Address: *runtimeAddress, StateDir: statePath, Workspace: ws,
+		Address: *runtimeAddress, StateDir: statePath, WorkspaceRoot: root, ClientWorkspace: conversationOptions.Workspace,
 		MaxConcurrent: *runtimeConcurrency, MaxTurns: *maxTurns, Brain: brainConfig,
 		FSReadBytes: *fsReadBytes, BashTimeout: *bashTimeout, BashMaxLines: *bashMaxLines, BashMaxBytes: *bashMaxBytes,
 		PluginPaths: pluginPaths, PluginPath: *pluginPath, PluginMaxResultBytes: *pluginMaxResultBytes, Debug: *debug,

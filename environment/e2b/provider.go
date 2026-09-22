@@ -502,12 +502,16 @@ func validateE2BSpec(spec environment.Spec) (string, []string, environment.Netwo
 	if strings.TrimSpace(spec.WorkspaceID) == "" || strings.ContainsRune(spec.WorkspaceID, '\x00') {
 		return "", nil, "", nil, errors.New("environment: workspace ID is required")
 	}
-	if spec.WorkspacePath == "" {
+	if spec.WorkspacePath == "" && spec.WorkspacePlan.Strategy != environment.WorkspaceStrategyGit {
 		return "", nil, "", nil, errors.New("environment: workspace is required")
 	}
-	workspace, err := filepath.Abs(spec.WorkspacePath)
-	if err != nil {
-		return "", nil, "", nil, fmt.Errorf("environment: workspace: %w", err)
+	workspace := spec.WorkspacePath
+	if workspace != "" {
+		var err error
+		workspace, err = filepath.Abs(workspace)
+		if err != nil {
+			return "", nil, "", nil, fmt.Errorf("environment: workspace: %w", err)
+		}
 	}
 	if len(spec.Command) == 0 {
 		return "", nil, "", nil, errors.New("environment: hands command is required")

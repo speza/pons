@@ -94,12 +94,45 @@ func testManager(t *testing.T, runner Runner) *Manager {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := New(Config{Store: store, Workspace: t.TempDir(), Runner: runner, MaxConcurrent: 4})
+	m, err := New(Config{Store: store, Runner: runner, MaxConcurrent: 4})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = m.Close(); _ = store.Close() })
 	return m
+}
+
+func TestConversationUsesClientSelectedWorkspace(t *testing.T) {
+	m := testManager(t, RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
+		return RunResult{Answer: "ok"}, nil
+	}))
+	firstPath, secondPath := t.TempDir(), t.TempDir()
+	for _, path := range []string{firstPath, secondPath} {
+		conversation, err := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if conversation.Workspace != path || conversation.WorkspaceLock != path {
+			t.Fatalf("conversation workspace = %+v, want %q", conversation, path)
+		}
+	}
+	gitConversation, err := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{
+		GitRepository: "https://github.com/example/repo.git", GitRevision: "pinned-commit",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gitConversation.Workspace != "" || gitConversation.WorkspaceLock != gitConversation.ID {
+		t.Fatalf("Git conversation workspace = %+v", gitConversation)
+	}
+	if _, err := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{}); err == nil {
+		t.Fatal("conversation without a source accepted")
+	}
+	if _, err := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{
+		Workspace: firstPath, GitRepository: "https://github.com/example/repo.git",
+	}); err == nil {
+		t.Fatal("conversation with both host and Git sources accepted")
+	}
 }
 
 func waitForEvent(t *testing.T, m *Manager, conversationID, eventType string, count int) []Event {
@@ -156,7 +189,7 @@ func TestManagerDoesNotEagerlyHydrateDormantConversations(t *testing.T) {
 	}
 	store := &observingStore{Store: base}
 	manager, err := New(Config{
-		Store: store, Workspace: t.TempDir(), RepairInterval: time.Hour,
+		Store: store, RepairInterval: time.Hour,
 		Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
 			return RunResult{}, errors.New("unexpected run")
 		}),
@@ -186,7 +219,7 @@ func TestRepairScanFindsWorkAfterLostWake(t *testing.T) {
 	store := &observingStore{Store: base}
 	ran := make(chan string, 1)
 	manager, err := New(Config{
-		Store: store, Workspace: t.TempDir(), RepairInterval: 10 * time.Millisecond,
+		Store: store, RepairInterval: 10 * time.Millisecond,
 		Runner: RunnerFunc(func(_ context.Context, request RunRequest) (RunResult, error) {
 			ran <- request.Text
 			return RunResult{Answer: "done"}, nil
@@ -197,7 +230,7 @@ func TestRepairScanFindsWorkAfterLostWake(t *testing.T) {
 	}
 	defer manager.Close()
 	waitUntil(t, func() bool { return store.claimCalls.Load() > 0 }, "initial runnable check did not run")
-	conversation, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{})
+	conversation, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +267,7 @@ func TestSchedulerBoundsActiveRunGoroutines(t *testing.T) {
 	started := make(chan struct{}, 4)
 	var active, maximum atomic.Int32
 	manager, err := New(Config{
-		Store: store, Workspace: t.TempDir(), MaxConcurrent: 2,
+		Store: store, MaxConcurrent: 2,
 		Runner: RunnerFunc(func(ctx context.Context, _ RunRequest) (RunResult, error) {
 			current := active.Add(1)
 			defer active.Add(-1)
@@ -292,7 +325,7 @@ func TestWorkspaceExclusionIsEnforcedByRunnableClaim(t *testing.T) {
 	started := make(chan string, 2)
 	release := make(chan struct{}, 2)
 	manager, err := New(Config{
-		Store: store, Workspace: workspace, MaxConcurrent: 2,
+		Store: store, MaxConcurrent: 2,
 		Runner: RunnerFunc(func(_ context.Context, request RunRequest) (RunResult, error) {
 			started <- request.ConversationID
 			<-release
@@ -350,12 +383,12 @@ func TestCompetingManagersDoNotDuplicateSQLiteClaim(t *testing.T) {
 		<-release
 		return RunResult{Answer: "done"}, nil
 	})
-	managerA, err := New(Config{Store: storeA, Workspace: workspace, Runner: runner, RepairInterval: 10 * time.Millisecond})
+	managerA, err := New(Config{Store: storeA, Runner: runner, RepairInterval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer managerA.Close()
-	managerB, err := New(Config{Store: storeB, Workspace: workspace, Runner: runner, RepairInterval: 10 * time.Millisecond})
+	managerB, err := New(Config{Store: storeB, Runner: runner, RepairInterval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +427,7 @@ func TestSubscribeDuringClaimBroadcastDoesNotDuplicateDurableEvents(t *testing.T
 	}
 	store := &delayedClaimStore{Store: base, claimed: make(chan struct{}), release: make(chan struct{})}
 	manager, err := New(Config{
-		Store: store, Workspace: conversation.Workspace,
+		Store: store,
 		Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
 			return RunResult{Answer: "done"}, nil
 		}),
@@ -455,7 +488,7 @@ func TestConversationSerializesMessagesAndDeduplicates(t *testing.T) {
 		return RunResult{Answer: "answer: " + request.Text}, nil
 	})
 	m := testManager(t, runner)
-	conversation, err := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{})
+	conversation, err := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,7 +533,7 @@ func TestBackgroundStoreFailureIsReported(t *testing.T) {
 	reported := make(chan error, 1)
 	var runnerCalls atomic.Int32
 	manager, err := New(Config{
-		Store: claimErrorStore{Store: base, err: want}, Workspace: t.TempDir(),
+		Store: claimErrorStore{Store: base, err: want},
 		Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
 			runnerCalls.Add(1)
 			return RunResult{}, nil
@@ -511,7 +544,7 @@ func TestBackgroundStoreFailureIsReported(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	conversation, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{})
+	conversation, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,7 +574,7 @@ func TestSnapshotThenEventsHasNoDurableGap(t *testing.T) {
 			return RunResult{}, ctx.Err()
 		}
 	}))
-	conversation, _ := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{})
+	conversation, _ := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
 	view, err := m.View(context.Background(), conversation.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -595,7 +628,7 @@ func TestTransientDeltaIsLiveOnlyAndDoesNotAdvanceCursor(t *testing.T) {
 			return RunResult{}, ctx.Err()
 		}
 	}))
-	conversation, _ := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{})
+	conversation, _ := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
 	ctx := t.Context()
 	stream, err := m.Subscribe(ctx, conversation.ID, 0)
 	if err != nil {
@@ -661,7 +694,7 @@ func TestToolLifecycleUsesEntityUpserts(t *testing.T) {
 		}
 		return RunResult{Answer: "hello " + request.Text}, nil
 	}))
-	conversation, err := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{})
+	conversation, err := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -700,7 +733,7 @@ func TestFailedRunIsDurableAndNotRetried(t *testing.T) {
 		}
 		return RunResult{}, errors.New("failed after intent")
 	}))
-	conversation, _ := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{})
+	conversation, _ := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
 	_, err := m.Submit(context.Background(), conversation.ID, "once", []TextPart{{Type: "text", Text: "go"}})
 	if err != nil {
 		t.Fatal(err)
@@ -745,7 +778,7 @@ func TestRestartMarksRequestedToolInterruptedWithoutRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	var executions atomic.Int32
-	second, err := New(Config{Store: store, Workspace: workspace, Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
+	second, err := New(Config{Store: store, Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
 		executions.Add(1)
 		return RunResult{}, nil
 	})})
@@ -890,7 +923,7 @@ func TestRestartRunsDurablyQueuedSubmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	ran := make(chan string, 1)
-	second, err := New(Config{Store: store, Workspace: workspace, Runner: RunnerFunc(func(_ context.Context, request RunRequest) (RunResult, error) {
+	second, err := New(Config{Store: store, Runner: RunnerFunc(func(_ context.Context, request RunRequest) (RunResult, error) {
 		ran <- request.Text
 		return RunResult{Answer: "resumed"}, nil
 	})})

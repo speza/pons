@@ -96,7 +96,6 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 	execution := &recordingEnvironment{specs: make(chan environment.Spec, 2)}
 	var debugLog bytes.Buffer
 	runner := &agentRunner{opts: serverOptions{
-		Workspace:   workspace,
 		MaxTurns:    3,
 		Debug:       true,
 		Sandbox:     "e2b",
@@ -116,7 +115,7 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 		inboundID := fmt.Sprintf("inbound-%d", requestNumber)
 		return ponsruntime.RunRequest{
 			ConversationID: "conversation-1", InboundMessageID: inboundID,
-			RunID: fmt.Sprintf("run-%d", requestNumber), Workspace: workspace, Text: text,
+			RunID: fmt.Sprintf("run-%d", requestNumber), Text: text,
 			GitRepository: "https://github.com/acme/a.git", GitRevision: strings.Repeat("a", 40),
 			Messages: append([]ponsruntime.Message(nil), history...),
 			Emit: func(event ponsruntime.RunEvent) error {
@@ -152,7 +151,7 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 	if execution.starts.Load() != 2 || execution.closes.Load() != 2 {
 		t.Fatalf("environment lifecycle: starts=%d closes=%d", execution.starts.Load(), execution.closes.Load())
 	}
-	if got := debugLog.String(); !strings.Contains(got, `"sandbox":"recording"`) || !strings.Contains(got, `"workspace":"`+workspace+`"`) || !strings.Contains(got, `"conversation_id":"conversation-1"`) || strings.Contains(got, "answer 1") || strings.Contains(got, "answer 2") {
+	if got := debugLog.String(); !strings.Contains(got, `"sandbox":"recording"`) || !strings.Contains(got, `"workspace":""`) || !strings.Contains(got, `"conversation_id":"conversation-1"`) || strings.Contains(got, "answer 1") || strings.Contains(got, "answer 2") {
 		t.Fatalf("unexpected structured run log: %s", got)
 	}
 	if len(progress) != 6 || progress[0] != "Preparing sandbox…" || progress[1] != "Sandbox ready" || progress[2] != "Saving sandbox state…" {
@@ -160,7 +159,7 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 	}
 	for i := 1; i <= 2; i++ {
 		spec := <-execution.specs
-		if spec.WorkspaceID != "conversation-1" || spec.WorkspacePath != workspace {
+		if spec.WorkspaceID != "conversation-1" || spec.WorkspacePath != "" {
 			t.Fatalf("environment workspace = %q at %q", spec.WorkspaceID, spec.WorkspacePath)
 		}
 		if want := fmt.Sprintf("run-%d", i); spec.RunID != want {
@@ -183,7 +182,7 @@ func TestRuntimeServerConfiguresAndClosesStatefulEnvironment(t *testing.T) {
 	stateDir, workspace := t.TempDir(), t.TempDir()
 	go func() {
 		done <- runServerReady(ctx, newServerLogger(io.Discard, false), serverOptions{
-			Address: "127.0.0.1:0", StateDir: stateDir, Workspace: workspace,
+			Address: "127.0.0.1:0", StateDir: stateDir, WorkspaceRoot: workspace,
 			MaxConcurrent: 1, Environment: provider,
 		}, started)
 	}()
@@ -203,7 +202,7 @@ func TestRuntimeServerConfiguresAndClosesStatefulEnvironment(t *testing.T) {
 func TestDebugConfigurationIncludesSandboxPolicy(t *testing.T) {
 	var output bytes.Buffer
 	logDebugConfiguration(newServerLogger(&output, true), serverOptions{
-		Debug: true, Sandbox: "seatbelt", Workspace: "/workspace", MaxTurns: 12, MaxConcurrent: 4,
+		Debug: true, Sandbox: "seatbelt", WorkspaceRoot: "/workspace", MaxTurns: 12, MaxConcurrent: 4,
 		Brain:       llm.Config{Provider: "codex", Model: "gpt-5.6-luna"},
 		Environment: &recordingEnvironment{},
 		EnvironmentSpec: environment.Spec{
@@ -215,7 +214,7 @@ func TestDebugConfigurationIncludesSandboxPolicy(t *testing.T) {
 	})
 	got := output.String()
 	for _, want := range []string{
-		`"provider":"codex"`, `"model":"gpt-5.6-luna"`, `"workspace":"/workspace"`,
+		`"provider":"codex"`, `"model":"gpt-5.6-luna"`, `"workspace_root":"/workspace"`,
 		`"sandbox":"seatbelt"`, `"network":"disabled"`, `"hands":"/usr/local/bin/pons-hands"`,
 		`"external_plugins":1`, `"read_only_paths":1`,
 	} {
@@ -256,11 +255,11 @@ func TestRuntimeServerShutdownClosesActiveSSE(t *testing.T) {
 	stateDir, workspace := t.TempDir(), t.TempDir()
 	go func() {
 		done <- runServerReady(ctx, newServerLogger(io.Discard, false), serverOptions{
-			Address: "127.0.0.1:0", StateDir: stateDir, Workspace: workspace, MaxConcurrent: 1,
+			Address: "127.0.0.1:0", StateDir: stateDir, WorkspaceRoot: workspace, MaxConcurrent: 1,
 		}, started)
 	}()
 	serverURL := <-started
-	response, err := http.Post(serverURL+"/v1/conversations", "application/json", nil)
+	response, err := http.Post(serverURL+"/v1/conversations", "application/json", strings.NewReader(fmt.Sprintf(`{"workspace":%q}`, workspace)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,6 +362,44 @@ func TestRemoteStateDirectoryMustBeOutsideWorkspace(t *testing.T) {
 	}
 	if err := validateRemoteStateDirectory(workspace, filepath.Join(link, "runtime")); err == nil {
 		t.Fatal("state directory reached through symlink was accepted")
+	}
+}
+
+func TestClientWorkspaceMustStayWithinServerRoot(t *testing.T) {
+	root, stateDir := t.TempDir(), t.TempDir()
+	workspace := filepath.Join(root, "project")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateConversationWorkspace(workspace, root, stateDir); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(workspace, alias); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected, err := validateConversationWorkspace(alias, root, stateDir); err != nil || selected != canonical {
+		t.Fatalf("canonical workspace = %q, %v; want %q", selected, err, canonical)
+	}
+	if _, err := validateConversationWorkspace("project", root, stateDir); err == nil {
+		t.Fatal("relative workspace accepted")
+	}
+	if _, err := validateConversationWorkspace(t.TempDir(), root, stateDir); err == nil {
+		t.Fatal("workspace outside root accepted")
+	}
+	link := filepath.Join(root, "outside")
+	if err := os.Symlink(t.TempDir(), link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateConversationWorkspace(link, root, stateDir); err == nil {
+		t.Fatal("symlink outside root accepted")
+	}
+	if _, err := validateConversationWorkspace(workspace, root, filepath.Join(workspace, "state")); err == nil {
+		t.Fatal("state directory inside workspace accepted")
 	}
 }
 
@@ -500,7 +537,7 @@ func TestBundledCLIUsesRuntimeServerPath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := runBundled(ctx, newServerLogger(&bytes.Buffer{}, false), serverOptions{
-		StateDir: t.TempDir(), Workspace: t.TempDir(), MaxTurns: 3, MaxConcurrent: 1,
+		StateDir: t.TempDir(), WorkspaceRoot: os.TempDir(), ClientWorkspace: t.TempDir(), MaxTurns: 3, MaxConcurrent: 1,
 		Brain: llm.Config{Provider: "openai", Model: "test", APIKey: "test", BaseURL: provider.URL + "/v1"},
 	}, "", "stable", "hello", false)
 	if err != nil {

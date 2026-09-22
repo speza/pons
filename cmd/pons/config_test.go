@@ -19,7 +19,7 @@ func write(t *testing.T, path, content string) {
 func TestLoadSettingsMerge(t *testing.T) {
 	home, ws := t.TempDir(), t.TempDir()
 	write(t, filepath.Join(home, ".pons", "config.json"),
-		`{"provider":"codex","max_turns":9,"bash_timeout":0}`)
+		`{"provider":"codex","max_turns":9,"bash_timeout":0,"workspace_root":"/projects"}`)
 	write(t, filepath.Join(ws, ".pons.json"), `{"max_turns":3,"model":"m2"}`)
 
 	s, err := loadSettings(home, ws)
@@ -28,6 +28,9 @@ func TestLoadSettingsMerge(t *testing.T) {
 	}
 	if s.Provider == nil || *s.Provider != "codex" {
 		t.Fatalf("provider: %v", s.Provider)
+	}
+	if s.WorkspaceRoot == nil || *s.WorkspaceRoot != "/projects" {
+		t.Fatalf("workspace root: %v", s.WorkspaceRoot)
 	}
 	if s.MaxTurns == nil || *s.MaxTurns != 3 {
 		t.Fatalf("project should win: %v", s.MaxTurns)

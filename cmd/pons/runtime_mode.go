@@ -37,7 +37,8 @@ import (
 type serverOptions struct {
 	Address                 string
 	StateDir                string
-	Workspace               string
+	WorkspaceRoot           string
+	ClientWorkspace         string
 	MaxConcurrent           int
 	MaxTurns                int
 	Brain                   llm.Config
@@ -103,11 +104,6 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 	if err := validateLoopbackAddress(opts.Address); err != nil {
 		return err
 	}
-	if _, ok := opts.Environment.(environment.DurableProvider); ok {
-		if err := validateRemoteStateDirectory(opts.Workspace, opts.StateDir); err != nil {
-			return err
-		}
-	}
 	logDebugConfiguration(logger, opts)
 	store, err := runtimesqlite.Open(opts.StateDir)
 	if err != nil {
@@ -130,32 +126,42 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 	runner := &agentRunner{opts: opts, logger: logger}
 	backgroundErrors := make(chan error, 1)
 	manager, err := ponsruntime.New(ponsruntime.Config{
-		Store: store, Workspace: opts.Workspace,
+		Store:                 store,
 		IndependentWorkspaces: opts.Sandbox == "e2b",
 		Runner:                runner, MaxConcurrent: opts.MaxConcurrent,
-		ValidateConversation: func(selection ponsruntime.ConversationOptions) error {
+		PrepareConversation: func(selection ponsruntime.ConversationOptions) (ponsruntime.ConversationOptions, error) {
 			if (selection.GitRepository == "") != (selection.GitRevision == "") {
-				return errors.New("git repository and revision must be set together")
+				return selection, errors.New("git repository and revision must be set together")
 			}
 			if selection.GitRepository != "" {
 				if opts.Sandbox != "e2b" {
-					return errors.New("git workspace requires E2B sandbox")
+					return selection, errors.New("git workspace requires E2B sandbox")
+				}
+				if selection.Workspace != "" {
+					return selection, errors.New("git conversation cannot also select a host workspace")
 				}
 				if err := gitworkspace.ValidatePlan(environment.WorkspacePlan{
 					Strategy:     environment.WorkspaceStrategyGit,
 					SourceRef:    selection.GitRepository,
 					BaseRevision: selection.GitRevision,
 				}); err != nil {
-					return err
+					return selection, err
+				}
+			}
+			if selection.GitRepository == "" {
+				var err error
+				selection.Workspace, err = validateConversationWorkspace(selection.Workspace, opts.WorkspaceRoot, opts.StateDir)
+				if err != nil {
+					return selection, err
 				}
 			}
 			if selection.GitAllRepositories {
 				provider, ok := opts.Environment.(*e2b.Provider)
 				if !ok || provider.GitCredentials == nil {
-					return errors.New("installation-wide Git access requires E2B with GitHub App authentication")
+					return selection, errors.New("installation-wide Git access requires E2B with GitHub App authentication")
 				}
 			}
-			return nil
+			return selection, nil
 		},
 		OnError: func(err error) {
 			logger.Error("runtime background failure", "error", err)
@@ -230,7 +236,7 @@ func logDebugConfiguration(logger *slog.Logger, opts serverOptions) {
 		model = "provider-default"
 	}
 	logger.Debug("runtime configured", "provider", opts.Brain.Provider, "model", model,
-		"workspace", opts.Workspace, "max_turns", opts.MaxTurns, "max_concurrent", opts.MaxConcurrent)
+		"workspace_root", opts.WorkspaceRoot, "max_turns", opts.MaxTurns, "max_concurrent", opts.MaxConcurrent)
 
 	sandbox, network, hands := opts.Sandbox, "host", "in-process"
 	if sandbox == "" {
@@ -270,6 +276,7 @@ func runBundled(ctx context.Context, logger *slog.Logger, opts serverOptions, co
 	}
 	clientErr := runClient(ctx, serverURL, conversationID, idempotencyKey, message, interactive, opts.Debug,
 		ponsruntime.ConversationOptions{
+			Workspace:     opts.ClientWorkspace,
 			GitRepository: opts.GitRepository, GitRevision: opts.GitRevision,
 			GitAllRepositories: opts.GitAllRepositories,
 		})
@@ -313,6 +320,38 @@ func validateRemoteStateDirectory(workspace, stateDir string) error {
 		return errors.New("runtime server: remote workspace state directory must be outside the source workspace")
 	}
 	return nil
+}
+
+func validateConversationWorkspace(workspace, root, stateDir string) (string, error) {
+	if workspace == "" || !filepath.IsAbs(workspace) {
+		return "", errors.New("host workspace must be an absolute path")
+	}
+	resolved, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return "", fmt.Errorf("resolve host workspace: %w", err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("stat host workspace: %w", err)
+	}
+	if !info.IsDir() {
+		return "", errors.New("host workspace must be a directory")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace root: %w", err)
+	}
+	allowed, err := pathContains(resolvedRoot, resolved)
+	if err != nil {
+		return "", err
+	}
+	if !allowed {
+		return "", fmt.Errorf("host workspace %q is outside allowed root %q", workspace, root)
+	}
+	if err := validateRemoteStateDirectory(resolved, stateDir); err != nil {
+		return "", err
+	}
+	return resolved, nil
 }
 
 func pathContains(parent, child string) (bool, error) {
@@ -376,6 +415,11 @@ type agentRunner struct {
 }
 
 func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (result ponsruntime.RunResult, err error) {
+	if request.GitRepository == "" {
+		if _, err := validateConversationWorkspace(request.Workspace, r.opts.WorkspaceRoot, r.opts.StateDir); err != nil {
+			return result, fmt.Errorf("run host workspace: %w", err)
+		}
+	}
 	brainConfig := r.opts.Brain
 	brainConfig.Logger = nil
 	brain, err := llm.New(brainConfig)
@@ -579,8 +623,8 @@ func runtimeTurns(messages []ponsruntime.Message) ([]llm.Turn, error) {
 }
 
 func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, message string, interactive, debug bool, options ponsruntime.ConversationOptions) error {
-	if conversationID != "" && (options.GitRepository != "" || options.GitRevision != "" || options.GitAllRepositories) {
-		return errors.New("runtime client: Git repository and access options apply only when creating a conversation")
+	if conversationID != "" && (options.Workspace != "" || options.GitRepository != "" || options.GitRevision != "" || options.GitAllRepositories) {
+		return errors.New("runtime client: workspace and Git options apply only when creating a conversation")
 	}
 	client := httptransport.Client{BaseURL: serverURL}
 	sendCount := 0

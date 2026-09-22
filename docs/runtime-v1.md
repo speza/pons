@@ -342,9 +342,12 @@ Response:
 The server creates the canonical conversation in the runtime store. Git source
 and access options are immutable conversation metadata. Both repository fields
 must be set together; `git_all_repositories` explicitly grants access to every
-repository available to the server's GitHub App installation. An empty JSON
-body creates an archive workspace. The agent is the single configured agent,
-`pons`.
+repository available to the server's GitHub App installation. Git conversations
+do not specify a host workspace. Local, Seatbelt, and E2B archive conversations
+instead provide `{"workspace":"/absolute/path/on/server"}`. The server
+validates that path against its configured root and state directory at creation
+and again before each run. It stores the canonical path so symlink aliases use
+the same workspace lock. The agent is the single configured agent, `pons`.
 
 ### Hydrate a conversation
 

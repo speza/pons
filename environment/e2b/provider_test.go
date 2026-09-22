@@ -83,7 +83,7 @@ func TestInvalidEnvironmentDoesNotExposeValue(t *testing.T) {
 
 func TestValidateE2BGitWorkspaceRequiresNetwork(t *testing.T) {
 	spec := environment.Spec{
-		WorkspaceID: "workspace", WorkspacePath: t.TempDir(), Command: []string{defaultE2BHandsPath},
+		WorkspaceID: "workspace", Command: []string{defaultE2BHandsPath},
 		Network: environment.NetworkDisabled,
 		WorkspacePlan: environment.WorkspacePlan{
 			Strategy:     environment.WorkspaceStrategyGit,
@@ -93,6 +93,10 @@ func TestValidateE2BGitWorkspaceRequiresNetwork(t *testing.T) {
 	}
 	if _, _, _, _, err := validateE2BSpec(spec); err == nil || !strings.Contains(err.Error(), "requires network access") {
 		t.Fatalf("network-disabled Git plan error = %v", err)
+	}
+	spec.Network = environment.NetworkEnabled
+	if workspace, _, _, _, err := validateE2BSpec(spec); err != nil || workspace != "" {
+		t.Fatalf("Git workspace host path = %q, err = %v", workspace, err)
 	}
 }
 

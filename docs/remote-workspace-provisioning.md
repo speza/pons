@@ -85,7 +85,9 @@ archive through envd. The immutable base and current checkpoint are retained;
 after advancing workspace metadata, the provider prunes the superseded
 intermediate checkpoint on a best-effort basis.
 
-The runtime state directory must be outside the source workspace so the initial
+The client selects the archive source path when creating the conversation. It
+must exist on the server host within the server's allowed workspace root. The
+runtime state directory must be outside that source workspace so the initial
 seed cannot capture runtime history or recursively include checkpoint objects.
 
 ## Current strategy: `archive/v1`

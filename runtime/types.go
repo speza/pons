@@ -205,6 +205,7 @@ type Conversation struct {
 }
 
 type ConversationOptions struct {
+	Workspace          string `json:"workspace,omitempty"`
 	GitRepository      string `json:"git_repository,omitempty"`
 	GitRevision        string `json:"git_revision,omitempty"`
 	GitAllRepositories bool   `json:"git_all_repositories,omitempty"`

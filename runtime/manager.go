@@ -13,10 +13,9 @@ var ErrClosed = errors.New("runtime: manager is closed")
 
 type Config struct {
 	Store                 Store
-	Workspace             string
 	IndependentWorkspaces bool
 	Runner                Runner
-	ValidateConversation  func(ConversationOptions) error
+	PrepareConversation   func(ConversationOptions) (ConversationOptions, error)
 	MaxConcurrent         int
 	// RepairInterval controls the low-frequency runnable-work reconciliation
 	// scan. Zero uses 30 seconds; wake signals remain the primary path.
@@ -49,9 +48,6 @@ func New(cfg Config) (*Manager, error) {
 	if cfg.Runner == nil {
 		return nil, errors.New("runtime: runner is required")
 	}
-	if cfg.Workspace == "" {
-		return nil, errors.New("runtime: workspace is required")
-	}
 	if cfg.MaxConcurrent <= 0 {
 		cfg.MaxConcurrent = 4
 	}
@@ -79,21 +75,29 @@ func (m *Manager) CreateConversation(ctx context.Context, selected ConversationO
 	if err := m.checkOpen(); err != nil {
 		return Conversation{}, err
 	}
-	if m.cfg.ValidateConversation != nil {
-		if err := m.cfg.ValidateConversation(selected); err != nil {
+	if selected.Workspace == "" && selected.GitRepository == "" {
+		return Conversation{}, fmt.Errorf("%w: workspace or Git repository is required", ErrInvalidConversation)
+	}
+	if selected.Workspace != "" && selected.GitRepository != "" {
+		return Conversation{}, fmt.Errorf("%w: workspace and Git repository are mutually exclusive", ErrInvalidConversation)
+	}
+	if m.cfg.PrepareConversation != nil {
+		var err error
+		selected, err = m.cfg.PrepareConversation(selected)
+		if err != nil {
 			return Conversation{}, fmt.Errorf("%w: %w", ErrInvalidConversation, err)
 		}
 	}
 	value := Conversation{
 		ID:                 NewID(),
-		Workspace:          m.cfg.Workspace,
+		Workspace:          selected.Workspace,
 		GitRepository:      selected.GitRepository,
 		GitRevision:        selected.GitRevision,
 		GitAllRepositories: selected.GitAllRepositories,
 		CreatedAt:          time.Now().UTC().Truncate(time.Microsecond),
 	}
 	value.WorkspaceLock = value.Workspace
-	if m.cfg.IndependentWorkspaces {
+	if m.cfg.IndependentWorkspaces || selected.GitRepository != "" {
 		value.WorkspaceLock = value.ID
 	}
 	if err := m.store.CreateConversation(ctx, value); err != nil {

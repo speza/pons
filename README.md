@@ -93,12 +93,25 @@ separately; `client` submits messages and consumes SSE events:
 
 ```sh
 go run ./cmd/pons serve -provider codex
-go run ./cmd/pons client -message "inspect this project"
+go run ./cmd/pons client -workspace /path/to/project -message "inspect this project"
 go run ./cmd/pons client -conversation <id> -message "continue"
 ```
 
+The client selects a host workspace when it creates a local, Seatbelt, or E2B
+archive conversation. `client -workspace` defaults to the client's current
+directory. The selected path must exist on the server host and be inside its
+`-workspace-root` (the server user's home directory by default). The server
+does not select a project when it starts. It loads global configuration from
+`~/.pons/config.json`; bundled mode also loads `.pons.json` from its current
+directory. The server stores the canonical host path, so symlink aliases share
+the same workspace lock. To allow host projects outside the default root, start
+the server with `-workspace-root /path/to/projects`.
+You can also set `"workspace_root": "/path/to/projects"` in the global config.
+
 Runtime state is stored in SQLite at `<state-dir>/runtime.db` (under
-`~/.pons/runtime/` by default). The server keeps canonical messages and a
+`~/.pons/runtime/server/` by default, independent of the server's current
+directory). Use `-state-dir` to reopen a previous runtime state directory.
+The server keeps canonical messages and a
 durable event outbox, bounds active runs, serializes each conversation, and
 prevents simultaneous runs in one workspace. Clients resume from durable
 snapshots and cursors; retries can use `-idempotency-key`.
@@ -181,9 +194,10 @@ go run ./cmd/pons client \
 ```
 
 Each client command without `-conversation` creates an independent workspace.
-Git sessions clone inside E2B; the host `-workspace` is not uploaded for them.
-It defaults to the directory where the server starts and is used for local
-configuration and as the seed only for archive sessions without a primary repo.
+Git sessions clone inside E2B and select their source solely through
+`-git-repository` and `-git-revision`; they do not use a host `-workspace`.
+For E2B archive sessions, the client-selected host workspace is uploaded once
+as the initial seed.
 By default, Pons mints a one-hour token restricted to that conversation's
 primary repository. For a cross-repository task, pass `-git-all-repositories`
 when creating the conversation. This grants the agent access to every
@@ -251,19 +265,21 @@ discovered implicitly. Example providers are in
 [external plugin protocol](docs/external-plugin-protocol.md) and
 [hands environment design](docs/hands-environment-v1.md) for details.
 
-Useful flags include `-workspace`, `-state-dir`, `-max-turns`,
-`-compact-chars`, repeatable `-plugin`, `-plugin-path`, `-sandbox`,
-`-hands-command`, `-e2b-template`, `-e2b-hands-path`,
-`-git-repository`, `-git-revision`, `-git-all-repositories`, `-github-app-id`, `-github-app-installation-id`,
+Useful flags include client `-workspace`, server `-workspace-root`,
+`-state-dir`, `-max-turns`, `-compact-chars`, repeatable `-plugin`,
+`-plugin-path`, `-sandbox`, `-hands-command`, `-e2b-template`,
+`-e2b-hands-path`, `-git-repository`, `-git-revision`,
+`-git-all-repositories`, `-github-app-id`, `-github-app-installation-id`,
 `-github-app-private-key`, `-sandbox-idle-timeout`, `-fallback`, and `-debug`.
 
 ## Configuration
 
-Defaults can be stored in `~/.pons/config.json`; `.pons.json` in the workspace
-overrides them, and explicit flags win. Configuration supports provider/model
-settings, runtime limits, tool output limits, named provider slots, and
-failover. Use repeatable `-fallback provider[:model]` flags for a temporary
-failover chain.
+Server defaults can be stored in `~/.pons/config.json`. Bundled mode also reads
+`.pons.json` in its current directory; a standalone server does not read a
+project config from its startup directory. Explicit flags win. Configuration
+supports provider/model settings, runtime limits, tool output limits, named
+provider slots, and failover. Use repeatable `-fallback provider[:model]` flags
+for a temporary failover chain.
 
 For a reusable E2B server with one GitHub App installation, put the following
 JSON in `~/.pons/config.json` (substitute your values and an absolute key path):
