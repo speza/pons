@@ -108,10 +108,12 @@ func (p *FS) readFile(ctx context.Context, a protocol.Action) (protocol.ToolResu
 	if err != nil {
 		return invalidArgs(a, err), nil
 	}
+
 	path, err := p.resolvePath(pathArg)
 	if err != nil {
 		return denied(a, err), nil
 	}
+
 	f, err := os.Open(path)
 	if err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
@@ -172,10 +174,12 @@ func (p *FS) writeFile(ctx context.Context, a protocol.Action) (protocol.ToolRes
 	if err != nil {
 		return invalidArgs(a, err), nil
 	}
+
 	path, err := p.resolvePath(pathArg)
 	if err != nil {
 		return denied(a, err), nil
 	}
+
 	// Coordinate with edit_file's read-modify-write on the same path so a
 	// concurrent edit cannot overwrite this write with stale content.
 	unlock := filelock.Lock(path)
@@ -200,14 +204,17 @@ func (p *FS) listDir(ctx context.Context, a protocol.Action) (protocol.ToolResul
 	if err != nil {
 		return invalidArgs(a, err), nil
 	}
+
 	path, err := p.resolvePath(pathArg)
 	if err != nil {
 		return denied(a, err), nil
 	}
+
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 	}
+
 	var sb strings.Builder
 	for _, en := range entries {
 		suffix := ""
@@ -234,6 +241,7 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
+
 	if err := tmp.Chmod(mode); err != nil {
 		_ = tmp.Close()
 		return err

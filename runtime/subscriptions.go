@@ -47,12 +47,14 @@ func (m *Manager) Subscribe(ctx context.Context, conversationID string, after ui
 	if err != nil {
 		return nil, err
 	}
+
 	c.mu.Lock()
 	backlog, err := m.store.Events(ctx, conversationID, after)
 	if err != nil {
 		c.mu.Unlock()
 		return nil, err
 	}
+
 	ch := make(chan Event, len(backlog)+64)
 	for _, event := range backlog {
 		ch <- event
@@ -64,6 +66,7 @@ func (m *Manager) Subscribe(ctx context.Context, conversationID string, after ui
 		c.subscribers[id].lastCursor = backlog[len(backlog)-1].ID
 	}
 	c.mu.Unlock()
+
 	go func() {
 		<-ctx.Done()
 		c.mu.Lock()

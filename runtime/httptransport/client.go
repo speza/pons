@@ -49,11 +49,13 @@ func (c Client) CreateConversation(ctx context.Context, options ponsruntime.Conv
 	if err != nil {
 		return ponsruntime.Conversation{}, err
 	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return ponsruntime.Conversation{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return ponsruntime.Conversation{}, err
@@ -62,6 +64,7 @@ func (c Client) CreateConversation(ctx context.Context, options ponsruntime.Conv
 	if resp.StatusCode != http.StatusCreated {
 		return ponsruntime.Conversation{}, responseError(resp)
 	}
+
 	var conversation ponsruntime.Conversation
 	if err := json.NewDecoder(resp.Body).Decode(&conversation); err != nil {
 		return ponsruntime.Conversation{}, err
@@ -78,12 +81,14 @@ func (c Client) Submit(ctx context.Context, conversationID, key string, parts []
 	if err != nil {
 		return ponsruntime.AcceptedMessage{}, err
 	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return ponsruntime.AcceptedMessage{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", key)
+
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return ponsruntime.AcceptedMessage{}, err
@@ -92,6 +97,7 @@ func (c Client) Submit(ctx context.Context, conversationID, key string, parts []
 	if resp.StatusCode != http.StatusAccepted {
 		return ponsruntime.AcceptedMessage{}, responseError(resp)
 	}
+
 	var accepted ponsruntime.AcceptedMessage
 	if err := json.NewDecoder(resp.Body).Decode(&accepted); err != nil {
 		return ponsruntime.AcceptedMessage{}, err
@@ -104,10 +110,12 @@ func (c Client) View(ctx context.Context, conversationID string) (ponsruntime.Co
 	if err != nil {
 		return ponsruntime.ConversationView{}, err
 	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return ponsruntime.ConversationView{}, err
 	}
+
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return ponsruntime.ConversationView{}, err
@@ -116,6 +124,7 @@ func (c Client) View(ctx context.Context, conversationID string) (ponsruntime.Co
 	if resp.StatusCode != http.StatusOK {
 		return ponsruntime.ConversationView{}, responseError(resp)
 	}
+
 	var view ponsruntime.ConversationView
 	if err := json.NewDecoder(resp.Body).Decode(&view); err != nil {
 		return ponsruntime.ConversationView{}, err
@@ -141,6 +150,7 @@ func (c Client) openEvents(ctx context.Context, conversationID string, after uin
 		return nil, err
 	}
 	req.Header.Set("Accept", "text/event-stream")
+
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		cancel()
@@ -151,8 +161,10 @@ func (c Client) openEvents(ctx context.Context, conversationID string, after uin
 		cancel()
 		return nil, responseError(resp)
 	}
+
 	events := make(chan ponsruntime.Event, 32)
 	errs := make(chan error, 1)
+
 	go func() {
 		defer close(events)
 		defer close(errs)
@@ -241,11 +253,13 @@ func (c Client) Send(ctx context.Context, conversationID, idempotencyKey, text s
 			onSnapshot(snapshot)
 		}
 	}
+
 	stream, err := c.openEvents(ctx, conversationID, after)
 	if err != nil {
 		return SendResult{}, err
 	}
 	defer stream.close()
+
 	if idempotencyKey == "" {
 		idempotencyKey = ponsruntime.NewID()
 	}
@@ -253,6 +267,7 @@ func (c Client) Send(ctx context.Context, conversationID, idempotencyKey, text s
 	if err != nil {
 		return SendResult{}, err
 	}
+
 	if accepted.Duplicate {
 		if answer, ok := completedAnswer(snapshot.Messages, accepted.InboundMessageID); ok {
 			return SendResult{ConversationID: conversationID, ResponseID: answer.id, Answer: answer.text}, nil
@@ -263,6 +278,7 @@ func (c Client) Send(ctx context.Context, conversationID, idempotencyKey, text s
 			}
 		}
 	}
+
 	errorEvents := stream.errors
 	for {
 		select {

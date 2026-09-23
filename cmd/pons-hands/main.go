@@ -47,6 +47,7 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
 	host, err := toolhost.New(toolhost.Config{
 		Workspace:           *workspace,
 		FSReadBytes:         *fsReadBytes,
@@ -68,6 +69,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "pons-hands: close: %v\n", err)
 		}
 	}()
+
 	if err := host.Serve(ctx, os.Stdin, os.Stdout); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(os.Stderr, "pons-hands: serve: %v\n", err)
 		os.Exit(1)

@@ -48,15 +48,18 @@ func New(cfg Config) (*Manager, error) {
 	if cfg.Runner == nil {
 		return nil, errors.New("runtime: runner is required")
 	}
+
 	if cfg.MaxConcurrent <= 0 {
 		cfg.MaxConcurrent = 4
 	}
 	if cfg.RepairInterval <= 0 {
 		cfg.RepairInterval = 30 * time.Second
 	}
+
 	if err := cfg.Store.RecoverRunning(context.Background()); err != nil {
 		return nil, err
 	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
 		cfg: cfg, store: cfg.Store, ctx: ctx, cancel: cancel,
@@ -81,6 +84,7 @@ func (m *Manager) CreateConversation(ctx context.Context, selected ConversationO
 	if selected.Workspace != "" && selected.GitRepository != "" {
 		return Conversation{}, fmt.Errorf("%w: workspace and Git repository are mutually exclusive", ErrInvalidConversation)
 	}
+
 	if m.cfg.PrepareConversation != nil {
 		var err error
 		selected, err = m.cfg.PrepareConversation(selected)
@@ -88,6 +92,7 @@ func (m *Manager) CreateConversation(ctx context.Context, selected ConversationO
 			return Conversation{}, fmt.Errorf("%w: %w", ErrInvalidConversation, err)
 		}
 	}
+
 	value := Conversation{
 		ID:                 NewID(),
 		Workspace:          selected.Workspace,
@@ -100,6 +105,7 @@ func (m *Manager) CreateConversation(ctx context.Context, selected ConversationO
 	if m.cfg.IndependentWorkspaces || selected.GitRepository != "" {
 		value.WorkspaceLock = value.ID
 	}
+
 	if err := m.store.CreateConversation(ctx, value); err != nil {
 		return Conversation{}, err
 	}
@@ -116,6 +122,7 @@ func (m *Manager) Submit(ctx context.Context, conversationID, key string, parts 
 	if err := validateParts(parts); err != nil {
 		return AcceptedMessage{}, err
 	}
+
 	c, err := m.conversation(ctx, conversationID)
 	if err != nil {
 		return AcceptedMessage{}, err
@@ -128,6 +135,7 @@ func (m *Manager) Submit(ctx context.Context, conversationID, key string, parts 
 	}
 	c.broadcastLocked(events...)
 	c.mu.Unlock()
+
 	if !accepted.Duplicate {
 		m.notify()
 	}
@@ -170,6 +178,7 @@ func (m *Manager) conversation(ctx context.Context, id string) (*liveConversatio
 	if err := m.checkOpen(); err != nil {
 		return nil, err
 	}
+
 	m.mu.Lock()
 	existing := m.convs[id]
 	m.mu.Unlock()
@@ -224,6 +233,7 @@ func (m *Manager) Close() error {
 		return nil
 	}
 	m.closed = true
+
 	// Cancel scheduling and every per-run child context before closing local
 	// delivery channels. Run goroutines still record their terminal state.
 	m.cancel()

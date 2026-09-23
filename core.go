@@ -197,6 +197,7 @@ func (c *Core) AddTool(kind protocol.ActionKind, def ToolDef) error {
 	if _, exists := c.handlers[kind]; exists {
 		return fmt.Errorf("pons: action kind %q already registered (plugin conflict)", kind)
 	}
+
 	c.handlers[kind] = def.Handler
 	c.specs[kind] = ToolSpec{
 		Kind:        kind,
@@ -243,6 +244,7 @@ func (c *Core) SetBrain(b ControlPort) error {
 	if b == nil {
 		return errors.New("pons: cannot install a nil brain")
 	}
+
 	c.brain = b
 	return nil
 }
@@ -400,6 +402,7 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 				return result, fmt.Errorf("event action_start: %w", err)
 			}
 		}
+
 		results = make([]protocol.ToolResult, len(run))
 		var wg sync.WaitGroup
 		for i, a := range run {
@@ -418,6 +421,7 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 			}(i, a)
 		}
 		wg.Wait()
+
 		for i := range run {
 			a, tr := run[i], results[i]
 			if err := c.emit(Event{Type: EventActionEnd, Turn: turn, Action: &a, Result: &tr, Tool: c.toolSpec(a.Kind)}); err != nil {
@@ -457,6 +461,7 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 				stopReason = interp.StopReason
 			}
 		}
+
 		obs.History = append(obs.History, turnLog)
 		if stopped {
 			c.logf("[turn %d] brain stopped: reason_chars=%d", turn, len(stopReason))
@@ -481,6 +486,7 @@ func normalizeAssistantParts(parts []AssistantPart, actions []protocol.Action) (
 		}
 		return parts, nil
 	}
+
 	remaining := make(map[string]protocol.Action, len(actions))
 	for _, action := range actions {
 		if action.ID == "" {
@@ -509,6 +515,7 @@ func normalizeAssistantParts(parts []AssistantPart, actions []protocol.Action) (
 			return nil, fmt.Errorf("assistant part %d has unsupported type %q", i, part.Type)
 		}
 	}
+
 	if len(remaining) != 0 {
 		return nil, errors.New("assistant response omits an executable action")
 	}

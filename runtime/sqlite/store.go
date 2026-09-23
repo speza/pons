@@ -547,12 +547,14 @@ func (s *Store) Accept(ctx context.Context, conversationID, key string, parts []
 	if _, err := conversationTx(ctx, tx, conversationID); err != nil {
 		return ponsruntime.AcceptedMessage{}, nil, err
 	}
+
 	now := canonicalTime(time.Now())
 	id := newID()
 	messageParts := make([]ponsruntime.MessagePart, len(parts))
 	for i, part := range parts {
 		messageParts[i] = ponsruntime.MessagePart{Type: "text", Text: part.Text}
 	}
+
 	message := ponsruntime.Message{
 		ID: id, ConversationID: conversationID, InboundMessageID: id,
 		Role: "user", Parts: messageParts, Complete: true, CreatedAt: now,
@@ -560,6 +562,7 @@ func (s *Store) Accept(ctx context.Context, conversationID, key string, parts []
 	if err := insertMessageTx(ctx, tx, message); err != nil {
 		return ponsruntime.AcceptedMessage{}, nil, err
 	}
+
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO submissions(id, conversation_id, idempotency_key, message_id, status, accepted_at)
 VALUES(?, ?, ?, ?, ?, ?)`, id, conversationID, key, message.ID, ponsruntime.RunQueued, encodeTime(now)); err != nil {
@@ -640,10 +643,12 @@ LIMIT 1`, ponsruntime.RunQueued, ponsruntime.RunRunning, ponsruntime.RunRunning,
 	if err != nil {
 		return nil, err
 	}
+
 	parts, err := messageTextPartsTx(ctx, tx, id)
 	if err != nil {
 		return nil, err
 	}
+
 	acceptedAt := decodeTime(accepted)
 	createdAt := decodeTime(conversationCreated)
 	now := canonicalTime(time.Now())
@@ -651,6 +656,7 @@ LIMIT 1`, ponsruntime.RunQueued, ponsruntime.RunRunning, ponsruntime.RunRunning,
 		ID: newID(), ConversationID: conversationID, InboundMessageID: id,
 		Status: ponsruntime.RunRunning, StartedAt: now,
 	}
+
 	result, err := tx.ExecContext(ctx, `UPDATE submissions SET status = ? WHERE id = ? AND status = ?`, ponsruntime.RunRunning, id, ponsruntime.RunQueued)
 	if err != nil {
 		return nil, err
@@ -662,11 +668,13 @@ LIMIT 1`, ponsruntime.RunQueued, ponsruntime.RunRunning, ponsruntime.RunRunning,
 	if updated != 1 {
 		return nil, errors.New("runtime: runnable submission lost its claim race")
 	}
+
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO runs(id, conversation_id, submission_id, inbound_message_id, status, started_at)
 VALUES(?, ?, ?, ?, ?, ?)`, run.ID, conversationID, id, id, run.Status, encodeTime(now)); err != nil {
 		return nil, err
 	}
+
 	submission := ponsruntime.Submission{ID: id, ConversationID: conversationID, MessageID: id, Status: ponsruntime.RunRunning, AcceptedAt: acceptedAt}
 	subEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
 		Type: ponsruntime.EventSubmissionUpdated, ConversationID: conversationID, RunID: run.ID,
@@ -682,6 +690,7 @@ VALUES(?, ?, ?, ?, ?, ?)`, run.ID, conversationID, id, id, run.Status, encodeTim
 	if err != nil {
 		return nil, err
 	}
+
 	history, err := loadHistoryThroughSubmissionTx(ctx, tx, conversationID, accepted, id)
 	if err != nil {
 		return nil, err
@@ -787,9 +796,11 @@ func (s *Store) CommitAssistantTurn(ctx context.Context, run ponsruntime.Run, pa
 			return nil, fmt.Errorf("runtime: assistant part %d has unsupported type %q", i, part.Type)
 		}
 	}
+
 	if len(toolParts) == 0 {
 		return nil, errors.New("runtime: assistant tool turn has no tool calls")
 	}
+
 	message := ponsruntime.Message{
 		ID: newID(), ConversationID: run.ConversationID, InboundMessageID: run.InboundMessageID,
 		RunID: run.ID, Role: "assistant", Parts: normalizedParts, Complete: true, CreatedAt: now,
@@ -797,6 +808,7 @@ func (s *Store) CommitAssistantTurn(ctx context.Context, run ponsruntime.Run, pa
 	if err := insertMessageTx(ctx, tx, message); err != nil {
 		return nil, err
 	}
+
 	events := make([]ponsruntime.Event, 0, 1+len(toolParts))
 	messageEvent, err := updateMessageEventTx(ctx, tx, message)
 	if err != nil {

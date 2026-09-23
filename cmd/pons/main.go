@@ -97,6 +97,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
+
 	if *gitRepository != "" && *workspace != "" {
 		logger.Print("--workspace and --git-repository cannot be combined")
 		os.Exit(1)
@@ -127,6 +128,7 @@ func main() {
 		logger.Printf("%v", err)
 		os.Exit(1)
 	}
+
 	e2bAPIKey := ""
 	setFlags := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
@@ -171,6 +173,7 @@ func main() {
 			}
 		}
 	}
+
 	applyInt("max-turns", maxTurns, cfg.MaxTurns)
 	applyInt("compact-chars", compactChars, cfg.CompactChars)
 	applyInt("fs-read-bytes", fsReadBytes, cfg.FsReadBytes)
@@ -227,6 +230,7 @@ func main() {
 		logger.Printf("serve: Git repository and access options belong to the client creating a conversation")
 		os.Exit(1)
 	}
+
 	statePath := *stateDir
 	if statePath == "" {
 		statePath = filepath.Join(home, ".pons", "runtime", "server")
@@ -240,6 +244,7 @@ func main() {
 		logger.Printf("workspace root: %v", err)
 		os.Exit(1)
 	}
+
 	serverLogger := newServerLogger(os.Stderr, *debug)
 	serverLogger.Info("runtime state selected", "state_dir", statePath)
 	serverOpts := serverOptions{
@@ -267,6 +272,7 @@ func main() {
 		logger.Printf("sandbox: %v", err)
 		os.Exit(1)
 	}
+
 	if mode == "serve" {
 		if err := runServer(rootCtx, serverLogger, serverOpts); err != nil {
 			serverLogger.Error("server stopped with error", "error", err)

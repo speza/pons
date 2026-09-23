@@ -80,6 +80,7 @@ func (p *Shell) run(ctx context.Context, a protocol.Action) (protocol.ToolResult
 		cmd.Dir = p.cfg.Root
 	}
 	out, err := cmd.CombinedOutput()
+
 	res := protocol.ToolResult{ActionID: a.ID, OK: err == nil, Output: truncate(string(out), p.cfg.MaxOutput)}
 	switch {
 	case err == nil:

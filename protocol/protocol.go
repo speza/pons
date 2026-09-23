@@ -80,6 +80,7 @@ func DecodeArgs(raw json.RawMessage, dst any) error {
 	if object == nil {
 		return fmt.Errorf("action args must be a JSON object")
 	}
+
 	return json.Unmarshal(raw, dst)
 }
 
@@ -96,6 +97,7 @@ func ObjectArgs(raw json.RawMessage) (map[string]json.RawMessage, error) {
 	if object == nil {
 		return nil, fmt.Errorf("action args must be a JSON object")
 	}
+
 	return object, nil
 }
 

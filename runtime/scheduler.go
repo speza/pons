@@ -40,10 +40,12 @@ func (m *Manager) dispatch() {
 			m.releaseSlot(false)
 			return
 		}
+
 		live := m.ensureLiveConversation(claim.Conversation)
 		live.mu.Lock()
 		live.broadcastLocked(claim.Events...)
 		live.mu.Unlock()
+
 		ctx, cancel := context.WithCancel(m.ctx)
 		m.wg.Add(1)
 		go live.work(ctx, cancel, claim)
@@ -55,6 +57,7 @@ func (c *liveConversation) work(ctx context.Context, cancel context.CancelFunc, 
 	defer c.manager.releaseSlot(true)
 	result, runErr := c.execute(ctx, claim.Message, claim.History, claim.Run)
 	cancel()
+
 	c.mu.Lock()
 	var backgroundErr error
 	// Terminal persistence deliberately outlives the canceled run context. On
@@ -76,6 +79,7 @@ func (c *liveConversation) work(ctx context.Context, cancel context.CancelFunc, 
 		}
 	}
 	c.mu.Unlock()
+
 	c.manager.report(backgroundErr)
 }
 

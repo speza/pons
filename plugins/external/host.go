@@ -309,10 +309,12 @@ func (h *Host) Start(ctx context.Context) error {
 	if err != nil {
 		return h.startFailure(fmt.Errorf("external: initialize %q: %w", h.manifest.Name, err))
 	}
+
 	var result InitializeResult
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return h.startFailure(fmt.Errorf("external: initialize result: %w", err))
 	}
+
 	if result.Plugin.Name != h.manifest.Name {
 		return h.startFailure(fmt.Errorf("external: initialize plugin name %q does not match manifest %q", result.Plugin.Name, h.manifest.Name))
 	}
@@ -322,6 +324,7 @@ func (h *Host) Start(ctx context.Context) error {
 	if err := h.acceptCapabilities(result.Capabilities); err != nil {
 		return h.startFailure(fmt.Errorf("external: initialize capabilities: %w", err))
 	}
+
 	h.mu.Lock()
 	h.plugin = result.Plugin
 	failure := h.failure
@@ -359,6 +362,7 @@ func (h *Host) connect(ctx context.Context) (Connection, error) {
 		}
 		return connection, nil
 	}
+
 	cmd := exec.Command(h.manifest.ResolvedEntrypoint(), h.manifest.Args...)
 	setProcessGroup(cmd)
 	cmd.Dir = h.cfg.WorkingDirectory
@@ -390,6 +394,7 @@ func (h *Host) connect(ctx context.Context) (Connection, error) {
 		_ = stderr.Close()
 		return Connection{}, fmt.Errorf("external: start %q: %w", h.manifest.ResolvedEntrypoint(), err)
 	}
+
 	return Connection{
 		Stdin: stdin, Stdout: stdout, Stderr: stderr,
 		Wait: cmd.Wait,
@@ -487,6 +492,7 @@ func (h *Host) Execute(ctx context.Context, action protocol.Action) (protocol.To
 	if _, err := protocol.ObjectArgs(action.Args); err != nil {
 		return resultFailure(fmt.Errorf("invalid action args: %w", err))
 	}
+
 	if len(bytes.TrimSpace(action.Args)) == 0 || bytes.Equal(bytes.TrimSpace(action.Args), []byte("null")) {
 		action.Args = json.RawMessage(`{}`)
 	}
@@ -498,6 +504,7 @@ func (h *Host) Execute(ctx context.Context, action protocol.Action) (protocol.To
 		return resultFailure(fmt.Errorf("plugin %q does not provide action kind %q", h.manifest.Name, action.Kind))
 	}
 	_ = tool // the lookup above is also the routing guard
+
 	callCtx := ctx
 	cancel := func() {}
 	if h.cfg.CallTimeout > 0 {
@@ -512,10 +519,12 @@ func (h *Host) Execute(ctx context.Context, action protocol.Action) (protocol.To
 			return resultFailure(callCtx.Err())
 		}
 	}
+
 	raw, err := h.call(callCtx, MethodExecute, ExecuteParams{Action: action})
 	if err != nil {
 		return resultFailure(err)
 	}
+
 	if len(raw) > h.cfg.Limits.MaxResultBytes {
 		return resultFailure(fmt.Errorf("plugin result exceeds %d bytes", h.cfg.Limits.MaxResultBytes))
 	}
@@ -530,6 +539,7 @@ func (h *Host) Execute(ctx context.Context, action protocol.Action) (protocol.To
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return resultFailure(fmt.Errorf("malformed tool result: %w", err))
 	}
+
 	// The request's action is the only trusted correlation identity. A plugin
 	// cannot forge either the action id or the payload namespace in the core
 	// transcript.
@@ -591,11 +601,13 @@ func (h *Host) call(ctx context.Context, method string, params any) (json.RawMes
 		}
 		request.Params = b
 	}
+
 	if err := h.writeMessage(ctx, request); err != nil {
 		h.removePending(id)
 		h.fail(err)
 		return nil, err
 	}
+
 	select {
 	case result := <-p.response:
 		if result.err != nil {
@@ -656,6 +668,7 @@ func (h *Host) writeMessage(ctx context.Context, message any) error {
 	if len(data)+1 > h.cfg.Limits.MaxFrameBytes {
 		return fmt.Errorf("external: outgoing frame exceeds %d bytes", h.cfg.Limits.MaxFrameBytes)
 	}
+
 	data = append(data, '\n')
 	done := make(chan error, 1)
 	go func() { done <- h.writeFrame(data) }()

@@ -35,6 +35,7 @@ func ResolvePath(root, path string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("jail: empty path")
 	}
+
 	abs := path
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(root, abs)
@@ -43,10 +44,12 @@ func ResolvePath(root, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	real, err := resolveExisting(abs)
 	if err != nil {
 		return "", fmt.Errorf("jail: cannot resolve path: %w", err)
 	}
+
 	rel, err := filepath.Rel(root, real)
 	if err != nil {
 		return "", err

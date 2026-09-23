@@ -78,6 +78,7 @@ func LoadManifest(path string) (Manifest, error) {
 	if err := m.Validate(); err != nil {
 		return Manifest{}, fmt.Errorf("external: manifest %q: %w", path, err)
 	}
+
 	entrypoint := m.ResolvedEntrypoint()
 	info, err := os.Stat(entrypoint)
 	if err != nil {

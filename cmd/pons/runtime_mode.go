@@ -114,6 +114,7 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 	if err := validateLoopbackAddress(opts.Address); err != nil {
 		return err
 	}
+
 	logDebugConfiguration(logger, opts)
 	store, err := runtimesqlite.Open(opts.StateDir)
 	if err != nil {
@@ -133,6 +134,7 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 			}
 		}()
 	}
+
 	runner := &agentRunner{opts: opts, logger: logger}
 	backgroundErrors := make(chan error, 1)
 	manager, err := ponsruntime.New(ponsruntime.Config{
@@ -184,6 +186,7 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 	if err != nil {
 		return err
 	}
+
 	defer manager.Close()
 	server := &http.Server{
 		Addr:              opts.Address,
@@ -191,6 +194,7 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+
 	listener, err := net.Listen("tcp", opts.Address)
 	if err != nil {
 		return fmt.Errorf("runtime server: listen: %w", err)
@@ -204,6 +208,7 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 			return ctx.Err()
 		}
 	}
+
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
 	select {
@@ -442,6 +447,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 			return result, fmt.Errorf("run host workspace: %w", err)
 		}
 	}
+
 	brainConfig := r.opts.Brain
 	brainConfig.Logger = nil
 	brain, err := llm.New(brainConfig)
@@ -449,10 +455,12 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		return result, fmt.Errorf("brain: %w", err)
 	}
 	defer func() { err = errors.Join(err, brain.Close(context.Background())) }()
+
 	turns, turnsErr := runtimeTurns(request.Messages)
 	if turnsErr != nil {
 		return result, turnsErr
 	}
+
 	core := pons.New()
 	core.Workspace, core.MaxTurns = request.Workspace, r.opts.MaxTurns
 	runLog := r.logger.With("conversation_id", request.ConversationID, "run_id", request.RunID,
@@ -548,11 +556,13 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 			plugins = append(plugins, plugin)
 		}
 	}
+
 	brain.Seed(turns, request.Text, core.Workspace, core.Platform)
 	plugins = append(plugins, brain)
 	if err := core.Use(plugins...); err != nil {
 		return result, err
 	}
+
 	runLog.Debug("hands ready", "sandbox", effectiveSandbox, "sandbox_id", effectiveEnvironmentID,
 		"network", effectiveNetwork, "workspace", request.Workspace, "tools", len(core.ToolSpecs()))
 	if r.opts.Environment != nil {
@@ -588,10 +598,12 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		}
 		return nil
 	})
+
 	runResult, err := core.Run(ctx, request.Text)
 	if err != nil {
 		return result, err
 	}
+
 	if runResult.Exhausted {
 		return result, fmt.Errorf("agent exhausted %d turns", runResult.Turns)
 	}

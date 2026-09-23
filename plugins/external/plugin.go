@@ -67,6 +67,7 @@ func (p *Plugin) Setup(c *pons.Core) error {
 	if err := p.host.Start(context.Background()); err != nil {
 		return err
 	}
+
 	tools := p.host.Tools()
 	info := p.host.PluginInfo()
 	for _, tool := range tools {
@@ -75,6 +76,7 @@ func (p *Plugin) Setup(c *pons.Core) error {
 			return fmt.Errorf("external plugin %q tool %q: action kind %q already registered (plugin conflict)", p.host.manifest.Name, tool.Kind, tool.Kind)
 		}
 	}
+
 	for _, tool := range tools {
 		if err := c.AddTool(protocol.ActionKind(tool.Kind), pons.ToolDef{
 			Description: tool.Description,
@@ -95,6 +97,7 @@ func (p *Plugin) Setup(c *pons.Core) error {
 			return fmt.Errorf("external plugin %q tool %q: %w", p.host.manifest.Name, tool.Kind, err)
 		}
 	}
+
 	p.mu.Lock()
 	p.setupDone = true
 	p.mu.Unlock()

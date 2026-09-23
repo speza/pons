@@ -27,6 +27,7 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 	if backend != "seatbelt" && backend != "e2b" {
 		return nil, environment.Spec{}, fmt.Errorf("unknown backend %q", backend)
 	}
+
 	if backend == "e2b" {
 		if handsCommand != "" {
 			return nil, environment.Spec{}, errors.New("--hands-command is local-only; use --e2b-hands-path")
@@ -60,6 +61,7 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 		if opts.SandboxIdleTimeout < 0 {
 			return nil, environment.Spec{}, errors.New("--sandbox-idle-timeout must not be negative")
 		}
+
 		provider := &e2b.Provider{
 			APIKey:      opts.E2BAPIKey,
 			Template:    opts.E2BTemplate,
@@ -78,6 +80,7 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 			}
 			provider.GitCredentials = app
 		}
+
 		return provider, environment.Spec{
 			Command: command, Network: network, WorkspacePlan: workspacePlan,
 			GitAllRepositories: opts.GitAllRepositories,
@@ -90,6 +93,7 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 	if opts.GitRepository != "" || opts.GitRevision != "" || opts.GitAllRepositories || githubAppConfigured {
 		return nil, environment.Spec{}, errors.New("git workspace provisioning and GitHub App authentication require --sandbox e2b")
 	}
+
 	commandPath := handsCommand
 	var err error
 	if commandPath == "" {
@@ -102,6 +106,7 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 	if err != nil {
 		return nil, environment.Spec{}, fmt.Errorf("hands command: %w", err)
 	}
+
 	command := handsCommandArgs(commandPath, opts)
 	var readOnly []string
 	if opts.PluginPath != "" {
@@ -115,6 +120,7 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 			}
 		}
 	}
+
 	for _, manifest := range opts.PluginPaths {
 		loaded, loadErr := external.LoadManifest(manifest)
 		if loadErr != nil {
@@ -132,6 +138,7 @@ func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts 
 			}
 		}
 	}
+
 	network := environment.NetworkDisabled
 	if allowNetwork {
 		network = environment.NetworkEnabled

@@ -385,10 +385,12 @@ func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.Ass
 			Args: stringify(c.Input),
 		})
 	}
+
 	byID := make(map[string]protocol.Action, len(actions))
 	for _, action := range actions {
 		byID[action.ID] = action
 	}
+
 	parts := make([]pons.AssistantPart, 0, len(assistant.Blocks))
 	for _, block := range assistant.Blocks {
 		switch block := block.(type) {
@@ -410,6 +412,7 @@ func (b *Brain) Interpret(ctx context.Context, obs protocol.Observation, tr prot
 	if strings.TrimSpace(content) == "" {
 		content = "(no output)"
 	}
+
 	b.pending = append(b.pending, Result{ToolUseID: tr.ActionID, Content: content, IsError: !tr.OK})
 	return protocol.Interpretation{Continue: true, Summary: content}, nil
 }
@@ -482,6 +485,7 @@ func (b *Brain) compact(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
 	var summary strings.Builder
 	for _, blk := range sumTurn.Blocks {
 		if t, ok := blk.(Text); ok {

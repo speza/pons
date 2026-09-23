@@ -104,6 +104,7 @@ func waitForCallback(ctx context.Context, state string) (code string, err error)
 		default:
 		}
 	})
+
 	srv := &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", loginRedirectPort), Handler: mux}
 	go func() {
 		defer close(srvDone)
@@ -139,6 +140,7 @@ func RunLogin(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+
 	p := newPKCE()
 	authURL := authorizeURL(p)
 	fmt.Println("Opening your browser to authenticate with ChatGPT…")
@@ -154,6 +156,7 @@ func RunLogin(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+
 	fmt.Println("Exchanging authorization code…")
 
 	tokens, err := exchangeCode(ctx, code, p.verifier)
@@ -174,6 +177,7 @@ func RunLogin(ctx context.Context, id string) error {
 	if err := a.save(); err != nil {
 		return fmt.Errorf("login succeeded but saving %s failed: %w", authPath, err)
 	}
+
 	fmt.Printf("Logged in. Credentials saved to %s (auth id %s, expires %s).\n",
 		authPath, id, a.ExpiresAt.Format(time.RFC3339))
 	return nil
@@ -208,13 +212,16 @@ func exchangeCode(ctx context.Context, code, verifier string) (loginTokens, erro
 		return out, err
 	}
 	defer resp.Body.Close()
+
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return out, err
 	}
+
 	if resp.StatusCode != http.StatusOK {
 		return out, fmt.Errorf("token exchange: HTTP %d: %s", resp.StatusCode, truncateMsg(strings.TrimSpace(string(raw)), 300))
 	}
+
 	var tok struct {
 		AccessToken string `json:"access_token"`
 		IDToken     string `json:"id_token"`
@@ -224,9 +231,11 @@ func exchangeCode(ctx context.Context, code, verifier string) (loginTokens, erro
 	if err := json.Unmarshal(raw, &tok); err != nil {
 		return out, err
 	}
+
 	if tok.AccessToken == "" {
 		return out, fmt.Errorf("token exchange returned no access_token")
 	}
+
 	out.Access = tok.AccessToken
 	out.Refresh = tok.RefreshTok
 	if tok.ExpiresIn > 0 {

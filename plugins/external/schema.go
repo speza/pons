@@ -28,6 +28,7 @@ func ValidateToolSchema(raw json.RawMessage) error {
 		}
 		return fmt.Errorf("input_schema has trailing data: %w", err)
 	}
+
 	object, ok := value.(map[string]any)
 	if !ok {
 		return fmt.Errorf("input_schema root must be an object")
@@ -103,6 +104,7 @@ func validateSchemaObject(schema map[string]any, path string, root bool) error {
 			}
 		}
 	}
+
 	if required, exists := schema["required"]; exists {
 		if typeName != "object" {
 			return fmt.Errorf("%s.required is only valid for object schemas", path)
@@ -130,6 +132,7 @@ func validateSchemaObject(schema map[string]any, path string, root bool) error {
 			}
 		}
 	}
+
 	if items, exists := schema["items"]; exists {
 		if typeName != "array" {
 			return fmt.Errorf("%s.items is only valid for array schemas", path)
@@ -144,6 +147,7 @@ func validateSchemaObject(schema map[string]any, path string, root bool) error {
 	} else if typeName == "array" {
 		return fmt.Errorf("%s.items is required for array schemas", path)
 	}
+
 	if extra, exists := schema["additionalProperties"]; exists {
 		if typeName != "object" {
 			return fmt.Errorf("%s.additionalProperties is only valid for object schemas", path)
@@ -166,6 +170,7 @@ func validateCapability(cap Capability, placement Placement, maxTools int) (Tool
 	if placement != PlacementHands {
 		return ToolProviderConfiguration{}, fmt.Errorf("capability %q/v%d is only valid in hands placement", cap.Type, cap.Version)
 	}
+
 	var cfg ToolProviderConfiguration
 	if len(cap.Configuration) == 0 || string(cap.Configuration) == "null" {
 		return ToolProviderConfiguration{}, fmt.Errorf("tool_provider configuration is required")
@@ -173,6 +178,7 @@ func validateCapability(cap Capability, placement Placement, maxTools int) (Tool
 	if err := json.Unmarshal(cap.Configuration, &cfg); err != nil {
 		return ToolProviderConfiguration{}, fmt.Errorf("tool_provider configuration: %w", err)
 	}
+
 	// The wire distinguishes an omitted value (serial by default) from an
 	// explicit zero (unbounded, subject to host limits). The public Go struct
 	// keeps an int for ergonomic construction, so detect presence here.
@@ -192,6 +198,7 @@ func validateCapability(cap Capability, placement Placement, maxTools int) (Tool
 	if maxTools > 0 && len(cfg.Tools) > maxTools {
 		return ToolProviderConfiguration{}, fmt.Errorf("tool_provider advertises %d tools; host limit is %d", len(cfg.Tools), maxTools)
 	}
+
 	seen := make(map[string]bool, len(cfg.Tools))
 	for i, tool := range cfg.Tools {
 		if tool.Kind == "" {

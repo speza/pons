@@ -23,6 +23,7 @@ func writeWorkspaceArchive(ctx context.Context, out io.Writer, workspace string,
 		return fmt.Errorf("environment: open workspace root: %w", err)
 	}
 	defer root.Close()
+
 	entries := 0
 	writer := tar.NewWriter(&limitedWriter{writer: &contextWriter{ctx: ctx, writer: out}, remaining: limit})
 	err = fs.WalkDir(root.FS(), ".", func(rel string, entry fs.DirEntry, walkErr error) error {
@@ -66,6 +67,7 @@ func writeWorkspaceArchive(ctx context.Context, out io.Writer, workspace string,
 		}
 		return nil
 	})
+
 	if closeErr := writer.Close(); err == nil {
 		err = closeErr
 	}
@@ -154,6 +156,7 @@ func restoreWorkspaceArchive(workspace string, archive io.Reader, limit int64) e
 	if limit < 0 {
 		return errors.New("environment: E2B checkpoint limit must not be negative")
 	}
+
 	parent := filepath.Dir(workspace)
 	staging, err := os.MkdirTemp(parent, ".pons-e2b-checkpoint-")
 	if err != nil {
@@ -170,6 +173,7 @@ func restoreWorkspaceArchive(workspace string, archive io.Reader, limit int64) e
 		return fmt.Errorf("environment: inspect existing workspace: %w", err)
 	}
 	rootMode := rootInfo.Mode().Perm()
+
 	directoryModes := make(map[string]os.FileMode)
 	seen := make(map[string]string)
 	reader := tar.NewReader(archive)
@@ -255,6 +259,7 @@ func restoreWorkspaceArchive(workspace string, archive io.Reader, limit int64) e
 	if err := root.Chmod(".", rootMode); err != nil {
 		return fmt.Errorf("environment: restore workspace mode: %w", err)
 	}
+
 	backup := workspace + ".pons-e2b-backup-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	if err := os.Rename(workspace, backup); err != nil {
 		return fmt.Errorf("environment: checkpoint existing workspace: %w", err)
@@ -266,6 +271,7 @@ func restoreWorkspaceArchive(workspace string, archive io.Reader, limit int64) e
 		}
 		return installErr
 	}
+
 	if err := removeWorkspaceTree(backup); err != nil {
 		return fmt.Errorf("environment: remove workspace backup: %w", err)
 	}

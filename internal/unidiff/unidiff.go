@@ -83,6 +83,7 @@ func diff(a, b []string) []op {
 			}
 		}
 	}
+
 	strip := func(s string) string { return strings.TrimSuffix(s, "\n") }
 	ops := make([]op, 0, n+m)
 	i, j := 0, 0
@@ -99,6 +100,7 @@ func diff(a, b []string) []op {
 			j++
 		}
 	}
+
 	for ; i < n; i++ {
 		ops = append(ops, op{kind: '-', line: strip(a[i])})
 	}
@@ -174,6 +176,7 @@ func emitHunk(out *strings.Builder, ops []op, aBefore, bBefore []int, lo, hi int
 			bCount++
 		}
 	}
+
 	aStart, bStart := aBefore[lo], bBefore[lo]
 	fmt.Fprintf(out, "@@ -%d,%d +%d,%d @@\n",
 		startLine(aStart, aCount), aCount, startLine(bStart, bCount), bCount)

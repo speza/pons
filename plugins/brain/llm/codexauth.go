@@ -165,6 +165,7 @@ func saveAuthEntry(storePath, id string, cred ponsAuthFile) error {
 	if err != nil {
 		return err
 	}
+
 	if len(bytes.TrimSpace(data)) > 0 {
 		if store, err = decodeAuthStore(data); err != nil {
 			return fmt.Errorf("codex auth: %s: %w", storePath, err)
@@ -178,6 +179,7 @@ func saveAuthEntry(storePath, id string, cred ponsAuthFile) error {
 	if err != nil {
 		return err
 	}
+
 	if err := f.Truncate(0); err != nil {
 		return err
 	}
@@ -199,6 +201,7 @@ func (a *codexAuth) current(ctx context.Context) (access, accountID string, err 
 	if a.Refresh == "" {
 		return "", "", fmt.Errorf("codex auth: token expired and no refresh token available (run pons -provider codex --login)")
 	}
+
 	if err := a.refresh(ctx); err != nil {
 		return "", "", err
 	}
@@ -216,6 +219,7 @@ func (a *codexAuth) refresh(ctx context.Context) error {
 		return err
 	}
 	req.Header.Set("content-type", "application/json")
+
 	resp, err := a.http.Do(req)
 	if err != nil {
 		return err
@@ -225,6 +229,7 @@ func (a *codexAuth) refresh(ctx context.Context) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("codex auth: refresh failed: HTTP %d: %s", resp.StatusCode, truncateMsg(string(raw), 256))
 	}
+
 	var tok struct {
 		AccessToken string `json:"access_token"`
 		RefreshTok  string `json:"refresh_token"`
@@ -236,6 +241,7 @@ func (a *codexAuth) refresh(ctx context.Context) error {
 	if tok.AccessToken == "" {
 		return fmt.Errorf("codex auth: refresh returned no access_token")
 	}
+
 	a.Access = tok.AccessToken
 	if tok.RefreshTok != "" {
 		a.Refresh = tok.RefreshTok
@@ -243,6 +249,7 @@ func (a *codexAuth) refresh(ctx context.Context) error {
 	if tok.ExpiresIn > 0 {
 		a.ExpiresAt = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
 	}
+
 	// Pons owns the store: persist refreshed credentials.
 	return a.save()
 }

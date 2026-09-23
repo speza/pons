@@ -76,6 +76,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 	if spec.Command[0] != cfg.handsPath {
 		return nil, fmt.Errorf("environment: E2B spec command %q does not match configured hands path %q", spec.Command[0], cfg.handsPath)
 	}
+
 	client := &e2bClient{apiKey: cfg.apiKey, apiURL: cfg.apiURL, envdURL: cfg.envdURL, http: cfg.http}
 	workspaceID := spec.WorkspaceID
 	workspaceLock := p.workspaceLock(workspaceID)
@@ -96,6 +97,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 		return nil, fmt.Errorf("environment: workspace %q already has active E2B run %q", workspaceID, activeRun)
 	}
 	p.lifecycleMu.Unlock()
+
 	if runID == "" {
 		return nil, errors.New("environment: durable E2B session requires a run ID")
 	}
@@ -112,6 +114,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 	if err != nil {
 		return nil, err
 	}
+
 	p.debugf("workspace=%q strategy=%s checkpoint=%t", workspaceID, workspaceState.Strategy, workspaceState.CheckpointRef != "")
 	var credentials gitworkspace.Credentials
 	defer func() { startErr = credentials.RedactError(startErr) }()
@@ -126,6 +129,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 		}
 		maps.Copy(env, credentials.Environment())
 	}
+
 	sandbox, resumed, err := p.acquireSandbox(ctx, client, cfg, workspaceID, runID, network)
 	if err != nil {
 		return nil, err
@@ -143,6 +147,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 		p.debugf("workspace=%q sandbox=%q deleted", workspaceID, sandbox.ID)
 		return nil
 	}
+
 	if !resumed {
 		initialCheckout := workspaceState.CheckpointRef == ""
 		if initialCheckout {
@@ -175,6 +180,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 		}
 		p.debugf("workspace=%q sandbox=%q state=active", workspaceID, sandbox.ID)
 	}
+
 	remoteArgs := append([]string(nil), args...)
 	remoteArgs = append(remoteArgs, "--workspace", defaultE2BWorkspace)
 	manifest := external.Manifest{
@@ -215,6 +221,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 	if err := host.Start(ctx); err != nil {
 		return nil, errors.Join(err, host.Close(), cleanup())
 	}
+
 	if !stopStartupCancel() || ctx.Err() != nil {
 		return nil, errors.Join(ctx.Err(), host.Close(), cleanup())
 	}
@@ -222,6 +229,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 	p.lifecycleMu.Lock()
 	p.active[workspaceID] = runID
 	p.lifecycleMu.Unlock()
+
 	session := &e2bSession{
 		host:              host,
 		cancelTransport:   cancelSession,

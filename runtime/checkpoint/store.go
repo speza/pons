@@ -40,6 +40,7 @@ func (s *Store) PutWorkspaceCheckpoint(
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+
 	dir := s.workspaceCheckpointDir(workspaceID)
 	if err := mkdirAllDurable(dir, 0o700); err != nil {
 		return "", fmt.Errorf("runtime: create workspace checkpoint directory: %w", err)
@@ -57,6 +58,7 @@ func (s *Store) PutWorkspaceCheckpoint(
 		_ = file.Close()
 		return "", fmt.Errorf("runtime: secure workspace checkpoint: %w", err)
 	}
+
 	hash := sha256.New()
 	written, writeErr := io.Copy(
 		io.MultiWriter(file, hash),
@@ -70,6 +72,7 @@ func (s *Store) PutWorkspaceCheckpoint(
 	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
 		return "", fmt.Errorf("runtime: write workspace checkpoint: %w", err)
 	}
+
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -79,6 +82,7 @@ func (s *Store) PutWorkspaceCheckpoint(
 	if err := os.Rename(temporary, path); err != nil {
 		return "", fmt.Errorf("runtime: install workspace checkpoint: %w", err)
 	}
+
 	if err := syncDirectory(dir); err != nil {
 		return "", fmt.Errorf("runtime: sync workspace checkpoint directory: %w", err)
 	}
@@ -130,6 +134,7 @@ func (s *Store) WorkspaceCheckpoint(
 	if workspaceID == "" || limit < 0 || limit == math.MaxInt64 {
 		return nil, errors.New("runtime: invalid workspace checkpoint request")
 	}
+
 	path, decoded, err := s.workspaceCheckpointPath(workspaceID, ref)
 	if err != nil {
 		return nil, err
@@ -147,6 +152,7 @@ func (s *Store) WorkspaceCheckpoint(
 			_ = file.Close()
 		}
 	}()
+
 	info, err := file.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("runtime: inspect workspace checkpoint: %w", err)
@@ -154,6 +160,7 @@ func (s *Store) WorkspaceCheckpoint(
 	if info.Size() > limit {
 		return nil, fmt.Errorf("runtime: workspace checkpoint exceeds %d bytes", limit)
 	}
+
 	hash := sha256.New()
 	read, err := io.Copy(hash, io.LimitReader(&contextReader{ctx: ctx, reader: file}, limit+1))
 	if err != nil {
@@ -165,6 +172,7 @@ func (s *Store) WorkspaceCheckpoint(
 	if !bytes.Equal(hash.Sum(nil), decoded) {
 		return nil, errors.New("runtime: workspace checkpoint digest mismatch")
 	}
+
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("runtime: rewind workspace checkpoint: %w", err)
 	}
@@ -179,6 +187,7 @@ func (s *Store) PruneWorkspaceCheckpoints(ctx context.Context, workspaceID strin
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	keep := make(map[string]struct{}, len(keepRefs))
 	for _, ref := range keepRefs {
 		path, _, err := s.workspaceCheckpointPath(workspaceID, ref)
@@ -187,6 +196,7 @@ func (s *Store) PruneWorkspaceCheckpoints(ctx context.Context, workspaceID strin
 		}
 		keep[filepath.Base(path)] = struct{}{}
 	}
+
 	dir := s.workspaceCheckpointDir(workspaceID)
 	entries, err := os.ReadDir(dir)
 	if os.IsNotExist(err) {
@@ -195,6 +205,7 @@ func (s *Store) PruneWorkspaceCheckpoints(ctx context.Context, workspaceID strin
 	if err != nil {
 		return fmt.Errorf("runtime: list workspace checkpoints: %w", err)
 	}
+
 	removed := false
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {

@@ -102,14 +102,17 @@ func ValidatePlan(plan environment.WorkspacePlan) error {
 		}
 		return nil
 	}
+
 	if plan.Strategy != environment.WorkspaceStrategyGit {
 		return fmt.Errorf("environment: unsupported workspace strategy %q", plan.Strategy)
 	}
+
 	repository, err := url.Parse(plan.SourceRef)
 	if err != nil || repository.Scheme != "https" || repository.Host == "" ||
 		repository.User != nil || repository.RawQuery != "" || repository.Fragment != "" {
 		return errors.New("environment: git/v1 source must be a credential-free HTTPS repository URL without query or fragment")
 	}
+
 	if !isFullGitObjectID(plan.BaseRevision) {
 		return errors.New("environment: git/v1 base revision must be a full 40-character SHA-1 commit ID")
 	}

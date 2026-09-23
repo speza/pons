@@ -40,6 +40,7 @@ func loadOrCreateWorkspace(
 		}
 		return state, nil
 	}
+
 	if !errors.Is(err, environment.ErrStateNotFound) {
 		return environment.WorkspaceState{}, err
 	}
@@ -55,6 +56,7 @@ func loadOrCreateWorkspace(
 			UpdatedAt:       now,
 		}, nil
 	}
+
 	canonicalSource, err := filepath.EvalSymlinks(sourcePath)
 	if err != nil {
 		return environment.WorkspaceState{}, fmt.Errorf("environment: workspace source: %w", err)
@@ -72,6 +74,7 @@ func loadOrCreateWorkspace(
 	if err != nil {
 		return environment.WorkspaceState{}, err
 	}
+
 	defer os.Remove(archive.Name())
 	defer archive.Close()
 	checkpointRef, err := checkpoints.PutWorkspaceCheckpoint(ctx, workspaceID, archive, limit)
@@ -92,6 +95,7 @@ func loadOrCreateWorkspace(
 	if err := store.SaveWorkspaceState(ctx, state); err != nil {
 		return environment.WorkspaceState{}, err
 	}
+
 	if err := checkpoints.PruneWorkspaceCheckpoints(ctx, workspaceID, []string{checkpointRef}); err != nil && onError != nil {
 		onError(fmt.Errorf("environment: prune initial workspace checkpoints: %w", err))
 	}
@@ -114,6 +118,7 @@ func placeWorkspace(
 	if state.CheckpointRef == "" {
 		return provisionGitWorkspace(ctx, client, sandbox, store, checkpoints, state, env, credentials, limit, onError, onDebug)
 	}
+
 	archive, err := checkpoints.WorkspaceCheckpoint(ctx, state.ID, state.CheckpointRef, limit)
 	if err != nil {
 		return environment.WorkspaceState{}, err
@@ -122,6 +127,7 @@ func placeWorkspace(
 	if err := errors.Join(uploadErr, archive.Close()); err != nil {
 		return environment.WorkspaceState{}, err
 	}
+
 	if _, _, err := client.run(ctx, sandbox, "/bin/sh", []string{
 		"-c", prepareWorkspaceScript,
 	}, "/home/user", nil); err != nil {

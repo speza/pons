@@ -122,6 +122,7 @@ func (s *e2bSession) persistCheckpoint(ctx context.Context, archive io.ReadSeeke
 	if err := validateWorkspaceArchive(&contextReader{ctx: ctx, reader: archive}, s.maxWorkspaceBytes); err != nil {
 		return err
 	}
+
 	if _, err := archive.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
@@ -135,6 +136,7 @@ func (s *e2bSession) persistCheckpoint(ctx context.Context, archive io.ReadSeeke
 	if err := s.store.SaveWorkspaceState(ctx, workspace); err != nil {
 		return err
 	}
+
 	s.workspace = workspace
 	s.debugf("checkpoint=%s saved", checkpointRef)
 	// The new reference is durable before pruning. archive/v1's BaseRevision is
@@ -180,6 +182,7 @@ func (s *e2bSession) Close() error {
 		// Stop active-state writes before publishing the recovery reservation.
 		// A past heartbeat failure does not prevent a fresh checkpoint attempt.
 		s.stopKeepalive()
+
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		recoveryUntil := time.Now().UTC().Add(checkpointRecoveryTimeout)
@@ -188,6 +191,7 @@ func (s *e2bSession) Close() error {
 			recoveryErr = s.reserveRecovery(ctx, recoveryUntil)
 			s.closeErr = errors.Join(s.closeErr, recoveryErr)
 		}
+
 		if s.closeErr == nil && retain {
 			s.debugf("checkpoint started")
 			if _, _, err := s.client.run(ctx, s.sandbox, "/bin/tar", []string{
@@ -204,6 +208,7 @@ func (s *e2bSession) Close() error {
 				s.closeErr = s.persistCheckpoint(ctx, body)
 			}
 		}
+
 		if s.closeErr == nil && s.store != nil {
 			now := time.Now().UTC()
 			idleUntil := now.Add(s.idleTimeout)
@@ -226,6 +231,7 @@ func (s *e2bSession) Close() error {
 				}
 			}
 		}
+
 		if retain && s.closeErr != nil {
 			// Idle transition may have shortened the provider TTL before its
 			// metadata write failed. Restore the original, non-renewing window.

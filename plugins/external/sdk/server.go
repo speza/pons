@@ -106,6 +106,7 @@ func (s Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		out:      out,
 		fatal:    make(chan error, 1),
 	}
+
 	reader := newFrameReader(in, s.MaxFrameBytes)
 	type frameResult struct {
 		frame []byte
@@ -158,6 +159,7 @@ func (s Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 			state.cancelAll()
 			return fmt.Errorf("external sdk: read frame: %w", err)
 		}
+
 		if len(bytes.TrimSpace(frame)) == 0 {
 			return errors.New("external sdk: blank frame")
 		}
@@ -184,6 +186,7 @@ func (s Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 			}
 			continue
 		}
+
 		if !initialized {
 			if request.Method != external.MethodInitialize {
 				if writeErr := state.errorResponse(request.ID, external.RPCInvalidRequest, "plugin must be initialized first"); writeErr != nil {
@@ -204,6 +207,7 @@ func (s Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 			initialized = true
 			continue
 		}
+
 		switch request.Method {
 		case external.MethodExecute:
 			var params external.ExecuteParams
@@ -222,6 +226,7 @@ func (s Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 				}
 				continue
 			}
+
 			tool, ok := tools[string(params.Action.Kind)]
 			if !ok {
 				// Unknown action kinds are domain observations, not protocol
@@ -299,6 +304,7 @@ func initialize(s Server, raw json.RawMessage) (external.InitializeResult, error
 	if !supported {
 		return external.InitializeResult{}, errors.New("host does not support tool_provider/v1")
 	}
+
 	tools := make([]external.ToolDescription, 0, len(s.Tools))
 	for _, tool := range s.Tools {
 		tools = append(tools, external.ToolDescription{
@@ -333,6 +339,7 @@ func initialize(s Server, raw json.RawMessage) (external.InitializeResult, error
 	if err != nil {
 		return external.InitializeResult{}, err
 	}
+
 	return external.InitializeResult{
 		Plugin:       external.PluginInfo{Name: s.Name, Version: s.Version},
 		Capabilities: []external.Capability{{Type: external.CapabilityToolProvider, Version: external.ToolProviderVersion, Configuration: configuration}},
@@ -366,10 +373,12 @@ func (s *serveState) startCall(id string, action protocol.Action, tool Tool) {
 				return
 			}
 		}
+
 		result, err := callTool(callCtx, tool.Handler, action)
 		if err != nil {
 			result = protocol.ToolResult{ActionID: action.ID, Kind: string(action.Kind), OK: false, Error: err.Error()}
 		}
+
 		// The SDK is also an untrusted boundary for handler output: always
 		// normalize both correlation and payload namespace from the request.
 		result.ActionID = action.ID

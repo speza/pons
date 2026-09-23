@@ -82,6 +82,7 @@ func New(cfg Config) (*App, error) {
 	if cfg.PrivateKeyPath == "" {
 		return nil, errors.New("github app: private key path is required")
 	}
+
 	info, err := os.Stat(cfg.PrivateKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("github app: private key: %w", err)
@@ -92,6 +93,7 @@ func New(cfg Config) (*App, error) {
 	if info.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("github app: private key permissions must not allow group or other access")
 	}
+
 	body, err := os.ReadFile(cfg.PrivateKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("github app: read private key: %w", err)
@@ -100,6 +102,7 @@ func New(cfg Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	apiURL := strings.TrimRight(cfg.APIURL, "/")
 	if apiURL == "" {
 		apiURL = defaultAPIURL
@@ -149,6 +152,7 @@ func (a *App) InstallationToken(ctx context.Context, repositoryURL string, all b
 			return "", err
 		}
 	}
+
 	jwt, err := a.jwt()
 	if err != nil {
 		return "", err
@@ -179,6 +183,7 @@ func (a *App) InstallationToken(ctx context.Context, repositoryURL string, all b
 	); err != nil {
 		return "", fmt.Errorf("github app: create installation token: %w", err)
 	}
+
 	if token.Value == "" || !token.ExpiresAt.After(a.now().Add(time.Minute)) || token.ExpiresAt.After(a.now().Add(installationTokenTTL+time.Minute)) {
 		return "", errors.New("github app: installation token response is invalid")
 	}
@@ -220,12 +225,14 @@ func (a *App) jwt() (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	unsigned := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload)
 	digest := sha256.Sum256([]byte(unsigned))
 	signature, err := rsa.SignPKCS1v15(rand.Reader, a.key, crypto.SHA256, digest[:])
 	if err != nil {
 		return "", fmt.Errorf("github app: sign JWT: %w", err)
 	}
+
 	return unsigned + "." + base64.RawURLEncoding.EncodeToString(signature), nil
 }
 
@@ -238,6 +245,7 @@ func (a *App) request(ctx context.Context, method, endpoint string, payload any,
 		}
 		body = bytes.NewReader(encoded)
 	}
+
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
 		return err
@@ -248,6 +256,7 @@ func (a *App) request(ctx context.Context, method, endpoint string, payload any,
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+
 	response, err := a.http.Do(req)
 	if err != nil {
 		return err
@@ -260,6 +269,7 @@ func (a *App) request(ctx context.Context, method, endpoint string, payload any,
 	if len(responseBody) > maxResponseBytes {
 		return fmt.Errorf("GitHub response exceeds %d bytes", maxResponseBytes)
 	}
+
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		var failure struct {
 			Message string `json:"message"`
@@ -270,6 +280,7 @@ func (a *App) request(ctx context.Context, method, endpoint string, payload any,
 		}
 		return fmt.Errorf("GitHub returned %d: %s", response.StatusCode, failure.Message)
 	}
+
 	if err := json.Unmarshal(responseBody, result); err != nil {
 		return fmt.Errorf("github app: decode response: %w", err)
 	}

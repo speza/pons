@@ -344,6 +344,7 @@ func (c *e2bClient) jsonRequest(ctx context.Context, method, target string, payl
 	if err != nil {
 		return err
 	}
+
 	req, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -355,6 +356,7 @@ func (c *e2bClient) jsonRequest(ctx context.Context, method, target string, payl
 	} else {
 		req.Header.Set("X-API-Key", c.apiKey)
 	}
+
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -363,6 +365,7 @@ func (c *e2bClient) jsonRequest(ctx context.Context, method, target string, payl
 	if !slices.Contains(statuses, resp.StatusCode) {
 		return responseError("E2B request", resp)
 	}
+
 	if result != nil {
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxE2BJSONResponseBytes+1))
 		if err != nil {
@@ -473,6 +476,7 @@ func (c *e2bClient) startProcess(
 	if tag != "" {
 		payload["tag"] = tag
 	}
+
 	message, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -481,6 +485,7 @@ func (c *e2bClient) startProcess(
 	framed.WriteByte(0)
 	_ = binary.Write(&framed, binary.BigEndian, uint32(len(message)))
 	framed.Write(message)
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.envdURL+"/process.Process/Start", &framed)
 	if err != nil {
 		return nil, err
@@ -488,6 +493,7 @@ func (c *e2bClient) startProcess(
 	c.envdHeaders(req, sandbox)
 	req.Header.Set("Connect-Protocol-Version", "1")
 	req.Header.Set("Content-Type", "application/connect+json")
+
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -496,6 +502,7 @@ func (c *e2bClient) startProcess(
 		defer resp.Body.Close()
 		return nil, responseError("start E2B process", resp)
 	}
+
 	return &e2bProcessStream{body: resp.Body}, nil
 }
 

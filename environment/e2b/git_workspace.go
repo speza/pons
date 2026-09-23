@@ -38,6 +38,7 @@ func provisionGitWorkspace(
 		{step: "git checkout", command: "/usr/bin/git", args: []string{"-C", defaultE2BWorkspace, "checkout", "-b", gitworkspace.BranchName(state.ID), "FETCH_HEAD"}, cwd: "/home/user"},
 		{step: "archive initial checkout", command: "/bin/tar", args: []string{"--hard-dereference", "-cf", workspaceCheckpointPath, "-C", defaultE2BWorkspace, "."}, cwd: "/home/user"},
 	}
+
 	for _, command := range commands {
 		if command.step == "git fetch" {
 			debugE2B(onDebug, "workspace=%q sandbox=%q git fetch started", state.ID, sandbox.ID)
@@ -53,6 +54,7 @@ func provisionGitWorkspace(
 			debugE2B(onDebug, "workspace=%q sandbox=%q %s completed", state.ID, sandbox.ID, command.step)
 		}
 	}
+
 	body, err := stageWorkspaceArchive(func(out io.Writer) error {
 		return client.download(ctx, sandbox, workspaceCheckpointPath, out, limit)
 	})
@@ -64,6 +66,7 @@ func provisionGitWorkspace(
 	if err := validateWorkspaceArchive(&contextReader{ctx: ctx, reader: body}, limit); err != nil {
 		return environment.WorkspaceState{}, err
 	}
+
 	if _, err := body.Seek(0, io.SeekStart); err != nil {
 		return environment.WorkspaceState{}, err
 	}
@@ -76,6 +79,7 @@ func provisionGitWorkspace(
 	if err := store.SaveWorkspaceState(ctx, state); err != nil {
 		return environment.WorkspaceState{}, err
 	}
+
 	debugE2B(onDebug, "workspace=%q sandbox=%q initial checkpoint=%s saved", state.ID, sandbox.ID, checkpointRef)
 	if err := checkpoints.PruneWorkspaceCheckpoints(ctx, state.ID, []string{checkpointRef}); err != nil && onError != nil {
 		onError(fmt.Errorf("environment: prune initial Git workspace checkpoints: %w", err))

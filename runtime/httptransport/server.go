@@ -84,6 +84,7 @@ func (s server) createConversation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
 	conversation, err := s.runtime.CreateConversation(r.Context(), options)
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -112,6 +113,7 @@ func (s server) submitMessage(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "message body contains trailing data")
 		return
 	}
+
 	accepted, err := s.runtime.Submit(r.Context(), r.PathValue("id"), r.Header.Get("Idempotency-Key"), body.Parts)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -136,6 +138,7 @@ func (s server) events(w http.ResponseWriter, r *http.Request) {
 		}
 		after = parsed
 	}
+
 	events, err := s.runtime.Subscribe(r.Context(), r.PathValue("id"), after)
 	if err != nil {
 		if errors.Is(err, ponsruntime.ErrNotFound) {
@@ -150,6 +153,7 @@ func (s server) events(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "streaming is unavailable")
 		return
 	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)

@@ -96,6 +96,7 @@ func (s settings) orderedProviders() ([]providerSettings, error) {
 		}
 		ids[p.ID] = i
 	}
+
 	def := 0
 	if s.DefaultProviderID != nil && *s.DefaultProviderID != "" {
 		idx, ok := ids[*s.DefaultProviderID]
@@ -106,6 +107,7 @@ func (s settings) orderedProviders() ([]providerSettings, error) {
 	} else if len(s.Providers) > 1 {
 		return nil, fmt.Errorf("%d providers declared but default_provider_id is not set", len(s.Providers))
 	}
+
 	ordered := []providerSettings{s.Providers[def]}
 	for i, p := range s.Providers {
 		if i != def {
@@ -165,6 +167,7 @@ func loadSettings(home, workspace string) (settings, error) {
 			return settings{}, fmt.Errorf("merge config %q: %w", path, err)
 		}
 	}
+
 	if len(merged) == 0 {
 		return settings{}, nil
 	}
@@ -178,6 +181,7 @@ func loadSettings(home, workspace string) (settings, error) {
 	if err := dec.Decode(&s); err != nil {
 		return settings{}, fmt.Errorf("config: %w", err)
 	}
+
 	if err := s.validate(); err != nil {
 		return settings{}, err
 	}
@@ -231,11 +235,13 @@ func decodeSettingsMap(data []byte, path string) (map[string]json.RawMessage, er
 	if !utf8.Valid(data) {
 		return nil, fmt.Errorf("config %q is not valid UTF-8", path)
 	}
+
 	dec := json.NewDecoder(bytes.NewReader(data))
 	var m map[string]json.RawMessage
 	if err := dec.Decode(&m); err != nil {
 		return nil, fmt.Errorf("config %q: %w", path, err)
 	}
+
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
 		if err == nil {

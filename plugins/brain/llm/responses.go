@@ -153,12 +153,14 @@ func (c *responsesClient) tryComplete(ctx context.Context, system string, turns 
 			return Turn{}, fmt.Errorf("codex: %s", ev.AsError().Message)
 		}
 	}
+
 	if err := stream.Err(); err != nil {
 		if errBody != "" {
 			return Turn{}, fmt.Errorf("codex: %w: %s", err, truncateMsg(errBody, 512))
 		}
 		return Turn{}, fmt.Errorf("codex: %w", err)
 	}
+
 	// Truncated response = the model planned more work than arrived.
 	if completed != nil && completed.Response.Status == "incomplete" {
 		return Turn{}, fmt.Errorf("codex: response incomplete (%s) — raise Config.MaxTokens or the model needs a smaller step", completed.Response.IncompleteDetails.Reason)

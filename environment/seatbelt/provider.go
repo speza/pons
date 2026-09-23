@@ -35,6 +35,7 @@ func (p Provider) Start(ctx context.Context, spec environment.Spec) (environment
 	if err != nil {
 		return nil, err
 	}
+
 	scratch, err := os.MkdirTemp("", "pons-hands-")
 	if err != nil {
 		return nil, fmt.Errorf("environment: create scratch: %w", err)
@@ -43,6 +44,7 @@ func (p Provider) Start(ctx context.Context, spec environment.Spec) (environment
 		scratch = canonical
 	}
 	cleanup := func() { _ = os.RemoveAll(scratch) }
+
 	profile, err := seatbeltProfile(workspace, scratch, command[0], readOnly, network)
 	if err != nil {
 		cleanup()
@@ -79,6 +81,7 @@ func (p Provider) Start(ctx context.Context, spec environment.Spec) (environment
 		cleanup()
 		return nil, err
 	}
+
 	host, err := external.NewHost(manifest, external.HostConfig{
 		Workspace:        workspace,
 		WorkingDirectory: workspace,
@@ -106,6 +109,7 @@ func (p Provider) Start(ctx context.Context, spec environment.Spec) (environment
 		}
 		return nil, err
 	}
+
 	return &seatbeltSession{
 		host:    host,
 		scratch: scratch,
@@ -161,6 +165,7 @@ func validateSpec(spec environment.Spec) (string, []string, []string, environmen
 		}
 		return "", nil, nil, "", errors.New("environment: workspace must be a directory")
 	}
+
 	if len(spec.Command) == 0 || spec.Command[0] == "" {
 		return "", nil, nil, "", errors.New("environment: hands command is required")
 	}
@@ -179,6 +184,7 @@ func validateSpec(spec environment.Spec) (string, []string, []string, environmen
 		}
 		return "", nil, nil, "", errors.New("environment: hands command is not executable")
 	}
+
 	readOnly := make([]string, 0, len(spec.ReadOnly))
 	seen := make(map[string]bool, len(spec.ReadOnly))
 	for _, path := range spec.ReadOnly {
@@ -197,6 +203,7 @@ func validateSpec(spec environment.Spec) (string, []string, []string, environmen
 			readOnly = append(readOnly, path)
 		}
 	}
+
 	network := spec.Network
 	if network == "" {
 		network = environment.NetworkDisabled

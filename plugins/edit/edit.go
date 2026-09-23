@@ -157,10 +157,12 @@ func (p *Edit) apply(ctx context.Context, a protocol.Action) (protocol.ToolResul
 	if err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: "invalid arguments: " + err.Error()}, nil
 	}
+
 	path, err := jail.ResolvePath(p.root, pathArg)
 	if err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 	}
+
 	blocks, err := parsePatch(patch)
 	if err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
