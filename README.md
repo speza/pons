@@ -130,6 +130,13 @@ per state directory; additional clients connect to that server. The server
 listens on loopback (`127.0.0.1:7337`) and refuses non-loopback addresses.
 Clients can resume conversations by ID.
 
+One runtime is one trusted administrative domain; pons is not a multi-tenant
+security boundary. A hosted service should route domains to isolated runtime
+cells rather than co-host untrusted customers in one runtime.
+
+For the proposed multi-agent runtime and its implementation order, see
+[ADR-0016](docs/adr-0016-persistent-agents-and-async-messaging.md).
+
 ### Web testing UI
 
 The browser UI is a development and testing surface for the HTTP/SSE runtime.
