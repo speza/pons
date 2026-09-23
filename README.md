@@ -135,14 +135,13 @@ security boundary. A hosted service should route domains to isolated runtime
 cells rather than co-host untrusted customers in one runtime.
 
 The proposed persistent-agent feature starts with identity and delegation in
-[ADR-0016](docs/adr-0016-persistent-agents-and-async-messaging.md). Its
+[ADR-0016](docs/adr/adr-0016-persistent-agents-and-async-messaging.md). Its
 remaining runtime contracts cover
-[triggers and delivery](docs/adr-0018-agent-triggers-and-delivery.md),
-[agent memory](docs/adr-0019-agent-memory.md),
-[artifact transfer](docs/adr-0020-agent-artifact-transfer.md), and
-[durable work and approvals](docs/adr-0021-durable-work-and-waits.md).
-The [ADR implementation status](docs/adr-implementation-status.md) separates
-accepted decisions from features present in the current code.
+[triggers and delivery](docs/adr/adr-0018-agent-triggers-and-delivery.md),
+[agent memory](docs/adr/adr-0019-agent-memory.md),
+[artifact transfer](docs/adr/adr-0020-agent-artifact-transfer.md), and
+[durable work and approvals](docs/adr/adr-0021-durable-work-and-waits.md).
+Each ADR records its decision status and implementation state separately.
 
 ### Web testing UI
 

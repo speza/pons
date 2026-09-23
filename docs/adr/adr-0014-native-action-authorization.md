@@ -1,6 +1,7 @@
 # ADR-0014: Native action authorization and classifier-backed auto mode
 
 **Status:** Proposed
+**Implementation:** Not implemented
 **Date:** 2026-09-18
 **Related:** ADR-0001, ADR-0004, ADR-0006, ADR-0007, ADR-0021
 

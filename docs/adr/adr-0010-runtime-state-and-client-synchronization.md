@@ -1,6 +1,7 @@
 # ADR-0010: Runtime conversations use transactional state and an event outbox
 
 **Status:** Accepted; runtime coordination refined by ADR-0012
+**Implementation:** Implemented
 **Date:** 2026-09-19
 **Related:** ADR-0008, ADR-0011, ADR-0012
 
@@ -243,7 +244,7 @@ snapshot. The server now uses the transactional runtime store exclusively.
 
 ## References
 
-- `docs/adr-0008-runtime-orchestration-layer.md` — runtime ownership and API
+- `docs/adr/adr-0008-runtime-orchestration-layer.md` — runtime ownership and API
 - `docs/runtime-v1.md` — concrete implemented runtime design
-- `docs/adr-0005-transcript-model-vs-engine.md` — session model and engines
+- `docs/adr/adr-0005-transcript-model-vs-engine.md` — session model and engines
 - `runtime/` — transactional state, snapshot API, and durable/transient stream

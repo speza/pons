@@ -1,6 +1,7 @@
 # ADR-0011: The server owns runtime persistence behind an injected store
 
 **Status:** Accepted
+**Implementation:** Implemented
 **Date:** 2026-09-19
 **Related:** ADR-0001, ADR-0002, ADR-0005, ADR-0008, ADR-0010
 

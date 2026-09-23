@@ -1,6 +1,7 @@
 # ADR-0015: E2B carries the hands protocol through envd process streams
 
 **Status:** Accepted
+**Implementation:** Implemented
 **Date:** 2026-09-21
 **Related:** ADR-0007, ADR-0009
 

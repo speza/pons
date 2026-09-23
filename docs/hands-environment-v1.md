@@ -1,8 +1,8 @@
 # Hands execution environment v1 design
 
 **Status:** Local Seatbelt and remote E2B per-run providers implemented
-**Related:** [ADR-0009](adr-0009-hands-execution-environments.md),
-[ADR-0007](adr-0007-language-neutral-plugin-runtime.md)
+**Related:** [ADR-0009](adr/adr-0009-hands-execution-environments.md),
+[ADR-0007](adr/adr-0007-language-neutral-plugin-runtime.md)
 
 This document describes the local Seatbelt backend and the initial E2B remote
 backend. E2B uses the standard library HTTP client rather than an SDK, and its
@@ -228,6 +228,6 @@ the result.
 - [E2B Python Sandbox reference](https://e2b.dev/docs/sdk-reference/python-sdk/v2.5.0/sandbox_sync)
 - [E2B template reference](https://e2b.dev/docs/sdk-reference/cli/v1.0.9/template)
 - [Remote workspace provisioning design](remote-workspace-provisioning.md)
-- [ADR-0004](adr-0004-sandboxed-hands-boundary.md)
-- [ADR-0007](adr-0007-language-neutral-plugin-runtime.md)
+- [ADR-0004](adr/adr-0004-sandboxed-hands-boundary.md)
+- [ADR-0007](adr/adr-0007-language-neutral-plugin-runtime.md)
 - `plugins/external/` — current external hands host

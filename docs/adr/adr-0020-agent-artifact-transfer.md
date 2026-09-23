@@ -1,6 +1,7 @@
 # ADR-0020: Agents exchange immutable artifacts by authorized reference
 
 **Status:** Proposed
+**Implementation:** Not implemented
 **Date:** 2026-09-23
 **Related:** ADR-0004, ADR-0009, ADR-0010, ADR-0015, ADR-0016, ADR-0018, ADR-0019
 

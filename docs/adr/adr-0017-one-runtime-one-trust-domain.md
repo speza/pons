@@ -1,6 +1,7 @@
 # ADR-0017: One runtime serves one trusted administrative domain
 
 **Status:** Accepted
+**Implementation:** Current single-domain boundary in effect; hosted cells not implemented
 **Date:** 2026-09-22
 **Related:** ADR-0001, ADR-0004, ADR-0008, ADR-0009, ADR-0011, ADR-0012, ADR-0016
 

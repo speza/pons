@@ -1,6 +1,7 @@
 # ADR-0005: The transcript model is a contract; engine and location are composition choices
 
 **Status:** Superseded by ADR-0010 and ADR-0011
+**Implementation:** Not applicable — superseded
 **Date:** 2026-09-15
 **Related:** ADR-0001, ADR-0002, ADR-0003
 
@@ -84,6 +85,6 @@ inspection and resume.
 
 ## References
 
-- `docs/adr-0002-tree-sessions-sqlite.md` — concrete tree/storage choice
-- `docs/adr-0011-server-centred-runtime-storage.md` — removal of the legacy
+- `docs/adr/adr-0002-tree-sessions-sqlite.md` — concrete tree/storage choice
+- `docs/adr/adr-0011-server-centred-runtime-storage.md` — removal of the legacy
   session stack

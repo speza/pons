@@ -1,6 +1,7 @@
 # ADR-0006: Tool calls within a turn execute concurrently and record in call order
 
 **Status:** Accepted
+**Implementation:** Implemented
 **Date:** 2026-09-15
 **Related:** ADR-0001, ADR-0003
 

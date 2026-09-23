@@ -1,6 +1,7 @@
 # ADR-0018: Triggers and delivery surround durable agent submissions
 
 **Status:** Proposed
+**Implementation:** Not implemented
 **Date:** 2026-09-23
 **Related:** ADR-0008, ADR-0010, ADR-0011, ADR-0012, ADR-0016, ADR-0017, ADR-0021
 

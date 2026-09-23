@@ -1,6 +1,7 @@
 # ADR-0003: ToolResult has a status envelope, canonical observation, and typed payload
 
 **Status:** Accepted
+**Implementation:** Implemented
 **Date:** 2026-09-15
 **Supersedes:** the earlier flat `ToolResult` shape (`Stdout`, `Stderr`,
 `Diff`, and `Details map[string]string`)

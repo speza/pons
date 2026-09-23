@@ -1,6 +1,7 @@
 # ADR-0004: Hands are the execution boundary; isolation is deployment policy
 
 **Status:** Accepted
+**Implementation:** Implemented boundary; isolation is opt-in by deployment
 **Date:** 2026-09-15
 **Related:** ADR-0001, ADR-0003, ADR-0007
 

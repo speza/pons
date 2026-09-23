@@ -1,6 +1,7 @@
 # ADR-0019: Agent memory is explicit, scoped, and separate from transcripts
 
 **Status:** Proposed
+**Implementation:** Not implemented
 **Date:** 2026-09-23
 **Related:** ADR-0005, ADR-0008, ADR-0010, ADR-0016, ADR-0017, ADR-0018, ADR-0020
 

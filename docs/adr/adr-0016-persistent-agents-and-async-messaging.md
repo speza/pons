@@ -1,6 +1,7 @@
 # ADR-0016: Persistent agents delegate work through durable asynchronous messages
 
 **Status:** Proposed
+**Implementation:** Not implemented
 **Date:** 2026-09-22
 **Related:** ADR-0001, ADR-0008 through ADR-0012, ADR-0014, ADR-0017
 through ADR-0021
