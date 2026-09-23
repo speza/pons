@@ -276,7 +276,10 @@ function App() {
 
         while (!stopped) {
           try {
-            await consumeEvents(activeId, cursor, onEvent, controller.signal);
+            await consumeEvents(activeId, cursor, onEvent, controller.signal, () => {
+              setConnection("connected");
+              setError("");
+            });
           } catch (cause) {
             if (stopped || controller.signal.aborted) return;
             setConnection("reconnecting");
@@ -709,7 +712,7 @@ function App() {
 }
 
 function EnvironmentSetupLog({ entries, active }: { entries: RuntimeEvent[]; active: boolean }) {
-  const [expanded, setExpanded] = useState(active);
+  const [expanded, setExpanded] = useState(true);
   const stepInProgress = active && entries.at(-1)?.environment_progress?.step !== "sandbox.ready";
   return (
     <details className="setup-log" open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>

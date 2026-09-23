@@ -13,13 +13,12 @@ import (
 var ErrClosed = errors.New("runtime: manager is closed")
 
 type Config struct {
-	Store                 Store
-	IndependentWorkspaces bool
-	Runner                Runner
-	PrepareConversation   func(ConversationOptions) (ConversationOptions, error)
-	MaxConcurrent         int
-	EnvironmentOptions    []string
-	DefaultEnvironment    string
+	Store               Store
+	Runner              Runner
+	PrepareConversation func(ConversationOptions) (ConversationOptions, error)
+	MaxConcurrent       int
+	EnvironmentOptions  []string
+	DefaultEnvironment  string
 
 	// RepairInterval controls the low-frequency runnable-work reconciliation
 	// scan. Zero uses 30 seconds; wake signals remain the primary path.
@@ -110,9 +109,8 @@ func (m *Manager) CreateConversation(ctx context.Context, selected ConversationO
 		CreatedAt:          time.Now().UTC().Truncate(time.Microsecond),
 	}
 	value.WorkspaceLock = value.Workspace
-	if m.cfg.IndependentWorkspaces || selected.GitRepository != "" {
+	if selected.Environment == "e2b" || selected.GitRepository != "" {
 		value.WorkspaceLock = value.ID
-
 	}
 
 	if err := m.store.CreateConversation(ctx, value); err != nil {

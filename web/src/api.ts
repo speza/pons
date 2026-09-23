@@ -80,6 +80,7 @@ export async function consumeEvents(
   after: number,
   onEvent: (event: RuntimeEvent) => void,
   signal: AbortSignal,
+  onConnected?: () => void,
 ): Promise<void> {
   const response = await fetch(
     `${apiRoot}/conversations/${encodeURIComponent(id)}/events?after=${after}`,
@@ -92,6 +93,8 @@ export async function consumeEvents(
     throw new Error(`event stream failed: ${response.status} ${response.statusText}`);
   }
   if (!response.body) throw new Error("event stream is unavailable in this browser");
+
+  onConnected?.();
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();

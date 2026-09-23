@@ -21,7 +21,7 @@ import (
 
 const (
 	runtimeDBName        = "runtime.db"
-	currentSchemaVersion = 3
+	currentSchemaVersion = 4
 )
 
 // Store is the local, exclusive-manager runtime backend. Its transactions

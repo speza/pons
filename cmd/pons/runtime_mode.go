@@ -139,12 +139,11 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 	environmentOptions := configuredEnvironments(opts)
 	backgroundErrors := make(chan error, 1)
 	manager, err := ponsruntime.New(ponsruntime.Config{
-		Store:                 store,
-		IndependentWorkspaces: opts.Sandbox == "e2b",
-		Runner:                runner,
-		MaxConcurrent:         opts.MaxConcurrent,
-		EnvironmentOptions:    environmentOptions,
-		DefaultEnvironment:    defaultEnvironment(opts),
+		Store:              store,
+		Runner:             runner,
+		MaxConcurrent:      opts.MaxConcurrent,
+		EnvironmentOptions: environmentOptions,
+		DefaultEnvironment: defaultEnvironment(opts),
 		PrepareConversation: func(selection ponsruntime.ConversationOptions) (ponsruntime.ConversationOptions, error) {
 			if (selection.GitRepository == "") != (selection.GitRevision == "") {
 				return selection, errors.New("git repository and revision must be set together")

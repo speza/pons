@@ -146,7 +146,7 @@ func TestManagerPersistsConfiguredConversationEnvironment(t *testing.T) {
 	manager, err := New(Config{
 		Store:              store,
 		Runner:             RunnerFunc(func(context.Context, RunRequest) (RunResult, error) { return RunResult{}, nil }),
-		EnvironmentOptions: []string{"none", "seatbelt"},
+		EnvironmentOptions: []string{"none", "seatbelt", "e2b"},
 		DefaultEnvironment: "seatbelt",
 	})
 	if err != nil {
@@ -168,6 +168,16 @@ func TestManagerPersistsConfiguredConversationEnvironment(t *testing.T) {
 	}
 	if inProcess.Environment != "none" {
 		t.Fatalf("explicit environment = %q", inProcess.Environment)
+	}
+	if defaultConversation.WorkspaceLock != workspace || inProcess.WorkspaceLock != workspace {
+		t.Fatalf("host workspace locks = %q, %q, want %q", defaultConversation.WorkspaceLock, inProcess.WorkspaceLock, workspace)
+	}
+	sandboxed, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: workspace, Environment: "e2b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sandboxed.WorkspaceLock != sandboxed.ID {
+		t.Fatalf("E2B workspace lock = %q, want %q", sandboxed.WorkspaceLock, sandboxed.ID)
 	}
 	if _, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: workspace, Environment: "unknown"}); !errors.Is(err, ponsruntime.ErrInvalidEnvironment) {
 		t.Fatalf("unknown environment error = %v", err)

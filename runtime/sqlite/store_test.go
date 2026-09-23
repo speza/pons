@@ -13,7 +13,7 @@ import (
 )
 
 func TestOpenRejectsOlderExistingDatabase(t *testing.T) {
-	for _, statement := range []string{"PRAGMA user_version = 0", "PRAGMA user_version = 1", "PRAGMA user_version = 2"} {
+	for _, statement := range []string{"PRAGMA user_version = 0", "PRAGMA user_version = 1", "PRAGMA user_version = 2", "PRAGMA user_version = 3"} {
 		t.Run(statement, func(t *testing.T) {
 			stateDir := t.TempDir()
 			store, err := Open(stateDir)
