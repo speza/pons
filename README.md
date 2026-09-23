@@ -126,10 +126,12 @@ per state directory; additional clients connect to that server. The server
 listens on loopback (`127.0.0.1:7337`) and refuses non-loopback addresses.
 Clients can resume conversations by ID.
 
-### Web UI
+### Web testing UI
 
-The server embeds the built React client. From a fresh checkout, build it and
-start the server after setting up a provider as shown in [Quick start](#quick-start):
+The browser UI is a development and testing surface for the HTTP/SSE runtime.
+It is not intended for use outside web development and testing. The server
+embeds the built React client. From a fresh checkout, build it and start the
+server after setting up a provider as shown in [Quick start](#quick-start):
 
 ```sh
 make web-install
