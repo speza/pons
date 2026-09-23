@@ -710,12 +710,13 @@ function App() {
 
 function EnvironmentSetupLog({ entries, active }: { entries: RuntimeEvent[]; active: boolean }) {
   const [expanded, setExpanded] = useState(active);
+  const stepInProgress = active && entries.at(-1)?.environment_progress?.step !== "sandbox.ready";
   return (
     <details className="setup-log" open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
       <summary>
         <span className="setup-log-title">Environment setup</span>
         <span className="setup-log-count">{entries.length} {entries.length === 1 ? "step" : "steps"}</span>
-        {active && <span className="tool-spinner" aria-hidden="true" />}
+        {stepInProgress && <span className="tool-spinner" aria-hidden="true" />}
       </summary>
       <ol className="setup-log-entries">
         {entries.map((event) => (
