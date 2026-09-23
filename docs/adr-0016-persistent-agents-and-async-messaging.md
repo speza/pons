@@ -93,6 +93,15 @@ definitions can share a workspace ID to serialize access to one resource.
 Per-agent active-run capacity defaults to one but may allow independent
 conversations to run concurrently when workspace policy permits.
 
+Composition validates workspace identity before accepting work. Within one
+runtime, an ID maps to one provider, strategy, canonical backing resource,
+and source configuration; reuse with a different mapping is an error. Two
+local writable paths resolving to the same directory must use the same ID,
+or composition rejects the duplicate. Remote workspaces that are
+independent copies of one source may use different IDs. Durable environment
+reuse verifies the stored source and strategy against the definition before
+loading a checkpoint. Claim-time exclusion then uses the validated ID.
+
 For durable environments, `workspace_id` replaces the current incidental use
 of conversation ID as `environment.Spec.WorkspaceID`. This allows one agent
 computer, a shared project workspace, or conversation-scoped workspaces to be
@@ -163,23 +172,30 @@ run request lets the host plugin invoke the runtime transition without giving
 
 Each accepted delegation atomically:
 
-1. validates that the sender run and every ancestor delegation are still
-   active, then checks recipient, directed policy, and bounds;
+1. validates that the sender run, root lineage, and every ancestor delegation
+   are still active, then checks recipient, directed policy, and bounds;
 2. creates a `pending` delegation;
 3. creates a recipient-owned child conversation linked to its parent;
 4. sets depth to parent depth plus one;
 5. accepts the agent-sourced message and queued submission; and
 6. appends the corresponding durable events.
 
-The active-run and ancestry checks occur in the same transaction as creation.
-Cancellation or terminal failure committed first denies a late host callback;
-creation committed first makes the new child visible to the cancellation or
-failure transition. Context cancellation alone is not an acceptance fence.
+The active-run, lineage, and ancestry checks occur in the same transaction as
+creation. Cancellation or terminal failure committed first denies a late host
+callback, including one from a root run with no ancestor delegation. Creation
+committed first makes the new child visible to the cancellation or failure
+transition. Context cancellation alone is not an acceptance fence.
 
 The child receives only its own definition, the explicit request, its own
 history, and future explicitly authorized artifact references. It does not
 implicitly receive the parent's transcript, reasoning, tool output, secrets,
 workspace, or permissions.
+
+The host enforces this context boundary even when hands can make network
+requests: a delegation-enabled composition must keep those hands from
+reaching the native runtime API. If a provider cannot prove that boundary,
+composition fails closed. A future authenticated, object-scoped agent API may
+replace this restriction.
 
 Addressing an arbitrary existing conversation is deferred. One private child
 per request avoids shared-assistant transcript semantics, accidental context
@@ -190,9 +206,9 @@ leakage, and a larger authorization contract.
 The durable states are:
 
 ```text
-pending -> running -> waiting -> running -> completed
-                   \                     -> failed
-                    ----------------------> cancelled
+pending -> running | cancelled
+running -> waiting | completed | failed | cancelled
+waiting -> running | cancelled
 ```
 
 - `pending`: child work is queued.
@@ -207,14 +223,17 @@ pending -> running -> waiting -> running -> completed
 The runtime initially infers waiting; there is no model `wait` action. On run
 completion it checks for non-terminal direct delegations and submissions
 queued or running after the current one. If either exists, progress remains in
-the private transcript and the delegation waits. Otherwise the latest final
-assistant response completes it.
+the private transcript and the delegation waits. Otherwise an explicit final
+assistant response from the latest run completes it.
 
 This check prevents a parent delegation from completing after processing only
 one of several already-queued descendant results. Each activation receives a
 bounded trusted summary of its direct delegations—ID, recipient, and status—so
 it can reason about outstanding work without receiving child transcripts.
-Root agents may still send progress to human clients.
+Root agents may still send progress to human clients. If a run stops without
+an explicit final response and no work remains to resume it, the delegation
+fails with `no_final_response`; an exhausted run fails with its turn-limit
+error.
 
 An agent that wants to complete before its children must cancel them. Explicit
 suspend/complete controls are deferred until external waits or detached child
@@ -293,10 +312,13 @@ response is authenticated but still untrusted input to the parent. Native
 action authorization from ADR-0014 applies before delegation, while recipient
 policy remains a non-overridable hard check.
 
-Delegation is a data-egress seam. Policy receives destination, message,
-source trust domain, and declared artifact references and may allow, deny, or
-redact. The audit record stores the decision and payload hash, not hidden
-credentials. An allowlisted route does not imply every payload is safe.
+Delegation is a data-egress seam. The first policy receives the host-derived
+sender and recipient IDs, source conversation and root ID, and request text;
+it may allow, deny, or redact. The audit record stores the decision and
+payload hash, not hidden credentials. An allowlisted route does not imply
+every payload is safe. Artifact references and cross-domain egress policy
+belong to later contracts.
+
 Unattended delegation does not wait on a human approval inside an active run:
 a policy requiring approval denies with `approval_unavailable` until a later
 design provides durable approval suspension and resumption. ADR-0014 may
@@ -306,6 +328,15 @@ Secret isolation requires process boundaries. Brain credentials stay in host
 composition; hands and external plugins receive only grants for that agent and
 must not inherit the server's full environment. pons must not claim per-agent
 secret isolation until this launch path is enforced and tested.
+
+The native HTTP server has no object authorization. A hands process that can
+reach its listener could read other conversations, bypassing the private-child
+context rule even without host credentials. Before enabling delegation,
+composition must verify that each model-controlled hands boundary cannot
+reach that listener. Network-enabled local hands without an enforced deny
+rule, and unrestricted in-process hands with network or command access, are
+ineligible. Loopback binding alone is insufficient when hands share the host
+network namespace.
 
 ### 12. Bounds and scheduling
 
@@ -322,6 +353,8 @@ new lineage and budget. Return delivery is always accepted so results are not
 lost. If its next activation exceeds budget, the submission and any owning
 non-terminal delegation fail with `lineage_budget_exceeded`, and one bounded
 notice propagates upward rather than leaving work waiting forever.
+If the budget also prevents the root from processing that notice, the root
+lineage fails with the same code and its unfinished descendants are cancelled.
 
 Depth follows ancestry; returning to a parent does not increase it. Agent IDs
 may recur, but depth and lineage limits bound cycles. Stable denial codes
@@ -346,11 +379,22 @@ cancellation for local running work. The acceptance fence in section 6 also
 prevents an in-flight host callback from creating a descendant after the
 cancellation transaction commits.
 
-Exactly one terminal transition wins. Completion committed first is retained;
-cancellation committed first fences stale completion. Requested tool effects
-retain outcome-unknown semantics. One bounded parent notice is delivered, but
-cancelled descendants do not each trigger ancestor model runs. Disconnecting
-a client does not cancel accepted work.
+Root-lineage cancellation atomically marks its durable lineage row cancelled,
+resolves every queued submission in that lineage, cancels non-terminal
+descendants, marks running submissions and runs cancelled, and fences their
+completion. It requests context cancellation for local runs, but the stored
+lineage state is
+the authoritative fence for late callbacks and run results. No descendant
+result is delivered after cancellation. Independent lineages in the same
+root conversation remain active.
+
+Exactly one terminal transition wins for each delegation and lineage.
+Completion committed first is retained; cancellation committed first fences
+stale completion. Requested tool effects retain outcome-unknown semantics.
+Cancelling a delegation delivers one bounded parent notice, but cancelled
+descendants do not each trigger ancestor model runs. Cancelling an entire
+lineage emits its terminal event without waking an ancestor. Disconnecting a
+client does not cancel accepted work.
 
 ### 14. Runtime and HTTP boundaries
 
@@ -368,13 +412,19 @@ agent definitions are separate decisions. The cancellation routes are
 conceptually `POST /v1/delegations/{id}/cancel` and
 `POST /v1/conversations/{id}/lineages/{root_id}/cancel`.
 
-A root lineage remains active while any submission with that `root_id` is
-queued or running, any descendant delegation is non-terminal, or a terminal
-result still awaits processing in the root conversation. Once those are
-resolved, it is `completed` with the latest final root response for that
-`root_id`, `failed` if its last root run failed, or `cancelled` if the lineage
-was cancelled. The runtime projects this status from canonical rows. A
-conceptual
+A durable lineage row is created with the original external submission. Its
+`active` state fences delegation acceptance, claims, run completion, and
+terminal result routing. The row remains active while any submission with
+that `root_id` is queued or running, any descendant delegation is
+non-terminal, or a terminal result still awaits processing in the root
+conversation. When those are resolved, a transaction marks it `completed`
+only if the latest root run produced an explicit final response for that
+lineage. If there is no final response, it marks the lineage `failed` with
+`no_final_response` or the root run's error. Cancellation marks it
+`cancelled` as described above. Terminal transitions use a compare-and-set
+against `active`; a terminal lineage cannot be reopened by a stale run or
+callback. The lineage view combines this canonical state with its root
+response and error. A conceptual
 `GET /v1/conversations/{id}/lineages/{root_id}` returns status, latest final
 root response ID, and error code without exposing child transcripts.
 
@@ -414,6 +464,8 @@ runs:          agent_id, agent_revision, root_id
 delegations:   id, root_id, parent/child conversation IDs,
                sender/recipient IDs, source run/action IDs, status,
                result_message_id, error, timestamps
+lineages:      root_id, root_conversation_id, status,
+               latest_final_root_message_id, error, timestamps
 ```
 
 `(source_run_id, source_action_id)` uniquely identifies a delegation and
@@ -428,14 +480,16 @@ solely for compatibility.
 ## Implementation sequence
 
 1. **Identity:** persist agent, revision, workspace, parent, and depth; resolve
-   one default definition; carry identity through claims and run requests.
+   one default definition; validate workspace resource mappings; carry
+   identity through claims and run requests.
 2. **Composition:** build brain, tools, environment, limits, and credential
-   grants per agent; support agent selection; reject missing revisions.
+   grants per agent; support agent selection; reject missing revisions and
+   hands that can reach the native runtime API.
 3. **Delegation:** add source/lineage metadata, host tools, atomic child
-   creation with an active-ancestry fence, waiting, result routing, terminal
-   cleanup, cancellation, mixed-conversation event publication, policy,
-   bounds, and concurrency enforcement.
-4. **Client completion:** project root-lineage status, publish its event, and
+   creation with active-run and lineage fences, waiting, result routing,
+   terminal cleanup, cancellation, mixed-conversation event publication,
+   policy, bounds, and concurrency enforcement.
+4. **Client completion:** persist root-lineage status, publish its event, and
    make the HTTP client follow a lineage through its terminal answer.
 5. **Triggers:** adapt schedules, webhooks, connectors, and approvals to the
    same submission envelope without changing `Core`; durable approval
@@ -456,11 +510,19 @@ Deterministic tests, requiring no provider credentials or network, must prove:
   parent terminal delivery, with no automatic replay of interrupted tools;
 - failure and cancellation races produce exactly one terminal state and no
   runnable work in terminal child conversations, including queued results;
+- root cancellation fences in-flight callbacks and completion from a running
+  root with no ancestor delegation, and leaves unrelated lineages active;
 - a late delegate callback cannot create a child after cancellation or failure;
-- per-agent and workspace concurrency are enforced transactionally;
+- workspace IDs reject conflicting source mappings and local path aliases;
+  checkpoint reuse validates the stored source, while claim-time workspace
+  and per-agent exclusion remain transactional;
+- model-controlled hands cannot read another conversation through the native
+  runtime API in an eligible delegation-enabled composition;
 - child and parent events retain independent cursors and survive restart;
 - an early root response does not end the client wait while delegated work is
-  outstanding, and reconnect resumes the same lineage.
+  outstanding, and reconnect resumes the same lineage; and
+- a stopped run without a final response and an exhausted run cannot complete
+  a child delegation or root lineage with an empty answer.
 
 Black-box coverage should exercise two scripted agents through HTTP, SQLite,
 the scheduler, restart, and event replay.

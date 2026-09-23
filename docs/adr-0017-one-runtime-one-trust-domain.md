@@ -40,9 +40,10 @@ are implicitly scoped to their runtime.
 
 ### 2. Least privilege remains intra-domain
 
-Agent definitions can differ in tools, recipient allowlists, workspaces,
-network access, provider slots, and credential grants. Deterministic policy
-still limits confused-deputy behavior and accidental data movement.
+Under ADR-0016, agent definitions can differ in tools, recipient allowlists,
+workspaces, network access, provider slots, and credential grants.
+Deterministic policy then limits confused-deputy behavior and accidental data
+movement.
 
 These are least-privilege controls inside one domain, not hostile-tenant
 isolation. In-process host plugins are trusted, and isolating hands does not
@@ -80,19 +81,20 @@ scheduling, cache isolation, encryption, retention, and cross-tenant tests.
 
 ### 4. Preserve future-safe seams
 
-pons preserves the following seams without implementing tenancy:
+The current architecture provides these seams without implementing tenancy:
 
 - public IDs are opaque, not derived from usernames or paths;
-- stores, agent directories, environments, and authorization are injected;
+- stores and environments are injected;
 - `Core` has no process-global conversation or credential state;
-- credentials are explicit references and grants, not ambient data;
-- runtime objects have explicit ownership within their domain;
 - transport authentication stays outside the finite core;
-- one runtime is the natural export and deletion boundary; and
 - scheduler and event correctness are independent of UI and channel.
 
-These properties make isolated cells practical. They do not justify unused
-tenant vocabulary in local APIs.
+ADR-0016 requires an injected agent directory, explicit credential grants,
+and agent ownership metadata for conversations. These are implementation
+requirements for multi-agent work, not properties of the current runtime.
+Runtime-level export and deletion are future hosted-cell operations. The
+existing seams make isolated cells practical without adding unused tenant
+vocabulary to local APIs.
 
 ### 5. Security claims fail closed
 
@@ -113,9 +115,9 @@ or PostgreSQL migration alone is insufficient.
   before the agent model is validated.
 - **Allow exactly one human per runtime:** rejected because trusted teams,
   households, and channels can share one policy authority.
-- **Ignore hosting entirely:** rejected because opaque IDs, injected
-  infrastructure, explicit grants, and runtime-level export/deletion are cheap
-  seams with substantial future value.
+- **Ignore hosting entirely:** rejected because the current opaque IDs and
+  injected infrastructure, together with the planned explicit grants and
+  runtime-level export/deletion, give isolated cells a clear path.
 
 ## Consequences
 
