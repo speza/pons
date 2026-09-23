@@ -27,6 +27,10 @@ environments are explicit plugins or injected infrastructure.
   advisory.
 - `protocol/` is the shared JSON contract for in-process and external hands.
 
+![pons architecture showing where the brain, core, and hands run](docs/diagrams/pons-system.svg)
+
+[Diagram source](docs/diagrams/pons-system.html)
+
 ### Packages
 
 | Package | Role |
