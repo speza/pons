@@ -3,6 +3,7 @@ package httptransport
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -11,6 +12,77 @@ import (
 
 	ponsruntime "github.com/samperrin/pons/runtime"
 )
+
+func TestClientListsConversations(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/conversations" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[{"conversation_id":"one","workspace":"/workspace","created_at":"2026-09-21T00:00:00Z"}]`)
+	}))
+	defer server.Close()
+
+	conversations, err := (Client{BaseURL: server.URL}).ListConversations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conversations) != 1 || conversations[0].ID != "one" {
+		t.Fatalf("conversations = %+v", conversations)
+	}
+}
+
+func TestClientCreatesConversationWithEnvironment(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/conversations" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		var body struct {
+			Environment string `json:"environment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Environment != "seatbelt" {
+			t.Errorf("environment = %q", body.Environment)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(ponsruntime.Conversation{ID: "conversation-1", Environment: body.Environment})
+	}))
+	defer server.Close()
+
+	conversation, err := (Client{BaseURL: server.URL}).CreateConversationWithEnvironment(context.Background(), "seatbelt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conversation.Environment != "seatbelt" {
+		t.Fatalf("conversation = %+v", conversation)
+	}
+}
+
+func TestClientReadsRuntimeOptions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/options" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(HandlerOptions{Environments: []string{"none", "seatbelt"}, DefaultEnvironment: "seatbelt"})
+	}))
+	defer server.Close()
+
+	options, err := (Client{BaseURL: server.URL}).RuntimeOptions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.DefaultEnvironment != "seatbelt" || len(options.Environments) != 2 {
+		t.Fatalf("options = %+v", options)
+	}
+}
 
 func TestSendHydratesExistingConversationBeforeEvents(t *testing.T) {
 	var (

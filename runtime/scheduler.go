@@ -95,11 +95,13 @@ func (c *liveConversation) execute(
 		RunID:              run.ID,
 		InboundMessageID:   message.ID,
 		Workspace:          c.conversation.Workspace,
+		Environment:        c.conversation.Environment,
 		GitRepository:      c.conversation.GitRepository,
 		GitRevision:        c.conversation.GitRevision,
 		GitAllRepositories: c.conversation.GitAllRepositories,
 		Text:               messageText(message.Parts),
 		Messages:           history,
+
 		Emit: func(event RunEvent) error {
 			return c.emitRunEvent(run, event)
 		},

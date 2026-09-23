@@ -65,6 +65,10 @@ type Provider struct {
 }
 
 func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSession environment.HandsSession, startErr error) {
+	progress := spec.ReportProgress
+	if progress == nil {
+		progress = func(string) error { return nil }
+	}
 	cfg, err := p.config()
 	if err != nil {
 		return nil, err
@@ -101,6 +105,9 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 	if runID == "" {
 		return nil, errors.New("environment: durable E2B session requires a run ID")
 	}
+	if err := progress("Preparing workspace source…"); err != nil {
+		return nil, err
+	}
 	workspaceState, err := loadOrCreateWorkspace(
 		ctx,
 		store,
@@ -122,6 +129,9 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 		return nil, errors.New("environment: installation-wide Git access requires GitHub App authentication")
 	}
 	if p.GitCredentials != nil && (spec.WorkspacePlan.Strategy == environment.WorkspaceStrategyGit || spec.GitAllRepositories) {
+		if err := progress("Requesting Git access…"); err != nil {
+			return nil, err
+		}
 		p.debugf("workspace=%q requesting GitHub credentials scope=%s", workspaceID, gitScope(spec.GitAllRepositories))
 		credentials, err = p.GitCredentials.Credentials(ctx, spec.WorkspacePlan.SourceRef, spec.GitAllRepositories)
 		if err != nil {
@@ -130,6 +140,9 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 		maps.Copy(env, credentials.Environment())
 	}
 
+	if err := progress("Starting or reconnecting E2B sandbox…"); err != nil {
+		return nil, err
+	}
 	sandbox, resumed, err := p.acquireSandbox(ctx, client, cfg, workspaceID, runID, network)
 	if err != nil {
 		return nil, err
@@ -156,7 +169,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 			p.debugf("workspace=%q sandbox=%q restoring checkpoint=%s", workspaceID, sandbox.ID, workspaceState.CheckpointRef)
 		}
 		workspaceState, err = placeWorkspace(
-			ctx, client, sandbox, store, checkpoints, workspaceState, env, credentials, cfg.maxWorkspaceBytes, cfg.onError, p.OnDebug,
+			ctx, client, sandbox, store, checkpoints, workspaceState, env, credentials, cfg.maxWorkspaceBytes, cfg.onError, p.OnDebug, progress,
 		)
 		if err != nil {
 			return nil, errors.Join(err, cleanup())
@@ -217,6 +230,9 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 	})
 	if err != nil {
 		return nil, errors.Join(err, cleanup())
+	}
+	if err := progress("Starting agent tools…"); err != nil {
+		return nil, errors.Join(err, host.Close(), cleanup())
 	}
 	if err := host.Start(ctx); err != nil {
 		return nil, errors.Join(err, host.Close(), cleanup())

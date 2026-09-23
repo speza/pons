@@ -41,11 +41,13 @@ func (c Client) endpoint(path string) (string, error) {
 }
 
 func (c Client) CreateConversation(ctx context.Context, options ponsruntime.ConversationOptions) (ponsruntime.Conversation, error) {
+
 	endpoint, err := c.endpoint("/v1/conversations")
 	if err != nil {
 		return ponsruntime.Conversation{}, err
 	}
 	body, err := json.Marshal(options)
+
 	if err != nil {
 		return ponsruntime.Conversation{}, err
 	}
@@ -70,6 +72,58 @@ func (c Client) CreateConversation(ctx context.Context, options ponsruntime.Conv
 		return ponsruntime.Conversation{}, err
 	}
 	return conversation, nil
+}
+
+func (c Client) CreateConversationWithEnvironment(ctx context.Context, environment string) (ponsruntime.Conversation, error) {
+	return c.CreateConversation(ctx, ponsruntime.ConversationOptions{Environment: environment})
+}
+
+func (c Client) RuntimeOptions(ctx context.Context) (HandlerOptions, error) {
+	endpoint, err := c.endpoint("/v1/options")
+	if err != nil {
+		return HandlerOptions{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return HandlerOptions{}, err
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return HandlerOptions{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return HandlerOptions{}, responseError(resp)
+	}
+	var options HandlerOptions
+	if err := json.NewDecoder(resp.Body).Decode(&options); err != nil {
+		return HandlerOptions{}, err
+	}
+	return options, nil
+}
+
+func (c Client) ListConversations(ctx context.Context) ([]ponsruntime.Conversation, error) {
+	endpoint, err := c.endpoint("/v1/conversations")
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, responseError(resp)
+	}
+	var conversations []ponsruntime.Conversation
+	if err := json.NewDecoder(resp.Body).Decode(&conversations); err != nil {
+		return nil, err
+	}
+	return conversations, nil
 }
 
 func (c Client) Submit(ctx context.Context, conversationID, key string, parts []ponsruntime.TextPart) (ponsruntime.AcceptedMessage, error) {

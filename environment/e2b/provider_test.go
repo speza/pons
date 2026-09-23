@@ -246,7 +246,15 @@ func TestArchiveWorkspaceUsesSourceOnlyForInitialSeed(t *testing.T) {
 	}
 }
 
-func TestProvisionGitWorkspaceUsesImmutableRevisionAndPersistsCheckpoint(t *testing.T) {
+func TestProvisionGitWorkspaceUsesSelectedRevisionAndPersistsCheckpoint(t *testing.T) {
+	for _, revision := range []string{strings.Repeat("b", 40), "refs/heads/feature/work"} {
+		t.Run(revision, func(t *testing.T) {
+			testProvisionGitWorkspace(t, revision)
+		})
+	}
+}
+
+func testProvisionGitWorkspace(t *testing.T, revision string) {
 	remote := t.TempDir()
 	if err := os.Mkdir(filepath.Join(remote, ".git"), 0o700); err != nil {
 		t.Fatal(err)
@@ -284,8 +292,7 @@ func TestProvisionGitWorkspaceUsesImmutableRevisionAndPersistsCheckpoint(t *test
 	}))
 	defer server.Close()
 	store := &recordingStateStore{}
-	revision := strings.Repeat("b", 40)
-	var debugEvents []string
+	var debugEvents, progressStages []string
 	state, err := provisionGitWorkspace(
 		context.Background(),
 		&e2bClient{envdURL: server.URL, http: server.Client()},
@@ -301,6 +308,10 @@ func TestProvisionGitWorkspaceUsesImmutableRevisionAndPersistsCheckpoint(t *test
 		1<<20,
 		nil,
 		func(event string) { debugEvents = append(debugEvents, event) },
+		func(stage string) error {
+			progressStages = append(progressStages, stage)
+			return nil
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -321,6 +332,11 @@ func TestProvisionGitWorkspaceUsesImmutableRevisionAndPersistsCheckpoint(t *test
 	}
 	if strings.Contains(debug, "secret-token") {
 		t.Fatalf("Git credential leaked in debug events: %s", debug)
+	}
+	for _, stage := range []string{"Preparing Git workspace…", "Fetching repository…", "Creating work branch…", "Saving initial checkout…", "Downloading initial checkout…"} {
+		if !slices.Contains(progressStages, stage) {
+			t.Fatalf("missing progress stage %q: %v", stage, progressStages)
+		}
 	}
 }
 
@@ -362,6 +378,7 @@ func TestProvisionGitWorkspaceRedactsAuthenticatedFetchFailure(t *testing.T) {
 		credentials.Environment(),
 		credentials,
 		1<<20,
+		nil,
 		nil,
 		nil,
 	)

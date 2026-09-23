@@ -23,7 +23,11 @@ func provisionGitWorkspace(
 	limit int64,
 	onError func(error),
 	onDebug func(string),
+	progress func(string) error,
 ) (environment.WorkspaceState, error) {
+	if progress == nil {
+		progress = func(string) error { return nil }
+	}
 	commands := []struct {
 		step          string
 		command       string
@@ -40,6 +44,22 @@ func provisionGitWorkspace(
 	}
 
 	for _, command := range commands {
+		var stage string
+		switch command.step {
+		case "prepare":
+			stage = "Preparing Git workspace…"
+		case "git fetch":
+			stage = "Fetching repository…"
+		case "git checkout":
+			stage = "Creating work branch…"
+		case "archive initial checkout":
+			stage = "Saving initial checkout…"
+		}
+		if stage != "" {
+			if err := progress(stage); err != nil {
+				return environment.WorkspaceState{}, err
+			}
+		}
 		if command.step == "git fetch" {
 			debugE2B(onDebug, "workspace=%q sandbox=%q git fetch started", state.ID, sandbox.ID)
 		}
@@ -55,6 +75,9 @@ func provisionGitWorkspace(
 		}
 	}
 
+	if err := progress("Downloading initial checkout…"); err != nil {
+		return environment.WorkspaceState{}, err
+	}
 	body, err := stageWorkspaceArchive(func(out io.Writer) error {
 		return client.download(ctx, sandbox, workspaceCheckpointPath, out, limit)
 	})

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,9 @@ type Config struct {
 	Runner                Runner
 	PrepareConversation   func(ConversationOptions) (ConversationOptions, error)
 	MaxConcurrent         int
+	EnvironmentOptions    []string
+	DefaultEnvironment    string
+
 	// RepairInterval controls the low-frequency runnable-work reconciliation
 	// scan. Zero uses 30 seconds; wake signals remain the primary path.
 	RepairInterval time.Duration
@@ -78,13 +82,11 @@ func (m *Manager) CreateConversation(ctx context.Context, selected ConversationO
 	if err := m.checkOpen(); err != nil {
 		return Conversation{}, err
 	}
-	if selected.Workspace == "" && selected.GitRepository == "" {
-		return Conversation{}, fmt.Errorf("%w: workspace or Git repository is required", ErrInvalidConversation)
+	environment, err := m.environment(selected.Environment)
+	if err != nil {
+		return Conversation{}, err
 	}
-	if selected.Workspace != "" && selected.GitRepository != "" {
-		return Conversation{}, fmt.Errorf("%w: workspace and Git repository are mutually exclusive", ErrInvalidConversation)
-	}
-
+	selected.Environment = environment
 	if m.cfg.PrepareConversation != nil {
 		var err error
 		selected, err = m.cfg.PrepareConversation(selected)
@@ -92,18 +94,25 @@ func (m *Manager) CreateConversation(ctx context.Context, selected ConversationO
 			return Conversation{}, fmt.Errorf("%w: %w", ErrInvalidConversation, err)
 		}
 	}
-
+	if selected.Workspace == "" && selected.GitRepository == "" {
+		return Conversation{}, fmt.Errorf("%w: workspace or Git repository is required", ErrInvalidConversation)
+	}
+	if selected.Workspace != "" && selected.GitRepository != "" {
+		return Conversation{}, fmt.Errorf("%w: workspace and Git repository are mutually exclusive", ErrInvalidConversation)
+	}
 	value := Conversation{
 		ID:                 NewID(),
 		Workspace:          selected.Workspace,
 		GitRepository:      selected.GitRepository,
 		GitRevision:        selected.GitRevision,
 		GitAllRepositories: selected.GitAllRepositories,
+		Environment:        selected.Environment,
 		CreatedAt:          time.Now().UTC().Truncate(time.Microsecond),
 	}
 	value.WorkspaceLock = value.Workspace
 	if m.cfg.IndependentWorkspaces || selected.GitRepository != "" {
 		value.WorkspaceLock = value.ID
+
 	}
 
 	if err := m.store.CreateConversation(ctx, value); err != nil {
@@ -113,6 +122,29 @@ func (m *Manager) CreateConversation(ctx context.Context, selected ConversationO
 		return Conversation{}, err
 	}
 	return value, nil
+}
+
+func (m *Manager) environment(requested string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		requested = strings.TrimSpace(m.cfg.DefaultEnvironment)
+	}
+	if requested == "" || len(m.cfg.EnvironmentOptions) == 0 {
+		return requested, nil
+	}
+	if slices.Contains(m.cfg.EnvironmentOptions, requested) {
+		return requested, nil
+	}
+	return "", fmt.Errorf("%w: %q is not configured", ErrInvalidEnvironment, requested)
+}
+
+// Conversations returns the durable conversations without hydrating live
+// delivery state for dormant conversations.
+func (m *Manager) Conversations(ctx context.Context) ([]Conversation, error) {
+	if err := m.checkOpen(); err != nil {
+		return nil, err
+	}
+	return m.store.Conversations(ctx)
 }
 
 func (m *Manager) Submit(ctx context.Context, conversationID, key string, parts []TextPart) (AcceptedMessage, error) {

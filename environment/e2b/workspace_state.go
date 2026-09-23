@@ -114,9 +114,13 @@ func placeWorkspace(
 	limit int64,
 	onError func(error),
 	onDebug func(string),
+	progress func(string) error,
 ) (environment.WorkspaceState, error) {
 	if state.CheckpointRef == "" {
-		return provisionGitWorkspace(ctx, client, sandbox, store, checkpoints, state, env, credentials, limit, onError, onDebug)
+		return provisionGitWorkspace(ctx, client, sandbox, store, checkpoints, state, env, credentials, limit, onError, onDebug, progress)
+	}
+	if err := progress("Restoring workspace checkpoint…"); err != nil {
+		return environment.WorkspaceState{}, err
 	}
 
 	archive, err := checkpoints.WorkspaceCheckpoint(ctx, state.ID, state.CheckpointRef, limit)

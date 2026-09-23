@@ -113,10 +113,41 @@ func ValidatePlan(plan environment.WorkspacePlan) error {
 		return errors.New("environment: git/v1 source must be a credential-free HTTPS repository URL without query or fragment")
 	}
 
-	if !isFullGitObjectID(plan.BaseRevision) {
-		return errors.New("environment: git/v1 base revision must be a full 40-character SHA-1 commit ID")
+	if !isFullGitObjectID(plan.BaseRevision) && !validBranchRef(plan.BaseRevision) {
+		return errors.New("environment: git/v1 base revision must be a full 40-character SHA-1 commit ID or refs/heads/<branch>")
 	}
 	return nil
+}
+
+// BranchRef returns a fully qualified branch ref for a user-selected branch.
+func BranchRef(branch string) (string, error) {
+	ref := "refs/heads/" + branch
+	if !validBranchRef(ref) {
+		return "", errors.New("environment: invalid Git branch name")
+	}
+	return ref, nil
+}
+
+func validBranchRef(ref string) bool {
+	branch, ok := strings.CutPrefix(ref, "refs/heads/")
+	if !ok || branch == "" || len(branch) > 255 || branch == "HEAD" ||
+		strings.HasPrefix(branch, "/") || strings.HasSuffix(branch, "/") ||
+		strings.HasSuffix(branch, ".") || strings.Contains(branch, "..") ||
+		strings.Contains(branch, "@{") || strings.Contains(branch, "//") {
+		return false
+	}
+	for part := range strings.SplitSeq(branch, "/") {
+		if strings.HasPrefix(part, ".") || strings.HasPrefix(part, "-") ||
+			strings.HasSuffix(part, ".lock") || strings.HasSuffix(part, ".") {
+			return false
+		}
+	}
+	for _, char := range branch {
+		if char <= ' ' || char == 127 || strings.ContainsRune("~^:?*[\\", char) {
+			return false
+		}
+	}
+	return true
 }
 
 // BranchName derives an independent work branch from the logical workspace.

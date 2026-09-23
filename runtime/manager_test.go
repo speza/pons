@@ -132,6 +132,44 @@ func TestConversationUsesClientSelectedWorkspace(t *testing.T) {
 		Workspace: firstPath, GitRepository: "https://github.com/example/repo.git",
 	}); err == nil {
 		t.Fatal("conversation with both host and Git sources accepted")
+
+	}
+}
+
+func TestManagerPersistsConfiguredConversationEnvironment(t *testing.T) {
+	store, err := runtimesqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager, err := New(Config{
+		Store:              store,
+		Runner:             RunnerFunc(func(context.Context, RunRequest) (RunResult, error) { return RunResult{}, nil }),
+		EnvironmentOptions: []string{"none", "seatbelt"},
+		DefaultEnvironment: "seatbelt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+
+	workspace := t.TempDir()
+	defaultConversation, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultConversation.Environment != "seatbelt" {
+		t.Fatalf("default environment = %q", defaultConversation.Environment)
+	}
+	inProcess, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: workspace, Environment: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inProcess.Environment != "none" {
+		t.Fatalf("explicit environment = %q", inProcess.Environment)
+	}
+	if _, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: workspace, Environment: "unknown"}); !errors.Is(err, ponsruntime.ErrInvalidEnvironment) {
+		t.Fatalf("unknown environment error = %v", err)
 	}
 }
 
@@ -231,6 +269,7 @@ func TestRepairScanFindsWorkAfterLostWake(t *testing.T) {
 	defer manager.Close()
 	waitUntil(t, func() bool { return store.claimCalls.Load() > 0 }, "initial runnable check did not run")
 	conversation, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,6 +514,7 @@ func TestConversationSerializesMessagesAndDeduplicates(t *testing.T) {
 	})
 	m := testManager(t, runner)
 	conversation, err := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,6 +571,7 @@ func TestBackgroundStoreFailureIsReported(t *testing.T) {
 	}
 	defer manager.Close()
 	conversation, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -561,6 +602,7 @@ func TestSnapshotThenEventsHasNoDurableGap(t *testing.T) {
 		}
 	}))
 	conversation, _ := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+
 	view, err := m.View(context.Background(), conversation.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -615,6 +657,7 @@ func TestTransientDeltaIsLiveOnlyAndDoesNotAdvanceCursor(t *testing.T) {
 		}
 	}))
 	conversation, _ := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+
 	ctx := t.Context()
 	stream, err := m.Subscribe(ctx, conversation.ID, 0)
 	if err != nil {
@@ -681,6 +724,7 @@ func TestToolLifecycleUsesEntityUpserts(t *testing.T) {
 		return RunResult{Answer: "hello " + request.Text}, nil
 	}))
 	conversation, err := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -720,6 +764,7 @@ func TestFailedRunIsDurableAndNotRetried(t *testing.T) {
 		return RunResult{}, errors.New("failed after intent")
 	}))
 	conversation, _ := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+
 	_, err := m.Submit(context.Background(), conversation.ID, "once", []TextPart{{Type: "text", Text: "go"}})
 	if err != nil {
 		t.Fatal(err)

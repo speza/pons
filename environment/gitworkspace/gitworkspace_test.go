@@ -20,6 +20,11 @@ func TestValidatePlan(t *testing.T) {
 	if err := ValidatePlan(valid); err != nil {
 		t.Fatalf("valid Git plan rejected: %v", err)
 	}
+	branchPlan := valid
+	branchPlan.BaseRevision = "refs/heads/feature/work"
+	if err := ValidatePlan(branchPlan); err != nil {
+		t.Fatalf("valid branch plan rejected: %v", err)
+	}
 	for name, mutate := range map[string]func(*environment.WorkspacePlan){
 		"credential in URL": func(plan *environment.WorkspacePlan) {
 			plan.SourceRef = "https://token@github.com/example/project.git"
@@ -29,6 +34,8 @@ func TestValidatePlan(t *testing.T) {
 		},
 		"mutable revision": func(plan *environment.WorkspacePlan) { plan.BaseRevision = "main" },
 		"SHA-256 revision": func(plan *environment.WorkspacePlan) { plan.BaseRevision = strings.Repeat("a", 64) },
+		"invalid branch":   func(plan *environment.WorkspacePlan) { plan.BaseRevision = "refs/heads/../main" },
+		"branch option":    func(plan *environment.WorkspacePlan) { plan.BaseRevision = "refs/heads/-bad" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			plan := valid
@@ -37,6 +44,18 @@ func TestValidatePlan(t *testing.T) {
 				t.Fatal("invalid Git plan was accepted")
 			}
 		})
+	}
+}
+
+func TestBranchRef(t *testing.T) {
+	ref, err := BranchRef("feature/work")
+	if err != nil || ref != "refs/heads/feature/work" {
+		t.Fatalf("branch ref = %q, err = %v", ref, err)
+	}
+	for _, branch := range []string{"", "HEAD", "../main", "/main", "main.lock", "feature//work", "-bad"} {
+		if _, err := BranchRef(branch); err == nil {
+			t.Fatalf("invalid branch %q accepted", branch)
+		}
 	}
 }
 

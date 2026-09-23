@@ -11,6 +11,7 @@ import (
 
 var ErrNotFound = errors.New("runtime: conversation not found")
 var ErrInvalidConversation = errors.New("runtime: invalid conversation options")
+var ErrInvalidEnvironment = errors.New("runtime: invalid execution environment")
 
 // NewID returns a random opaque identifier suitable for runtime entities.
 func NewID() string {
@@ -27,6 +28,7 @@ func NewID() string {
 type Store interface {
 	CreateConversation(context.Context, Conversation) error
 	Conversation(context.Context, string) (Conversation, error)
+	Conversations(context.Context) ([]Conversation, error)
 	Accept(context.Context, string, string, []TextPart) (AcceptedMessage, []Event, error)
 	// ClaimRunnable atomically selects and claims the oldest queued submission
 	// whose conversation and workspace have no active run. It returns nil when

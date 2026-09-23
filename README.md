@@ -126,6 +126,39 @@ per state directory; additional clients connect to that server. The server
 listens on loopback (`127.0.0.1:7337`) and refuses non-loopback addresses.
 Clients can resume conversations by ID.
 
+### Web UI
+
+The server embeds the built React client. From a fresh checkout, build it and
+start the server after setting up a provider as shown in [Quick start](#quick-start):
+
+```sh
+make web-install
+make web-build
+go run ./cmd/pons serve --debug
+```
+
+Open `http://127.0.0.1:7337/` in a browser. Choose a sandbox and a source,
+then select **New conversation**. With E2B, the Git source takes a
+credential-free HTTPS repository URL and either a branch name or a full
+40-character commit SHA. Pons uses the branch tip when it first provisions the
+workspace, then creates a separate work branch. E2B can also upload a host
+directory as the initial workspace. In-process and Seatbelt conversations use
+a host directory.
+
+For a host directory, enter its **absolute path on the server host** (for
+example, `/Users/you/projects/my-project`). The path must exist inside
+`workspace_root`, which defaults to the server user's home directory. Set
+`"workspace_root"` in `~/.pons/config.json` if your projects live elsewhere.
+
+The browser uses the same HTTP/SSE runtime API as the CLI. Frontend source is
+in [`web/`](web/); run `make web-build` after changing it so the server embeds
+the new assets.
+
+When the server is started with `-sandbox seatbelt` or `-sandbox e2b`, the web
+client lets each new conversation choose between the in-process tools and the
+configured sandbox provider. The choice is stored on the conversation and
+applies to its future runs.
+
 ## Hands, sandboxes, and external plugins
 
 By default, built-in tools run in-process. On macOS, Seatbelt can place the
@@ -157,6 +190,8 @@ go run ./cmd/pons client -i \
   -git-repository https://github.com/OWNER/REPOSITORY.git \
   -git-revision FULL_COMMIT_SHA
 ```
+
+Use `-git-branch main` instead of `-git-revision` to start from a remote branch.
 
 New conversations from the same repository still get separate checkouts.
 The [Git workspace guide](docs/git-workspaces.md) covers GitHub App setup,
@@ -213,5 +248,5 @@ driver, and the standard-library HTTP stack.
 
 - Stream text and partial tool-output observations through `OnEvent`.
 - Add a local Linux execution-environment provider and incremental remote workspace sync.
-- Support per-run environments in the long-lived runtime.
+- Support per-run environment overrides in the long-lived runtime.
 - Add branching and `go install`-able releases.

@@ -166,6 +166,40 @@ func TestTimestampColumnsUseIntegerStorage(t *testing.T) {
 	}
 }
 
+func TestConversationsAreReturnedNewestFirst(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	old := ponsruntime.Conversation{
+		ID: "old", Workspace: "/old", Environment: "none",
+		CreatedAt: time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC),
+	}
+	newest := ponsruntime.Conversation{
+		ID: "new", Workspace: "/new", Environment: "e2b",
+		CreatedAt: time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC),
+	}
+	if err := store.CreateConversation(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateConversation(ctx, newest); err != nil {
+		t.Fatal(err)
+	}
+	conversations, err := store.Conversations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conversations) != 2 || conversations[0].ID != newest.ID || conversations[1].ID != old.ID {
+		t.Fatalf("conversations = %+v", conversations)
+	}
+	if conversations[0].Environment != "e2b" || conversations[1].Environment != "none" {
+		t.Fatalf("conversation environments = %+v", conversations)
+	}
+}
+
 func TestEnvironmentStateRoundTripAndExpiry(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {

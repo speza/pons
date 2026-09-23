@@ -158,6 +158,7 @@ type RunRequest struct {
 	RunID              string
 	InboundMessageID   string
 	Workspace          string
+	Environment        string
 	GitRepository      string
 	GitRevision        string
 	GitAllRepositories bool
@@ -198,6 +199,7 @@ type Conversation struct {
 	ID                 string    `json:"conversation_id"`
 	Workspace          string    `json:"workspace"`
 	WorkspaceLock      string    `json:"-"`
+	Environment        string    `json:"environment,omitempty"`
 	GitRepository      string    `json:"git_repository,omitempty"`
 	GitRevision        string    `json:"git_revision,omitempty"`
 	GitAllRepositories bool      `json:"git_all_repositories,omitempty"`
@@ -206,6 +208,7 @@ type Conversation struct {
 
 type ConversationOptions struct {
 	Workspace          string `json:"workspace,omitempty"`
+	Environment        string `json:"environment,omitempty"`
 	GitRepository      string `json:"git_repository,omitempty"`
 	GitRevision        string `json:"git_revision,omitempty"`
 	GitAllRepositories bool   `json:"git_all_repositories,omitempty"`

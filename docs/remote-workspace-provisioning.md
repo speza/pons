@@ -19,7 +19,7 @@ placement identity  replaceable VM currently hosting that workspace
 ```
 
 The runtime conversation ID currently supplies the workspace identity. Several
-workspaces may use the same source and immutable base revision without sharing
+workspaces may use the same source and base selector without sharing
 mutable state.
 
 ## Durable resources
@@ -164,7 +164,7 @@ A Git workspace uses the same logical workspace and placement model:
 ```text
 strategy        git/v1
 source_ref      trusted repository configuration ID
-base_revision   immutable initial commit
+base_revision   full initial commit ID or refs/heads/<branch>
 checkpoint_ref  latest durable recovery state
 ```
 
@@ -192,16 +192,17 @@ A first Git implementation may use a pushed commit as its durable checkpoint
 when the tree is clean. Dirty or unpushed state must either be captured by a
 host-owned blob checkpoint or explicitly reported as non-durable.
 
-The implemented initial slice accepts a credential-free HTTPS repository URL
-and a full 40-character SHA-1 commit ID. GitHub repositories use SHA-1 object
-IDs today; SHA-256 repositories are outside this initial contract because their
+The implemented Git slice accepts a credential-free HTTPS repository URL and
+either a full 40-character SHA-1 commit ID or a fully qualified branch ref.
+The branch tip is captured at first provisioning. GitHub repositories use
+SHA-1 object IDs today; SHA-256 repositories are outside this initial contract because their
 object format must be selected when the local repository is initialized. On
 first placement the provider:
 
 ```text
 create E2B VM
   -> initialize an empty Git repository in the workspace
-  -> fetch only the configured immutable commit
+  -> fetch the configured commit or branch tip
   -> check it out on an independent pons/<workspace>/work branch
   -> persist a bounded host-owned archive checkpoint
   -> record the logical workspace
@@ -270,7 +271,7 @@ installation token with Contents write and Metadata read permissions. The
 token is restricted to the conversation's primary repository by default.
 An explicit cross-repository option requests access to every repository in the
 installation, allowing the agent to clone more repositories during its run.
-Each conversation stores its own primary source and pinned commit, so one server
+Each conversation stores its own primary source and base selector, so one server
 can place independent workspaces for different repositories. Only the
 installation token crosses into the microVM, through
 transient Git process configuration. The App private key never leaves the
