@@ -2,6 +2,7 @@ import {
   Fragment,
   type FormEvent,
   type KeyboardEvent,
+  type Ref,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -156,6 +157,7 @@ function App() {
   const [toolProgress, setToolProgress] = useState<Record<string, string>>({});
   const [followingChat, setFollowingChat] = useState(true);
   const messageScrollRef = useRef<HTMLElement | null>(null);
+  const setupLogRef = useRef<HTMLDetailsElement | null>(null);
   const shouldFollowChat = useRef(true);
   const [runtimeOptions, setRuntimeOptions] = useState<RuntimeOptions>({
     environments: ["none"],
@@ -366,6 +368,18 @@ function App() {
     }
     return grouped;
   }, [view?.environment_events]);
+  const firstSetupMessageId = visibleMessages.find(
+    (message) => message.role === "user" && environmentLogsByMessage.has(message.id),
+  )?.id;
+
+  const jumpToSetup = () => {
+    const log = setupLogRef.current;
+    if (!log) return;
+    log.open = true;
+    shouldFollowChat.current = false;
+    setFollowingChat(false);
+    log.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
 
   const createNewConversation = async () => {
     setCreating(true);
@@ -603,6 +617,11 @@ function App() {
             <h2>{activeConversation ? `Conversation ${shortId(activeConversation.conversation_id)}` : "Welcome to pons"}</h2>
           </div>
           <div className="conversation-header-meta">
+            {firstSetupMessageId && (
+              <button className="setup-jump" type="button" onClick={jumpToSetup}>
+                View setup ↑
+              </button>
+            )}
             {activeConversation && (
               <span className="environment-pill">
                 {environmentLabel(activeConversation.environment || runtimeOptions.default_environment)}
@@ -665,6 +684,7 @@ function App() {
                     <EnvironmentSetupLog
                       entries={environmentLogsByMessage.get(message.id)!}
                       active={view?.active_run?.inbound_message_id === message.id}
+                      elementRef={message.id === firstSetupMessageId ? setupLogRef : undefined}
                     />
                   )}
                 </Fragment>
@@ -711,11 +731,15 @@ function App() {
   );
 }
 
-function EnvironmentSetupLog({ entries, active }: { entries: RuntimeEvent[]; active: boolean }) {
+function EnvironmentSetupLog({ entries, active, elementRef }: {
+  entries: RuntimeEvent[];
+  active: boolean;
+  elementRef?: Ref<HTMLDetailsElement>;
+}) {
   const [expanded, setExpanded] = useState(true);
   const stepInProgress = active && entries.at(-1)?.environment_progress?.step !== "sandbox.ready";
   return (
-    <details className="setup-log" open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
+    <details ref={elementRef} className="setup-log" open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
       <summary>
         <span className="setup-log-title">Environment setup</span>
         <span className="setup-log-count">{entries.length} {entries.length === 1 ? "step" : "steps"}</span>
