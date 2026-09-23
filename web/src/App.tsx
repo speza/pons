@@ -27,6 +27,7 @@ import type {
   MessagePart,
   RuntimeOptions,
   RuntimeEvent,
+  Submission,
   ToolCall,
   ToolResult,
 } from "./types";
@@ -368,6 +369,13 @@ function App() {
     }
     return grouped;
   }, [view?.environment_events]);
+  const failedSubmissionsByMessage = useMemo(() => {
+    const failures = new Map<string, Submission>();
+    for (const submission of view?.submissions ?? []) {
+      if (submission.status === "failed") failures.set(submission.message_id, submission);
+    }
+    return failures;
+  }, [view?.submissions]);
   const firstSetupMessageId = visibleMessages.find(
     (message) => message.role === "user" && environmentLogsByMessage.has(message.id),
   )?.id;
@@ -679,6 +687,7 @@ function App() {
                     toolProgress={toolProgress}
                     toolCallsByKey={toolCallsByKey}
                     toolResultsByKey={toolResultsByKey}
+                    failure={message.role === "user" ? failedSubmissionsByMessage.get(message.id) : undefined}
                   />
                   {message.role === "user" && environmentLogsByMessage.has(message.id) && (
                     <EnvironmentSetupLog
@@ -760,12 +769,13 @@ function EnvironmentSetupLog({ entries, active, elementRef }: {
 }
 
 function MessageBubble({
-  message, toolProgress, toolCallsByKey, toolResultsByKey,
+  message, toolProgress, toolCallsByKey, toolResultsByKey, failure,
 }: {
   message: Message;
   toolProgress: Record<string, string>;
   toolCallsByKey: Map<string, ToolCall>;
   toolResultsByKey: Map<string, ToolResult>;
+  failure?: Submission;
 }) {
   const role = message.role === "user" ? "user" : message.role === "tool" ? "tool" : "assistant";
   return (
@@ -788,6 +798,12 @@ function MessageBubble({
             />
           ))}
         </div>
+        {failure && (
+          <div className="run-failure" role="alert">
+            <strong>Run failed</strong>
+            <span>{failure.error || "The run failed before pons could respond."}</span>
+          </div>
+        )}
       </div>
     </article>
   );

@@ -95,6 +95,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .message--user .message-label { color: #9db3ac; }
 .message-content { color: var(--text); font-size: 14px; line-height: 1.65; }
 .message--user .message-content { padding: 12px 14px; border: 1px solid #315345; border-radius: 14px 4px 14px 14px; background: #14251f; }
+.run-failure { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid #633b42; border-radius: 9px; color: #ffd0d0; background: #2b1b22; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .message--draft .message-content { color: #b9c8d2; }
 .text-part { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .text-part + .text-part { margin-top: 11px; }

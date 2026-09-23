@@ -27,3 +27,5 @@ logs reopen expanded after a refresh, keep their full height as the conversation
 grows, and can be collapsed manually.
 The conversation header links back to the first setup log when later messages
 have moved it out of view.
+Failed runs show their saved error beneath the message that started the run,
+including after a refresh.

@@ -34,7 +34,7 @@ func TestClientListsConversations(t *testing.T) {
 	}
 }
 
-func TestClientCreatesConversationWithEnvironment(t *testing.T) {
+func TestClientCreatesConversationWithSourceAndEnvironment(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/conversations" {
 			t.Errorf("request = %s %s", r.Method, r.URL.Path)
@@ -43,19 +43,22 @@ func TestClientCreatesConversationWithEnvironment(t *testing.T) {
 		}
 		var body struct {
 			Environment string `json:"environment"`
+			Workspace   string `json:"workspace"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if body.Environment != "seatbelt" {
-			t.Errorf("environment = %q", body.Environment)
+		if body.Environment != "seatbelt" || body.Workspace != "/workspace" {
+			t.Errorf("conversation selection = %+v", body)
 		}
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(ponsruntime.Conversation{ID: "conversation-1", Environment: body.Environment})
 	}))
 	defer server.Close()
 
-	conversation, err := (Client{BaseURL: server.URL}).CreateConversationWithEnvironment(context.Background(), "seatbelt")
+	conversation, err := (Client{BaseURL: server.URL}).CreateConversation(context.Background(), ponsruntime.ConversationOptions{
+		Environment: "seatbelt", Workspace: "/workspace",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

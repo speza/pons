@@ -74,10 +74,6 @@ func (c Client) CreateConversation(ctx context.Context, options ponsruntime.Conv
 	return conversation, nil
 }
 
-func (c Client) CreateConversationWithEnvironment(ctx context.Context, environment string) (ponsruntime.Conversation, error) {
-	return c.CreateConversation(ctx, ponsruntime.ConversationOptions{Environment: environment})
-}
-
 func (c Client) RuntimeOptions(ctx context.Context) (HandlerOptions, error) {
 	endpoint, err := c.endpoint("/v1/options")
 	if err != nil {
