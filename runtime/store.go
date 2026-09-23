@@ -10,6 +10,7 @@ import (
 )
 
 var ErrNotFound = errors.New("runtime: conversation not found")
+var ErrInvalidConversation = errors.New("runtime: invalid conversation options")
 
 // NewID returns a random opaque identifier suitable for runtime entities.
 func NewID() string {

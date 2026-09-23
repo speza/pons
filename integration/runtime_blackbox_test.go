@@ -50,7 +50,7 @@ func exerciseRuntime(t *testing.T, seatbelt bool) {
 		t.Fatalf("health body = %q", body)
 	}
 
-	conversation := createConversation(t, server.URL())
+	conversation := createConversation(t, server.URL(), workspace)
 	stream := openSSE(t, server.URL(), conversation.ID, 0)
 	accepted := submitMessage(t, server.URL(), conversation.ID, "first-attempt", "Read the fixture file and report what it contains.")
 	events, answer := waitForFinal(t, stream, accepted.InboundMessageID)
@@ -179,7 +179,7 @@ func startRuntimeServer(t *testing.T, ponsBinary, handsBinary, providerURL, work
 		"-provider", "openai",
 		"-model", "blackbox-test",
 		"-base-url", providerURL,
-		"-workspace", workspace,
+		"-workspace-root", workspace,
 		"-state-dir", stateDir,
 		"-addr", "127.0.0.1:0",
 		"-max-turns", "4",
@@ -211,10 +211,13 @@ func startRuntimeServer(t *testing.T, ponsBinary, handsBinary, providerURL, work
 			server.stderrBuf.WriteString(line)
 			server.stderrBuf.WriteByte('\n')
 			server.stderrMu.Unlock()
-			const marker = "runtime: http://"
-			if index := strings.Index(line, marker); index >= 0 {
+			var entry struct {
+				Message string `json:"msg"`
+				Address string `json:"address"`
+			}
+			if json.Unmarshal([]byte(line), &entry) == nil && entry.Message == "runtime listening" {
 				select {
-				case ready <- "http://" + strings.TrimSpace(line[index+len("runtime: http://"):]):
+				case ready <- "http://" + entry.Address:
 				default:
 				}
 			}
@@ -436,11 +439,15 @@ func getHealth(t *testing.T, baseURL string) string {
 	return strings.TrimSpace(string(body))
 }
 
-func createConversation(t *testing.T, baseURL string) ponsruntime.Conversation {
+func createConversation(t *testing.T, baseURL, workspace string) ponsruntime.Conversation {
 	t.Helper()
 	var conversation ponsruntime.Conversation
-	doJSON(t, http.MethodPost, baseURL+"/v1/conversations", []byte(`{}`), "", http.StatusCreated, &conversation)
-	if conversation.ID == "" || conversation.Workspace == "" {
+	doJSON(t, http.MethodPost, baseURL+"/v1/conversations", []byte(fmt.Sprintf(`{"workspace":%q}`, workspace)), "", http.StatusCreated, &conversation)
+	canonical, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conversation.ID == "" || conversation.Workspace != canonical {
 		t.Fatalf("created conversation = %+v", conversation)
 	}
 	return conversation

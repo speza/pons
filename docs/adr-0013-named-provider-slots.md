@@ -51,10 +51,11 @@ file lock so concurrent pons processes do not clobber each other's tokens.
 
 ### 4. Precedence: flags > project config > global config > defaults
 
-Durable settings live in `~/.pons/config.json` (global defaults) and
-`.pons.json` in the workspace (project overrides, per key). Explicit flags
-win over both. Decoding is strict — unknown keys, trailing data, and wrong
-types fail startup.
+Durable settings live in `~/.pons/config.json` (global defaults). Bundled mode
+also reads `.pons.json` in its current directory (project overrides, per key).
+A standalone server loads only global settings because each conversation may
+select a different workspace. Explicit flags win over file settings. Decoding
+is strict — unknown keys, trailing data, and wrong types fail startup.
 
 ## Alternatives considered
 

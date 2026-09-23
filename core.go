@@ -382,7 +382,7 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 		if finishIdx >= 0 {
 			run, finished = actions[:finishIdx], true
 			answer, _ = protocol.StringArg(actions[finishIdx].Args, "reason")
-			c.logf("[turn %d] brain signalled finish: %s", turn, answer)
+			c.logf("[turn %d] brain signalled finish: answer_chars=%d", turn, len(answer))
 		}
 		if len(run) > 0 {
 			parts, err := normalizeAssistantParts(response.Parts, run)
@@ -459,7 +459,7 @@ func (c *Core) Run(ctx context.Context, message string) (RunResult, error) {
 		}
 		obs.History = append(obs.History, turnLog)
 		if stopped {
-			c.logf("[turn %d] brain stopped: %s", turn, stopReason)
+			c.logf("[turn %d] brain stopped: reason_chars=%d", turn, len(stopReason))
 			if err := c.emit(Event{Type: EventStopped, Turn: turn, Text: stopReason}); err != nil {
 				return result, fmt.Errorf("event stopped: %w", err)
 			}

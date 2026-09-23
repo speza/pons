@@ -13,15 +13,17 @@ import (
 )
 
 type fakeRuntime struct {
-	view      ponsruntime.ConversationView
-	events    []ponsruntime.Event
-	after     uint64
-	created   ponsruntime.Conversation
-	accepted  ponsruntime.AcceptedMessage
-	submitted []ponsruntime.TextPart
+	view           ponsruntime.ConversationView
+	events         []ponsruntime.Event
+	after          uint64
+	created        ponsruntime.Conversation
+	accepted       ponsruntime.AcceptedMessage
+	submitted      []ponsruntime.TextPart
+	createdOptions ponsruntime.ConversationOptions
 }
 
-func (f *fakeRuntime) CreateConversation(context.Context) (ponsruntime.Conversation, error) {
+func (f *fakeRuntime) CreateConversation(_ context.Context, options ponsruntime.ConversationOptions) (ponsruntime.Conversation, error) {
+	f.createdOptions = options
 	return f.created, nil
 }
 
@@ -62,6 +64,33 @@ func TestHandlerReturnsConversationSnapshot(t *testing.T) {
 	body := recorder.Body.String()
 	if !strings.Contains(body, `"event_cursor":9`) || !strings.Contains(body, `"id":"message-1"`) {
 		t.Fatalf("snapshot body = %s", body)
+	}
+}
+
+func TestCreateConversationPassesGitSelection(t *testing.T) {
+	runtime := &fakeRuntime{created: ponsruntime.Conversation{ID: "session-1"}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/conversations", strings.NewReader(`{
+		"git_repository":"https://github.com/acme/a.git",
+		"git_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"git_all_repositories":true
+	}`))
+	recorder := httptest.NewRecorder()
+	Handler(runtime).ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusCreated ||
+		runtime.createdOptions.GitRepository != "https://github.com/acme/a.git" ||
+		runtime.createdOptions.GitRevision != strings.Repeat("a", 40) ||
+		!runtime.createdOptions.GitAllRepositories {
+		t.Fatalf("status = %d, options = %+v", recorder.Code, runtime.createdOptions)
+	}
+}
+
+func TestCreateConversationPassesHostWorkspace(t *testing.T) {
+	runtime := &fakeRuntime{created: ponsruntime.Conversation{ID: "session-1"}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/conversations", strings.NewReader(`{"workspace":"/projects/repo-a"}`))
+	recorder := httptest.NewRecorder()
+	Handler(runtime).ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusCreated || runtime.createdOptions.Workspace != "/projects/repo-a" {
+		t.Fatalf("status = %d, options = %+v", recorder.Code, runtime.createdOptions)
 	}
 }
 

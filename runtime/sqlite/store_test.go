@@ -13,7 +13,7 @@ import (
 )
 
 func TestOpenRejectsOlderExistingDatabase(t *testing.T) {
-	for _, statement := range []string{"PRAGMA user_version = 0", "PRAGMA user_version = 1"} {
+	for _, statement := range []string{"PRAGMA user_version = 0", "PRAGMA user_version = 1", "PRAGMA user_version = 2"} {
 		t.Run(statement, func(t *testing.T) {
 			stateDir := t.TempDir()
 			store, err := Open(stateDir)
@@ -48,6 +48,79 @@ func TestOpenConfiguresBusyTimeout(t *testing.T) {
 	}
 	if timeout <= 0 {
 		t.Fatalf("busy_timeout = %d", timeout)
+	}
+}
+
+func TestConversationGitSelectionSurvivesClaim(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	for _, selection := range []struct {
+		id, repository string
+		all            bool
+	}{
+		{"session-a", "https://github.com/acme/a.git", false},
+		{"session-b", "https://github.com/acme/b.git", true},
+		{"session-a-again", "https://github.com/acme/a.git", false},
+	} {
+		conversation := ponsruntime.Conversation{
+			ID: selection.id, Workspace: t.TempDir(), GitRepository: selection.repository,
+			GitRevision: strings.Repeat("a", 40), GitAllRepositories: selection.all,
+			CreatedAt: time.Now().UTC(),
+		}
+		if err := store.CreateConversation(ctx, conversation); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.Accept(ctx, selection.id, "first", []ponsruntime.TextPart{{Type: "text", Text: "work"}}); err != nil {
+			t.Fatal(err)
+		}
+		claim, err := store.ClaimRunnable(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if claim == nil || claim.Conversation.ID != selection.id ||
+			claim.Conversation.GitRepository != selection.repository ||
+			claim.Conversation.GitRevision != conversation.GitRevision ||
+			claim.Conversation.GitAllRepositories != selection.all {
+			t.Fatalf("claim = %+v, want selection %+v", claim, selection)
+		}
+		if _, _, err := store.FinishRun(ctx, claim.Run, "done"); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestIndependentRemoteWorkspacesCanBeClaimedTogether(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	seed := t.TempDir()
+	for _, id := range []string{"repo-a", "repo-b"} {
+		if err := store.CreateConversation(ctx, ponsruntime.Conversation{
+			ID: id, Workspace: seed, WorkspaceLock: id, CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.Accept(ctx, id, "first", []ponsruntime.TextPart{{Type: "text", Text: "work"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := store.ClaimRunnable(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.ClaimRunnable(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == nil || second == nil || first.Conversation.ID == second.Conversation.ID {
+		t.Fatalf("independent claims = %+v, %+v", first, second)
 	}
 }
 

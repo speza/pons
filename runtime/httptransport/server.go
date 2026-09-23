@@ -20,7 +20,7 @@ import (
 // Runtime is the transport-independent conversation surface required by the
 // native HTTP adapter.
 type Runtime interface {
-	CreateConversation(context.Context) (ponsruntime.Conversation, error)
+	CreateConversation(context.Context, ponsruntime.ConversationOptions) (ponsruntime.Conversation, error)
 	Submit(context.Context, string, string, []ponsruntime.TextPart) (ponsruntime.AcceptedMessage, error)
 	View(context.Context, string) (ponsruntime.ConversationView, error)
 	Subscribe(context.Context, string, uint64) (<-chan ponsruntime.Event, error)
@@ -69,18 +69,30 @@ func securityHeaders(next http.Handler) http.Handler {
 }
 
 func (s server) createConversation(w http.ResponseWriter, r *http.Request) {
+	var options ponsruntime.ConversationOptions
 	if r.Body != nil {
 		defer r.Body.Close()
-		var extra any
 		dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
-		if err := dec.Decode(&extra); err != nil && !errors.Is(err, io.EOF) {
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&options); err != nil && !errors.Is(err, io.EOF) {
 			writeAPIError(w, http.StatusBadRequest, "invalid JSON body")
 			return
 		}
+		var extra any
+		if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+			writeAPIError(w, http.StatusBadRequest, "conversation body contains trailing data")
+			return
+		}
 	}
-	conversation, err := s.runtime.CreateConversation(r.Context())
+	conversation, err := s.runtime.CreateConversation(r.Context(), options)
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		status := http.StatusInternalServerError
+		if errors.Is(err, ponsruntime.ErrInvalidConversation) {
+			status = http.StatusBadRequest
+		} else if errors.Is(err, ponsruntime.ErrClosed) {
+			status = http.StatusServiceUnavailable
+		}
+		writeAPIError(w, status, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusCreated, conversation)

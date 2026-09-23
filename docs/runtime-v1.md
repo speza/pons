@@ -273,7 +273,7 @@ transaction.
 
 The event outbox supports bounded catch-up between a snapshot and a live SSE
 subscription. It is not a second conversation history. Token deltas, tool
-progress, and heartbeats bypass the outbox and are transient.
+progress, run progress, and heartbeats bypass the outbox and are transient.
 
 The manager depends on the consumer-owned `runtime.Store` interface. Its
 operations describe atomic runtime transitions rather than SQL tables, so a
@@ -297,6 +297,9 @@ conversation. SQLite startup recovery assumes one exclusive manager and marks
 abandoned requested tools interrupted with an unknown outcome; it never
 silently repeats them. Multiple live processes require renewable leases,
 fencing on every run mutation, and cross-process runnable/outbox notification.
+The SQLite store holds an exclusive advisory lock on the state directory for
+its lifetime. A second process cannot open the same state while the first is
+running; after a process exits, the OS releases the lock for restart recovery.
 
 ### Implementation
 
@@ -316,12 +319,21 @@ with instructions to recreate the runtime state directory rather than migrated.
 ## HTTP API
 
 The first server binds to `127.0.0.1` and has no authentication. It must not
-bind publicly without a future authentication decision.
+bind publicly without a future authentication decision. It rejects non-loopback
+Host headers and browser Origin headers to reduce DNS rebinding exposure. Other
+processes running as the same user on the host remain trusted clients.
 
 ### Create a conversation
 
 ```http
 POST /v1/conversations
+Content-Type: application/json
+
+{
+  "git_repository": "https://github.com/OWNER/REPO.git",
+  "git_revision": "FULL_40_CHARACTER_COMMIT_ID",
+  "git_all_repositories": false
+}
 ```
 
 Response:
@@ -332,8 +344,15 @@ Response:
 }
 ```
 
-The server creates the canonical conversation in the runtime store. The agent
-is the single configured agent, `pons`.
+The server creates the canonical conversation in the runtime store. Git source
+and access options are immutable conversation metadata. Both repository fields
+must be set together; `git_all_repositories` explicitly grants access to every
+repository available to the server's GitHub App installation. Git conversations
+do not specify a host workspace. Local, Seatbelt, and E2B archive conversations
+instead provide `{"workspace":"/absolute/path/on/server"}`. The server
+validates that path against its configured root and state directory at creation
+and again before each run. It stores the canonical path so symlink aliases use
+the same workspace lock. The agent is the single configured agent, `pons`.
 
 ### Hydrate a conversation
 
@@ -379,6 +398,7 @@ Transient live events are:
 ```text
 assistant.delta
 tool.progress
+run.progress
 heartbeat
 ```
 
@@ -386,6 +406,11 @@ Transient events are never persisted in the durable event outbox and do not
 receive a replay guarantee or advance the durable cursor. The complete
 assistant message and terminal tool state replace any live draft or progress
 display.
+
+`run.progress` carries a `run_progress.stage` string describing preparation,
+readiness, or sandbox shutdown for the active run. It is scoped by
+`conversation_id`, `run_id`, and `inbound_message_id`. Clients use it for a
+live status display; a reconnect may miss earlier stages.
 
 Each durable event has a cursor plus correlation fields where applicable:
 

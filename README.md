@@ -64,46 +64,67 @@ go test ./...
 go run ./cmd/pons-demo
 ```
 
-Run with a provider:
+For a reusable setup, put server defaults in `~/.pons/config.json`:
+
+```json
+{
+  "provider": "codex"
+}
+```
+
+Log in once, then run a task:
 
 ```sh
-export ANTHROPIC_API_KEY=sk-ant-…
+go run ./cmd/pons -login
 go run ./cmd/pons -message "inspect this project"
-
-export OPENAI_API_KEY=sk-…
-go run ./cmd/pons -provider openai -message "inspect this project"
-go run ./cmd/pons -provider openai \
-  -base-url http://127.0.0.1:11434/v1 \
-  -message "inspect this project"
 ```
 
 The supported provider names are `anthropic`, `openai`, `codex`, and
-`openai-responses`. Codex uses a ChatGPT subscription:
+`openai-responses`. Codex uses a ChatGPT subscription. For a temporary
+provider override, use flags:
 
 ```sh
-go run ./cmd/pons -provider codex -login
-go run ./cmd/pons -provider codex -i
+export ANTHROPIC_API_KEY=sk-ant-…
+go run ./cmd/pons -provider anthropic -message "inspect this project"
 ```
+
+Bundled mode also reads `.pons.json` from its current directory. Explicit
+flags override config values. See [configuration](#configuration) for E2B and
+GitHub App settings.
 
 ## Long-lived runtime
 
-`serve` owns conversations and agent runs; `client` submits messages and
-consumes SSE events:
+Without a subcommand, `pons` runs the server and client in one process, so
+interactive output and server logs share a terminal. `serve` runs the server
+separately; `client` submits messages and consumes SSE events:
 
 ```sh
-go run ./cmd/pons serve -provider codex
-go run ./cmd/pons client -message "inspect this project"
+# Terminal 1
+go run ./cmd/pons serve --debug
+```
+
+```sh
+# Terminal 2
+go run ./cmd/pons client -i -workspace /path/to/project
 go run ./cmd/pons client -conversation <id> -message "continue"
 ```
 
-Runtime state is stored in SQLite at `<state-dir>/runtime.db` (under
-`~/.pons/runtime/` by default). The server keeps canonical messages and a
-durable event outbox, bounds active runs, serializes each conversation, and
-prevents simultaneous runs in one workspace. Clients resume from durable
-snapshots and cursors; retries can use `-idempotency-key`.
+The client selects a workspace when creating a conversation; the server does
+not select a project at startup. `client -workspace` defaults to the client's
+current directory. That path must exist on the server host and be inside
+`workspace_root` (the server user's home directory by default). Set
+`"workspace_root"` in the global config to allow other host paths. Git
+conversations select a repository and commit instead; see the
+[Git workspace guide](docs/git-workspaces.md).
 
-The v1 server listens on loopback (`127.0.0.1:7337`) and refuses non-loopback
-addresses.
+The server reads `~/.pons/config.json`. A standalone `serve` process does not
+read `.pons.json` from its startup directory. The loopback server trusts other
+local processes that can connect to it.
+
+Runtime state lives under `~/.pons/runtime/server/` by default. Run one server
+per state directory; additional clients connect to that server. The server
+listens on loopback (`127.0.0.1:7337`) and refuses non-loopback addresses.
+Clients can resume conversations by ID.
 
 ## Hands, sandboxes, and external plugins
 
@@ -118,42 +139,29 @@ go run ./cmd/pons -provider codex -sandbox seatbelt \
 ```
 
 E2B can run the same hands protocol in a remote Linux sandbox. Build the
-pinned template once (requires `E2B_API_KEY` and Node/npm), then select it:
+template once (requires `E2B_API_KEY` and Node/npm), then configure the server
+as shown in the [Git workspace guide](docs/git-workspaces.md):
 
 ```sh
 make e2b-template
 make smoke-e2b
-go run ./cmd/pons -provider codex -sandbox e2b \
-  -e2b-template pons-hands \
-  -message "inspect this project"
 ```
 
-To remove retained pons sandboxes manually, run `make cleanup-e2b`; use
-`./scripts/cleanup-e2b.sh --dry-run` to inspect matches first. The default is
-scoped to the `pons-hands` template; `make cleanup-e2b-all` explicitly targets
-all running and paused sandboxes visible to the API key.
+Run `go run ./cmd/pons serve --debug` after configuring the server.
 
-The E2B API key remains on the host, internet access is disabled unless
-`-sandbox-network` is set, and the local workspace is used only to seed a new
-logical workspace. Bounded checkpoints are stored under the runtime state
-directory after every run; the source checkout is never replaced. Workspace
-metadata and sandbox placement are persisted separately in SQLite, so a
-workspace survives sandbox deletion and can be restored in a new VM. The state
-directory must remain outside the source workspace; pons rejects unsafe nested
-configuration. The immutable base and latest checkpoint are retained while
-superseded intermediate checkpoints are pruned. Idle sandboxes are deleted
-after `-sandbox-idle-timeout` (10 minutes by default).
-If hands stops cleanly but checkpointing fails, the sandbox is quarantined for
-manual recovery for one hour, not deleted immediately. The error includes its
-ID and deadline. New runs for that workspace are blocked during that window;
-use E2B's dashboard or SDK to copy `/home/user/pons-workspace` to a safe location
-before the deadline. Do not run the cleanup scripts on a sandbox being recovered.
-There is no automatic checkpoint retry or early release command yet. After
-expiry, cleanup removes the sandbox and future runs restore the last successful
-checkpoint. If metadata or provider timeout updates also fail, the error warns
-that the recovery window could be shorter. Unexpired active placements after
-a crash are likewise protected until their recorded expiry.
-The initial E2B backend does not support external plugin manifests.
+Each client can create an independent checkout from a repository and full
+commit ID:
+
+```sh
+go run ./cmd/pons client -i \
+  -git-repository https://github.com/OWNER/REPOSITORY.git \
+  -git-revision FULL_COMMIT_SHA
+```
+
+New conversations from the same repository still get separate checkouts.
+The [Git workspace guide](docs/git-workspaces.md) covers GitHub App setup,
+cross-repository access, checkpoints, recovery, and cleanup. The initial E2B
+backend does not support external plugin manifests.
 
 External tools are enabled explicitly with a manifest; they are never
 discovered implicitly. Example providers are in
@@ -162,18 +170,19 @@ discovered implicitly. Example providers are in
 [external plugin protocol](docs/external-plugin-protocol.md) and
 [hands environment design](docs/hands-environment-v1.md) for details.
 
-Useful flags include `-workspace`, `-state-dir`, `-max-turns`,
-`-compact-chars`, repeatable `-plugin`, `-plugin-path`, `-sandbox`,
-`-hands-command`, `-e2b-template`, `-e2b-hands-path`,
-`-sandbox-idle-timeout`, `-fallback`, and `-debug`.
-
 ## Configuration
 
-Defaults can be stored in `~/.pons/config.json`; `.pons.json` in the workspace
-overrides them, and explicit flags win. Configuration supports provider/model
-settings, runtime limits, tool output limits, named provider slots, and
-failover. Use repeatable `-fallback provider[:model]` flags for a temporary
-failover chain.
+Put stable server settings in `~/.pons/config.json`; use flags for a particular
+conversation or temporary override. Bundled mode also reads `.pons.json` in
+its current directory. A standalone server only reads the global file.
+Configuration supports provider/model settings, runtime limits, tool output
+limits, named provider slots, and failover. Use repeatable
+`-fallback provider[:model]` flags for a temporary failover chain.
+
+The [Git workspace guide](docs/git-workspaces.md) has the complete E2B and
+GitHub App config example. Keep credentials in the global file, not in a
+repository's `.pons.json`. Client commands select the repository and revision
+per conversation.
 
 Codex credentials are stored with restrictive permissions in
 `~/.pons/auth.json`. Multiple named credentials and provider slots are

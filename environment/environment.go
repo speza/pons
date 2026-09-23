@@ -37,6 +37,16 @@ type ResourceLimits struct {
 	MaxConcurrency     int
 }
 
+// WorkspacePlan selects provider-controlled provisioning for a logical
+// workspace. SourceRef is a non-secret source identifier; for git/v1 it is a
+// credential-free HTTPS repository URL. BaseRevision is an immutable commit.
+// A zero plan preserves the provider's archive/v1 behavior.
+type WorkspacePlan struct {
+	Strategy     WorkspaceStrategy
+	SourceRef    string
+	BaseRevision string
+}
+
 // Spec is the explicit policy and launch input for one hands environment.
 // WorkspaceID is the independent logical workspace identity. WorkspacePath is
 // the host-local path used directly by local providers or once as an archive
@@ -44,14 +54,16 @@ type ResourceLimits struct {
 // Environment is a clean, explicit list of KEY=VALUE entries; the parent
 // environment is never inherited.
 type Spec struct {
-	WorkspaceID   string
-	WorkspacePath string
-	RunID         string
-	Command       []string
-	ReadOnly      []string
-	Network       NetworkPolicy
-	Environment   []string
-	Limits        ResourceLimits
+	WorkspaceID        string
+	WorkspacePath      string
+	RunID              string
+	Command            []string
+	ReadOnly           []string
+	Network            NetworkPolicy
+	Environment        []string
+	Limits             ResourceLimits
+	WorkspacePlan      WorkspacePlan
+	GitAllRepositories bool
 }
 
 // Metadata identifies the effective backend and policy for audit and UI use.

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -97,9 +96,9 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 	execution := &recordingEnvironment{specs: make(chan environment.Spec, 2)}
 	var debugLog bytes.Buffer
 	runner := &agentRunner{opts: serverOptions{
-		Workspace:   workspace,
 		MaxTurns:    3,
 		Debug:       true,
+		Sandbox:     "e2b",
 		Environment: execution,
 		EnvironmentSpec: environment.Spec{
 			Command: []string{"/test/pons-hands"},
@@ -107,17 +106,24 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 		Brain: llm.Config{
 			Provider: "openai", Model: "test", APIKey: "test", BaseURL: provider.URL + "/v1",
 		},
-	}, logger: log.New(&debugLog, "", 0)}
+	}, logger: newServerLogger(&debugLog, true)}
 	requestNumber := 0
 	var history []ponsruntime.Message
+	var progress []string
 	request := func(text string) ponsruntime.RunRequest {
 		requestNumber++
 		inboundID := fmt.Sprintf("inbound-%d", requestNumber)
 		return ponsruntime.RunRequest{
 			ConversationID: "conversation-1", InboundMessageID: inboundID,
-			RunID: fmt.Sprintf("run-%d", requestNumber), Workspace: workspace, Text: text,
+			RunID: fmt.Sprintf("run-%d", requestNumber), Text: text,
+			GitRepository: "https://github.com/acme/a.git", GitRevision: strings.Repeat("a", 40),
 			Messages: append([]ponsruntime.Message(nil), history...),
-			Emit:     func(ponsruntime.RunEvent) error { return nil },
+			Emit: func(event ponsruntime.RunEvent) error {
+				if event.Type == ponsruntime.EventRunProgress {
+					progress = append(progress, event.Stage)
+				}
+				return nil
+			},
 		}
 	}
 	first, err := runner.Run(context.Background(), request("first question"))
@@ -145,16 +151,25 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 	if execution.starts.Load() != 2 || execution.closes.Load() != 2 {
 		t.Fatalf("environment lifecycle: starts=%d closes=%d", execution.starts.Load(), execution.closes.Load())
 	}
-	if got := debugLog.String(); !strings.Contains(got, "sandbox=recording") || !strings.Contains(got, "workspace="+fmt.Sprintf("%q", workspace)) {
-		t.Fatalf("debug log omits effective environment: %s", got)
+	if got := debugLog.String(); !strings.Contains(got, `"sandbox":"recording"`) || !strings.Contains(got, `"workspace":""`) || !strings.Contains(got, `"conversation_id":"conversation-1"`) || strings.Contains(got, "answer 1") || strings.Contains(got, "answer 2") {
+		t.Fatalf("unexpected structured run log: %s", got)
+	}
+	if len(progress) != 6 || progress[0] != "Preparing sandbox…" || progress[1] != "Sandbox ready" || progress[2] != "Saving sandbox state…" {
+		t.Fatalf("run progress = %v", progress)
 	}
 	for i := 1; i <= 2; i++ {
 		spec := <-execution.specs
-		if spec.WorkspaceID != "conversation-1" || spec.WorkspacePath != workspace {
+		if spec.WorkspaceID != "conversation-1" || spec.WorkspacePath != "" {
 			t.Fatalf("environment workspace = %q at %q", spec.WorkspaceID, spec.WorkspacePath)
 		}
 		if want := fmt.Sprintf("run-%d", i); spec.RunID != want {
 			t.Fatalf("environment run ID = %q, want %q", spec.RunID, want)
+		}
+		if spec.WorkspacePlan.Strategy != environment.WorkspaceStrategyGit ||
+			spec.WorkspacePlan.SourceRef != "https://github.com/acme/a.git" ||
+			spec.WorkspacePlan.BaseRevision != strings.Repeat("a", 40) ||
+			spec.Network != environment.NetworkEnabled {
+			t.Fatalf("session Git plan = %+v, network = %q", spec.WorkspacePlan, spec.Network)
 		}
 	}
 }
@@ -166,8 +181,8 @@ func TestRuntimeServerConfiguresAndClosesStatefulEnvironment(t *testing.T) {
 	done := make(chan error, 1)
 	stateDir, workspace := t.TempDir(), t.TempDir()
 	go func() {
-		done <- runServerReady(ctx, log.New(io.Discard, "", 0), serverOptions{
-			Address: "127.0.0.1:0", StateDir: stateDir, Workspace: workspace,
+		done <- runServerReady(ctx, newServerLogger(io.Discard, false), serverOptions{
+			Address: "127.0.0.1:0", StateDir: stateDir, WorkspaceRoot: workspace,
 			MaxConcurrent: 1, Environment: provider,
 		}, started)
 	}()
@@ -186,8 +201,8 @@ func TestRuntimeServerConfiguresAndClosesStatefulEnvironment(t *testing.T) {
 
 func TestDebugConfigurationIncludesSandboxPolicy(t *testing.T) {
 	var output bytes.Buffer
-	logDebugConfiguration(log.New(&output, "", 0), serverOptions{
-		Debug: true, Sandbox: "seatbelt", Workspace: "/workspace", MaxTurns: 12, MaxConcurrent: 4,
+	logDebugConfiguration(newServerLogger(&output, true), serverOptions{
+		Debug: true, Sandbox: "seatbelt", WorkspaceRoot: "/workspace", MaxTurns: 12, MaxConcurrent: 4,
 		Brain:       llm.Config{Provider: "codex", Model: "gpt-5.6-luna"},
 		Environment: &recordingEnvironment{},
 		EnvironmentSpec: environment.Spec{
@@ -199,13 +214,26 @@ func TestDebugConfigurationIncludesSandboxPolicy(t *testing.T) {
 	})
 	got := output.String()
 	for _, want := range []string{
-		"provider=codex", "model=gpt-5.6-luna", `workspace="/workspace"`,
-		"sandbox=seatbelt", "network=disabled", `hands="/usr/local/bin/pons-hands"`,
-		"external_plugins=1", "read_only_paths=1",
+		`"provider":"codex"`, `"model":"gpt-5.6-luna"`, `"workspace_root":"/workspace"`,
+		`"sandbox":"seatbelt"`, `"network":"disabled"`, `"hands":"/usr/local/bin/pons-hands"`,
+		`"external_plugins":1`, `"read_only_paths":1`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("debug configuration missing %q: %s", want, got)
 		}
+	}
+}
+
+func TestE2BDebugLogHasWorkspaceAndSandboxFields(t *testing.T) {
+	var output bytes.Buffer
+	logE2BDebug(newServerLogger(&output, true), `workspace="workspace-1" sandbox="sandbox-1" state=recovery retained until=2026-09-23T12:00:00Z`)
+	var record map[string]any
+	if err := json.Unmarshal(output.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record["workspace_id"] != "workspace-1" || record["sandbox_id"] != "sandbox-1" || record["state"] != "recovery" ||
+		record["until"] != "2026-09-23T12:00:00Z" || record["event"] != "state=recovery retained until=2026-09-23T12:00:00Z" {
+		t.Fatalf("E2B log = %+v", record)
 	}
 }
 
@@ -220,6 +248,34 @@ func TestRuntimeServerRejectsPublicBind(t *testing.T) {
 	}
 }
 
+func TestRuntimeServerRejectsBrowserAndReboundRequests(t *testing.T) {
+	handler := loopbackRequestOnly(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for _, test := range []struct {
+		name, host, origin string
+		want               int
+	}{
+		{name: "loopback", host: "127.0.0.1:7337", want: http.StatusNoContent},
+		{name: "localhost", host: "localhost:7337", want: http.StatusNoContent},
+		{name: "rebound host", host: "attacker.example:7337", want: http.StatusForbidden},
+		{name: "browser origin", host: "127.0.0.1:7337", origin: "https://attacker.example", want: http.StatusForbidden},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7337/healthz", nil)
+			request.Host = test.host
+			if test.origin != "" {
+				request.Header.Set("Origin", test.origin)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.want {
+				t.Fatalf("status = %d, want %d", response.Code, test.want)
+			}
+		})
+	}
+}
+
 func TestRuntimeServerShutdownClosesActiveSSE(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -227,12 +283,12 @@ func TestRuntimeServerShutdownClosesActiveSSE(t *testing.T) {
 	done := make(chan error, 1)
 	stateDir, workspace := t.TempDir(), t.TempDir()
 	go func() {
-		done <- runServerReady(ctx, log.New(io.Discard, "", 0), serverOptions{
-			Address: "127.0.0.1:0", StateDir: stateDir, Workspace: workspace, MaxConcurrent: 1,
+		done <- runServerReady(ctx, newServerLogger(io.Discard, false), serverOptions{
+			Address: "127.0.0.1:0", StateDir: stateDir, WorkspaceRoot: workspace, MaxConcurrent: 1,
 		}, started)
 	}()
 	serverURL := <-started
-	response, err := http.Post(serverURL+"/v1/conversations", "application/json", nil)
+	response, err := http.Post(serverURL+"/v1/conversations", "application/json", strings.NewReader(fmt.Sprintf(`{"workspace":%q}`, workspace)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,19 +394,124 @@ func TestRemoteStateDirectoryMustBeOutsideWorkspace(t *testing.T) {
 	}
 }
 
+func TestClientWorkspaceMustStayWithinServerRoot(t *testing.T) {
+	root, stateDir := t.TempDir(), t.TempDir()
+	workspace := filepath.Join(root, "project")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateConversationWorkspace(workspace, root, stateDir); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(workspace, alias); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected, err := validateConversationWorkspace(alias, root, stateDir); err != nil || selected != canonical {
+		t.Fatalf("canonical workspace = %q, %v; want %q", selected, err, canonical)
+	}
+	if _, err := validateConversationWorkspace("project", root, stateDir); err == nil {
+		t.Fatal("relative workspace accepted")
+	}
+	if _, err := validateConversationWorkspace(t.TempDir(), root, stateDir); err == nil {
+		t.Fatal("workspace outside root accepted")
+	}
+	link := filepath.Join(root, "outside")
+	if err := os.Symlink(t.TempDir(), link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateConversationWorkspace(link, root, stateDir); err == nil {
+		t.Fatal("symlink outside root accepted")
+	}
+	if _, err := validateConversationWorkspace(workspace, root, filepath.Join(workspace, "state")); err == nil {
+		t.Fatal("state directory inside workspace accepted")
+	}
+}
+
 func TestExecutionEnvironmentConfiguresE2B(t *testing.T) {
 	provider, spec, err := executionEnvironment("e2b", "", false, serverOptions{
-		E2BTemplate: "custom", E2BHandsPath: "/opt/pons-hands", BashTimeout: 9,
+		E2BTemplate: "custom", E2BHandsPath: "/opt/pons-hands", E2BAPIKey: "test-key", BashTimeout: 9,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	e2bProvider, ok := provider.(*e2b.Provider)
-	if !ok || e2bProvider.Template != "custom" || e2bProvider.HandsPath != "/opt/pons-hands" {
+	if !ok || e2bProvider.Template != "custom" || e2bProvider.HandsPath != "/opt/pons-hands" || e2bProvider.APIKey != "test-key" {
 		t.Fatalf("provider = %#v", provider)
 	}
 	if spec.Network != environment.NetworkDisabled || spec.Command[0] != "/opt/pons-hands" || !slices.Contains(spec.Command, "9") {
 		t.Fatalf("spec = %+v", spec)
+	}
+}
+
+func TestExecutionEnvironmentConfiguresGitWorkspace(t *testing.T) {
+	revision := strings.Repeat("a", 40)
+	_, spec, err := executionEnvironment("e2b", "", false, serverOptions{
+		GitRepository: "https://github.com/example/project.git",
+		GitRevision:   revision,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Network != environment.NetworkEnabled ||
+		spec.WorkspacePlan.Strategy != environment.WorkspaceStrategyGit ||
+		spec.WorkspacePlan.SourceRef != "https://github.com/example/project.git" ||
+		spec.WorkspacePlan.BaseRevision != revision {
+		t.Fatalf("spec = %+v", spec)
+	}
+}
+
+func TestExecutionEnvironmentRequiresCompleteE2BGitConfiguration(t *testing.T) {
+	_, _, err := executionEnvironment("e2b", "", false, serverOptions{
+		GitRepository: "https://github.com/example/project.git",
+	})
+	if err == nil || !strings.Contains(err.Error(), "must be set together") {
+		t.Fatalf("incomplete configuration error = %v", err)
+	}
+	_, _, err = executionEnvironment("seatbelt", "/bin/sh", false, serverOptions{
+		GitRepository: "https://github.com/example/project.git",
+		GitRevision:   strings.Repeat("a", 40),
+	})
+	if err == nil || !strings.Contains(err.Error(), "require --sandbox e2b") {
+		t.Fatalf("seatbelt Git configuration error = %v", err)
+	}
+}
+
+func TestExecutionEnvironmentRequiresCompleteGitHubAppConfiguration(t *testing.T) {
+	_, _, err := executionEnvironment("e2b", "", false, serverOptions{
+		GitRepository:           "https://github.com/example/project.git",
+		GitRevision:             strings.Repeat("a", 40),
+		GitHubAppID:             1234,
+		GitHubAppInstallationID: 99,
+	})
+	if err == nil || !strings.Contains(err.Error(), "private key path is required") {
+		t.Fatalf("incomplete GitHub App configuration error = %v", err)
+	}
+	_, _, err = executionEnvironment("e2b", "", false, serverOptions{
+		GitHubAppID: 1234, GitHubAppPrivateKey: "/private/key.pem",
+	})
+	if err == nil || !strings.Contains(err.Error(), "installation ID must be positive") {
+		t.Fatalf("missing installation ID error = %v", err)
+	}
+	for name, test := range map[string]struct {
+		backend      string
+		handsCommand string
+	}{
+		"no sandbox": {},
+		"Seatbelt":   {backend: "seatbelt", handsCommand: "/bin/sh"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := executionEnvironment(test.backend, test.handsCommand, false, serverOptions{
+				GitHubAppID: 1234,
+			})
+			if err == nil {
+				t.Fatal("GitHub App option was silently ignored")
+			}
+		})
 	}
 }
 
@@ -404,8 +565,8 @@ func TestBundledCLIUsesRuntimeServerPath(t *testing.T) {
 	defer provider.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := runBundled(ctx, log.New(&bytes.Buffer{}, "", 0), serverOptions{
-		StateDir: t.TempDir(), Workspace: t.TempDir(), MaxTurns: 3, MaxConcurrent: 1,
+	err := runBundled(ctx, newServerLogger(&bytes.Buffer{}, false), serverOptions{
+		StateDir: t.TempDir(), WorkspaceRoot: os.TempDir(), ClientWorkspace: t.TempDir(), MaxTurns: 3, MaxConcurrent: 1,
 		Brain: llm.Config{Provider: "openai", Model: "test", APIKey: "test", BaseURL: provider.URL + "/v1"},
 	}, "", "stable", "hello", false)
 	if err != nil {
