@@ -105,8 +105,15 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 	if runID == "" {
 		return nil, errors.New("environment: durable E2B session requires a run ID")
 	}
-	if err := progress("workspace.prepare", "Preparing workspace source…"); err != nil {
-		return nil, err
+	_, existingWorkspaceErr := store.WorkspaceState(ctx, workspaceID)
+	if existingWorkspaceErr != nil && !errors.Is(existingWorkspaceErr, environment.ErrStateNotFound) {
+		return nil, existingWorkspaceErr
+	}
+	initialSetup := errors.Is(existingWorkspaceErr, environment.ErrStateNotFound)
+	if initialSetup {
+		if err := progress("workspace.prepare", "Preparing workspace source…"); err != nil {
+			return nil, err
+		}
 	}
 	workspaceState, err := loadOrCreateWorkspace(
 		ctx,
@@ -129,8 +136,10 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 		return nil, errors.New("environment: installation-wide Git access requires GitHub App authentication")
 	}
 	if p.GitCredentials != nil && (spec.WorkspacePlan.Strategy == environment.WorkspaceStrategyGit || spec.GitAllRepositories) {
-		if err := progress("git.credentials", "Requesting Git access…"); err != nil {
-			return nil, err
+		if initialSetup {
+			if err := progress("git.credentials", "Requesting Git access…"); err != nil {
+				return nil, err
+			}
 		}
 		p.debugf("workspace=%q requesting GitHub credentials scope=%s", workspaceID, gitScope(spec.GitAllRepositories))
 		credentials, err = p.GitCredentials.Credentials(ctx, spec.WorkspacePlan.SourceRef, spec.GitAllRepositories)
@@ -140,13 +149,16 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 		maps.Copy(env, credentials.Environment())
 	}
 
-	if err := progress("sandbox.start", "Starting or reconnecting E2B sandbox…"); err != nil {
-		return nil, err
+	if initialSetup {
+		if err := progress("sandbox.start", "Starting E2B sandbox…"); err != nil {
+			return nil, err
+		}
 	}
 	sandbox, resumed, err := p.acquireSandbox(ctx, client, cfg, workspaceID, runID, network)
 	if err != nil {
 		return nil, err
 	}
+	showSetup := initialSetup || !resumed
 	cleanup := func() error {
 		p.debugf("workspace=%q sandbox=%q deleting after startup failure", workspaceID, sandbox.ID)
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -162,6 +174,11 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 	}
 
 	if !resumed {
+		if !initialSetup {
+			if err := progress("sandbox.restore", "Restoring workspace in a new E2B sandbox…"); err != nil {
+				return nil, errors.Join(err, cleanup())
+			}
+		}
 		initialCheckout := workspaceState.CheckpointRef == ""
 		if initialCheckout {
 			p.debugf("workspace=%q sandbox=%q provisioning Git checkout repository=%q revision=%s", workspaceID, sandbox.ID, workspaceState.SourceRef, workspaceState.BaseRevision)
@@ -231,8 +248,10 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 	if err != nil {
 		return nil, errors.Join(err, cleanup())
 	}
-	if err := progress("tools.start", "Starting agent tools…"); err != nil {
-		return nil, errors.Join(err, host.Close(), cleanup())
+	if showSetup {
+		if err := progress("tools.start", "Starting agent tools…"); err != nil {
+			return nil, errors.Join(err, host.Close(), cleanup())
+		}
 	}
 	if err := host.Start(ctx); err != nil {
 		return nil, errors.Join(err, host.Close(), cleanup())
@@ -240,6 +259,11 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 
 	if !stopStartupCancel() || ctx.Err() != nil {
 		return nil, errors.Join(ctx.Err(), host.Close(), cleanup())
+	}
+	if showSetup {
+		if err := progress("sandbox.ready", "Sandbox ready"); err != nil {
+			return nil, errors.Join(err, host.Close(), cleanup())
+		}
 	}
 	started = true
 	p.lifecycleMu.Lock()

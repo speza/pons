@@ -453,10 +453,12 @@ assistant message and terminal tool state replace any live draft or progress
 display.
 
 `environment.progress` carries an `environment_progress` object with a stable
-`step` identifier and a curated, human-readable `message`. Steps cover workspace
-preparation, E2B startup, Git fetch and checkout, checkpoint restore, readiness,
-and sandbox shutdown. Each event is scoped by `conversation_id`, `run_id`, and
-`inbound_message_id`, receives a durable cursor, and appears in the snapshot's
+`step` identifier and a curated, human-readable `message`. Steps cover initial
+workspace preparation, E2B startup, Git fetch and checkout, checkpoint restore,
+and readiness. Warm runs that reconnect to the existing sandbox emit no setup
+steps; replacing a sandbox emits restore and readiness steps. Each event is
+scoped by `conversation_id`, `run_id`, and `inbound_message_id`, receives a
+durable cursor, and appears in the snapshot's
 `environment_events` list. The messages are deliberately authored by the
 server and provider rather than copied from raw commands or provider output.
 

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,6 +39,14 @@ func TestCheckpointFailuresRetainSandboxForRecovery(t *testing.T) {
 type checkpointFailureStore struct {
 	recordingStateStore
 	fault string
+}
+
+func (s *checkpointFailureStore) EnvironmentState(context.Context, string) (environment.State, error) {
+	state := s.environmentLast.Load()
+	if state == nil {
+		return environment.State{}, environment.ErrStateNotFound
+	}
+	return *state, nil
 }
 
 func (s *checkpointFailureStore) PutWorkspaceCheckpoint(ctx context.Context, id string, body io.Reader, limit int64) (string, error) {
@@ -96,6 +105,9 @@ func testSessionCheckpoint(t *testing.T, fault string) {
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/sandboxes/sandbox/connect":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"sandboxID":"sandbox","envdAccessToken":"token"}`)
 		case r.URL.Path == "/files" && r.Method == http.MethodPost:
 			body, err := io.ReadAll(r.Body)
 			if err == nil {
@@ -205,8 +217,13 @@ func testSessionCheckpoint(t *testing.T, fault string) {
 	defer provider.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var firstProgress []string
 	session, err := provider.Start(ctx, environment.Spec{
 		WorkspaceID: "workspace", WorkspacePath: source, RunID: "run", Command: []string{defaultE2BHandsPath},
+		ReportProgress: func(step, _ string) error {
+			firstProgress = append(firstProgress, step)
+			return nil
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -214,6 +231,9 @@ func testSessionCheckpoint(t *testing.T, fault string) {
 	defer session.Close()
 	if metadata := session.Metadata(); metadata.WorkspacePath != defaultE2BWorkspace || metadata.Platform != "linux/amd64" {
 		t.Fatalf("metadata = %+v", metadata)
+	}
+	if fault == "" && (!slices.Contains(firstProgress, "workspace.prepare") || !slices.Contains(firstProgress, "sandbox.ready")) {
+		t.Fatalf("initial setup progress = %v", firstProgress)
 	}
 	if err := os.WriteFile(filepath.Join(remote, "result"), []byte("completed edit"), 0o600); err != nil {
 		t.Fatal(err)
@@ -309,6 +329,29 @@ func testSessionCheckpoint(t *testing.T, fault string) {
 	}
 	if _, err := os.Stat(filepath.Join(source, "result")); !os.IsNotExist(err) {
 		t.Fatalf("source changed: %v", err)
+	}
+	if fault == "" {
+		var warmProgress []string
+		warmCtx, warmCancel := context.WithCancel(context.Background())
+		defer warmCancel()
+		warmSession, err := provider.Start(warmCtx, environment.Spec{
+			WorkspaceID: "workspace", WorkspacePath: source, RunID: "next-run", Command: []string{defaultE2BHandsPath},
+			ReportProgress: func(step, _ string) error {
+				warmProgress = append(warmProgress, step)
+				return nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer warmSession.Close()
+		if len(warmProgress) != 0 {
+			t.Fatalf("warm run emitted setup progress: %v", warmProgress)
+		}
+		warmCancel()
+		if err := warmSession.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

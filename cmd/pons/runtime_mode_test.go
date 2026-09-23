@@ -159,8 +159,7 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 	if got := debugLog.String(); !strings.Contains(got, `"sandbox":"recording"`) || !strings.Contains(got, `"workspace":""`) || !strings.Contains(got, `"conversation_id":"conversation-1"`) || strings.Contains(got, "answer 1") || strings.Contains(got, "answer 2") {
 		t.Fatalf("unexpected structured run log: %s", got)
 	}
-	if len(progress) != 8 || progress[0] != "Preparing sandbox…" || progress[1] != "Provisioning test sandbox…" ||
-		progress[2] != "Sandbox ready" || progress[3] != "Saving sandbox state…" {
+	if len(progress) != 2 || progress[0] != "Provisioning test sandbox…" || progress[1] != "Provisioning test sandbox…" {
 		t.Fatalf("run progress = %v", progress)
 	}
 	for i := 1; i <= 2; i++ {

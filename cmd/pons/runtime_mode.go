@@ -534,9 +534,6 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		if request.GitRepository != "" || request.GitAllRepositories {
 			spec.Network = environment.NetworkEnabled
 		}
-		if emitErr := reportProgress("sandbox.prepare", "Preparing sandbox…"); emitErr != nil {
-			return result, emitErr
-		}
 		runLog.Debug("environment starting", "sandbox", r.opts.Sandbox)
 		session, startErr := provider.Start(ctx, spec)
 
@@ -544,13 +541,6 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 			return result, fmt.Errorf("start execution environment: %w", startErr)
 		}
 		defer func() {
-			step, message := "sandbox.close", "Closing sandbox…"
-			if r.opts.Sandbox == "e2b" {
-				step, message = "sandbox.save", "Saving sandbox state…"
-			}
-			if emitErr := reportProgress(step, message); emitErr != nil {
-				err = errors.Join(err, emitErr)
-			}
 			closeErr := session.Close()
 			err = errors.Join(err, closeErr)
 			if closeErr == nil {
@@ -601,11 +591,6 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 
 	runLog.Debug("hands ready", "sandbox", effectiveSandbox, "sandbox_id", effectiveEnvironmentID,
 		"network", effectiveNetwork, "workspace", request.Workspace, "tools", len(core.ToolSpecs()))
-	if provider != nil {
-		if emitErr := request.Emit(ponsruntime.RunEvent{Type: ponsruntime.EventEnvironmentProgress, Step: "sandbox.ready", Message: "Sandbox ready"}); emitErr != nil {
-			return result, emitErr
-		}
-	}
 	core.OnEventError(func(event pons.Event) error {
 		switch event.Type {
 		case pons.EventAssistantResponse:

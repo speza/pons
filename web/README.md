@@ -20,6 +20,8 @@ README](../README.md#quick-start).
 Run `make web-build` after editing the frontend. The browser client and runtime
 API are still under development.
 
-Sandbox conversations show an environment setup log below the message that
-started each run. It opens while the run is active and remains available after
-reconnecting or reopening the conversation.
+Sandbox conversations show an environment setup log below the message when E2B
+is first provisioned or a workspace is restored into a replacement sandbox.
+Warm runs that reconnect to an existing sandbox skip the setup log. The log
+opens while setup is active and remains available after reconnecting or
+reopening the conversation.
