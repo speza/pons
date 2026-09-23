@@ -134,8 +134,13 @@ One runtime is one trusted administrative domain; pons is not a multi-tenant
 security boundary. A hosted service should route domains to isolated runtime
 cells rather than co-host untrusted customers in one runtime.
 
-For the proposed multi-agent runtime and its implementation order, see
-[ADR-0016](docs/adr-0016-persistent-agents-and-async-messaging.md).
+The proposed persistent-agent feature starts with identity and delegation in
+[ADR-0016](docs/adr-0016-persistent-agents-and-async-messaging.md). Its
+remaining runtime contracts cover
+[triggers and delivery](docs/adr-0018-agent-triggers-and-delivery.md),
+[agent memory](docs/adr-0019-agent-memory.md),
+[artifact transfer](docs/adr-0020-agent-artifact-transfer.md), and
+[durable work and approvals](docs/adr-0021-durable-work-and-waits.md).
 
 ### Web testing UI
 

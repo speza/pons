@@ -2,7 +2,8 @@
 
 **Status:** Proposed
 **Date:** 2026-09-22
-**Related:** ADR-0001, ADR-0008, ADR-0009, ADR-0010, ADR-0011, ADR-0012, ADR-0014, ADR-0017
+**Related:** ADR-0001, ADR-0008 through ADR-0012, ADR-0014, ADR-0017
+through ADR-0021
 
 ## Context
 
@@ -31,7 +32,7 @@ domain; they are not tenant isolation.
 ### 1. Persistent identity, finite execution
 
 An agent is a stable runtime principal with an identity, configuration, owned
-conversations, mailbox, and future memory. Persistence does not mean a
+conversations, mailbox, and memory under ADR-0019. Persistence does not mean a
 resident goroutine or model connection. Each activation remains finite:
 
 ```text
@@ -131,8 +132,9 @@ causation, and authenticated source attribution so clients and agents can
 distinguish concurrent work. Provider adapters render attribution separately
 from untrusted content; labels in message text cannot forge identity.
 
-Future schedules, webhooks, approvals, and connectors should enter through
-this envelope rather than alternate runners or queues.
+Schedules, webhooks, and connectors enter through this envelope under
+ADR-0018 rather than alternate runners or queues. ADR-0021 defines durable
+approval resumption and work that spans multiple lineages.
 
 ### 5. Host-side `delegate` capability
 
@@ -143,8 +145,9 @@ delegate(agent_id, message)
 ```
 
 The recipient is one configured agent and `message` is a self-contained text
-request. The first contract has no broadcast, attachment, priority, deadline,
-arbitrary metadata, agent discovery, or destination conversation argument.
+request. The first contract has no broadcast, artifact reference, priority,
+deadline, arbitrary metadata, agent discovery, or destination conversation
+argument. ADR-0020 defines an optional artifact-reference extension.
 
 The host derives sender identity, source conversation, submission, lineage,
 and authorization from the scoped run. The tool is not exposed through an
@@ -187,9 +190,9 @@ committed first makes the new child visible to the cancellation or failure
 transition. Context cancellation alone is not an acceptance fence.
 
 The child receives only its own definition, the explicit request, its own
-history, and future explicitly authorized artifact references. It does not
-implicitly receive the parent's transcript, reasoning, tool output, secrets,
-workspace, or permissions.
+history, and artifact references explicitly authorized under ADR-0020. It
+does not implicitly receive the parent's transcript, reasoning, tool output,
+secrets, workspace, or permissions.
 
 The host enforces this context boundary even when hands can make network
 requests: a delegation-enabled composition must keep those hands from
@@ -233,11 +236,12 @@ it can reason about outstanding work without receiving child transcripts.
 Root agents may still send progress to human clients. If a run stops without
 an explicit final response and no work remains to resume it, the delegation
 fails with `no_final_response`; an exhausted run fails with its turn-limit
-error.
+error. ADR-0018 permits an explicit `no_update` outcome for a system root,
+not for a delegated child.
 
 An agent that wants to complete before its children must cancel them. Explicit
-suspend/complete controls are deferred until external waits or detached child
-work require them.
+delegation suspend/complete controls are deferred. ADR-0021's work-item waits
+do not detach children from this lineage.
 
 ### 8. Transactional result routing
 
@@ -316,13 +320,13 @@ Delegation is a data-egress seam. The first policy receives the host-derived
 sender and recipient IDs, source conversation and root ID, and request text;
 it may allow, deny, or redact. The audit record stores the decision and
 payload hash, not hidden credentials. An allowlisted route does not imply
-every payload is safe. Artifact references and cross-domain egress policy
-belong to later contracts.
+every payload is safe. ADR-0020 extends this decision with explicitly granted
+artifact references. Cross-domain egress policy remains outside this runtime.
 
-Unattended delegation does not wait on a human approval inside an active run:
-a policy requiring approval denies with `approval_unavailable` until a later
-design provides durable approval suspension and resumption. ADR-0014 may
-still authorize a directly attended action before the host tool runs.
+Unattended delegation does not wait on a human approval inside an active run.
+Until ADR-0021's durable approval suspension is implemented, a policy requiring
+approval denies with `approval_unavailable`. ADR-0014 may still authorize a
+directly attended action before the host tool runs.
 
 Secret isolation requires process boundaries. Brain credentials stay in host
 composition; hands and external plugins receive only grants for that agent and
@@ -336,7 +340,10 @@ composition must verify that each model-controlled hands boundary cannot
 reach that listener. Network-enabled local hands without an enforced deny
 rule, and unrestricted in-process hands with network or command access, are
 ineligible. Loopback binding alone is insufficient when hands share the host
-network namespace.
+network namespace. Hands must also be unable to read the runtime database,
+memory and artifact stores, agent definitions, or credential store through
+the host filesystem. A composition unable to enforce these boundaries is
+ineligible for delegation.
 
 ### 12. Bounds and scheduling
 
@@ -416,17 +423,19 @@ A durable lineage row is created with the original external submission. Its
 `active` state fences delegation acceptance, claims, run completion, and
 terminal result routing. The row remains active while any submission with
 that `root_id` is queued or running, any descendant delegation is
-non-terminal, or a terminal result still awaits processing in the root
-conversation. When those are resolved, a transaction marks it `completed`
-only if the latest root run produced an explicit final response for that
-lineage. If there is no final response, it marks the lineage `failed` with
-`no_final_response` or the root run's error. Cancellation marks it
+non-terminal, a durable approval is pending under ADR-0021, or a terminal
+result still awaits processing in the root conversation. When those are
+resolved, a transaction marks it `completed` only if the latest root run
+produced an explicit final response, or a system root explicitly recorded
+`no_update` under ADR-0018. If neither happened, it marks the lineage `failed`
+with `no_final_response` or the root run's error. Cancellation marks it
 `cancelled` as described above. Terminal transitions use a compare-and-set
 against `active`; a terminal lineage cannot be reopened by a stale run or
 callback. The lineage view combines this canonical state with its root
 response and error. A conceptual
-`GET /v1/conversations/{id}/lineages/{root_id}` returns status, latest final
-root response ID, and error code without exposing child transcripts.
+`GET /v1/conversations/{id}/lineages/{root_id}` returns status, outcome kind,
+optional latest final root response ID, and error code without exposing child
+transcripts.
 
 `pons client -message` follows the root lineage created by its submission
 through its terminal status. An early final root response while children are
@@ -465,7 +474,7 @@ delegations:   id, root_id, parent/child conversation IDs,
                sender/recipient IDs, source run/action IDs, status,
                result_message_id, error, timestamps
 lineages:      root_id, root_conversation_id, status,
-               latest_final_root_message_id, error, timestamps
+               outcome_kind, latest_final_root_message_id, error, timestamps
 ```
 
 `(source_run_id, source_action_id)` uniquely identifies a delegation and
@@ -491,9 +500,18 @@ solely for compatibility.
    policy, bounds, and concurrency enforcement.
 4. **Client completion:** persist root-lineage status, publish its event, and
    make the HTTP client follow a lineage through its terminal answer.
-5. **Triggers:** adapt schedules, webhooks, connectors, and approvals to the
-   same submission envelope without changing `Core`; durable approval
-   suspension requires its own decision before enabling unattended `ask`.
+5. **Ingress and egress:** add authenticated trigger adapters, explicit silent
+   outcomes, and durable outbound intents under ADR-0018.
+6. **Context and files:** add scoped memory under ADR-0019 and immutable
+   artifact transfer under ADR-0020. They can be built independently after
+   agent identity exists.
+7. **Ongoing work:** add work items and event/timer waits under ADR-0021 after
+   trigger acceptance is durable.
+8. **Approvals:** add ADR-0021's exact-action pause and resume after
+   ADR-0014's authorization stage and fenced run transitions exist.
+
+Steps 5 through 8 extend the runtime around finite activations without
+changing the delegation tree's first contract.
 
 ## Verification requirements
 
@@ -516,8 +534,9 @@ Deterministic tests, requiring no provider credentials or network, must prove:
 - workspace IDs reject conflicting source mappings and local path aliases;
   checkpoint reuse validates the stored source, while claim-time workspace
   and per-agent exclusion remain transactional;
-- model-controlled hands cannot read another conversation through the native
-  runtime API in an eligible delegation-enabled composition;
+- model-controlled hands cannot reach the native runtime API or read canonical
+  state, memory, artifacts, definitions, or credentials through the host
+  filesystem in an eligible delegation-enabled composition;
 - child and parent events retain independent cursors and survive restart;
 - an early root response does not end the client wait while delegated work is
   outstanding, and reconnect resumes the same lineage; and
@@ -526,6 +545,19 @@ Deterministic tests, requiring no provider credentials or network, must prove:
 
 Black-box coverage should exercise two scripted agents through HTTP, SQLite,
 the scheduler, restart, and event replay.
+
+For the complete persistent-agent feature, the integration suite also covers
+the contracts in ADR-0018 through ADR-0021:
+
+- A coding request delegates a private child, grants one immutable artifact,
+  waits through a durable exact-action approval, resumes after restart, and
+  returns one final response without leaking either agent's private context.
+- A recurring work item wakes from a schedule, explicitly records `no_update`
+  when there is nothing to report, later wakes from a verified event, reads
+  only its owner's memory, and produces one durable outbound intent.
+- Cancellation and restart at acceptance, memory write, artifact publish,
+  approval, and delivery boundaries leave no stale runnable work, duplicate
+  child, forged source, or silently lost delivery state.
 
 ## Alternatives and non-goals
 
@@ -542,7 +574,7 @@ context or require substantially broader membership and lifecycle semantics.
 Full mutable agent definitions are not copied into SQLite until managed
 configuration defines version retention explicitly.
 
-This ADR does not introduce shared memory, group chat, one-way social
+This ADR does not itself introduce shared memory, group chat, one-way social
 messaging, dynamic agent creation or discovery, broadcasts, priorities,
 attachments, artifact transfer, first-class goals or workflow DAGs,
 exactly-once external effects, distributed leases, cross-tenant identity, or
@@ -563,12 +595,13 @@ still report an accepted delegation's receipt as outcome unknown.
 
 ## Deferred questions
 
-- When do goals, artifacts, cross-conversation memory, schedules, or continued
-  child addressing deserve first-class resources?
+- When does continued child addressing deserve a broader conversation-access
+  model than one private child per request?
 - Should definitions become mutable API resources with retained revisions?
 - How should lineage token and monetary budgets compose with retries and
   provider failover?
-- What consistency does shared memory require for concurrent agent runs?
+- When should work items support dependencies or detached delegations beyond
+  the bounded lineage tree in ADR-0016 and ADR-0021?
 
 ## References
 
