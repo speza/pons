@@ -48,7 +48,7 @@ func TestSendHydratesExistingConversationBeforeEvents(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	var hydrated bool
-	result, err := (Client{BaseURL: server.URL}).Send(ctx, "conversation", "key", "hello", func(view ponsruntime.ConversationView) {
+	result, err := (Client{BaseURL: server.URL}).Send(ctx, "conversation", "key", "hello", ponsruntime.ConversationOptions{}, func(view ponsruntime.ConversationView) {
 		hydrated = view.EventCursor == 7
 	}, nil)
 	if err != nil {
@@ -61,5 +61,33 @@ func TestSendHydratesExistingConversationBeforeEvents(t *testing.T) {
 	defer mu.Unlock()
 	if len(order) < 3 || order[0] != "GET /v1/conversations/conversation" || order[1] != "GET /v1/conversations/conversation/events" || order[2] != "POST /v1/conversations/conversation/messages" {
 		t.Fatalf("request order = %v", order)
+	}
+}
+
+func TestSendCreatesConversationWithWorkspaceSelection(t *testing.T) {
+	runtime := &fakeRuntime{
+		created:  ponsruntime.Conversation{ID: "new-conversation"},
+		accepted: ponsruntime.AcceptedMessage{ConversationID: "new-conversation", InboundMessageID: "first-message"},
+		events: []ponsruntime.Event{{
+			Type:             ponsruntime.EventMessageUpserted,
+			InboundMessageID: "first-message",
+			Message: &ponsruntime.Message{
+				ID: "answer", Role: "assistant", Final: true,
+				Parts: []ponsruntime.MessagePart{{Type: "text", Text: "done"}},
+			},
+		}},
+	}
+	server := httptest.NewServer(Handler(runtime))
+	defer server.Close()
+	selection := ponsruntime.ConversationOptions{Workspace: "/selected/project"}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	result, err := (Client{BaseURL: server.URL}).Send(ctx, "", "first", "hello", selection, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.createdOptions != selection || len(runtime.submitted) != 1 || runtime.submitted[0].Text != "hello" ||
+		result.ConversationID != "new-conversation" || result.Answer != "done" {
+		t.Fatalf("selection=%+v submitted=%+v result=%+v", runtime.createdOptions, runtime.submitted, result)
 	}
 }

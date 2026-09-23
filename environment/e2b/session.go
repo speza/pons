@@ -176,7 +176,7 @@ func (s *e2bSession) Close() error {
 			defer s.cancelTransport()
 		}
 		s.closeErr = s.host.Close()
-		retain := s.closeErr == nil && s.store != nil
+		retain := s.store != nil
 		// Stop active-state writes before publishing the recovery reservation.
 		// A past heartbeat failure does not prevent a fresh checkpoint attempt.
 		s.stopKeepalive()
@@ -188,7 +188,7 @@ func (s *e2bSession) Close() error {
 			recoveryErr = s.reserveRecovery(ctx, recoveryUntil)
 			s.closeErr = errors.Join(s.closeErr, recoveryErr)
 		}
-		if s.closeErr == nil {
+		if s.closeErr == nil && retain {
 			s.debugf("checkpoint started")
 			if _, _, err := s.client.run(ctx, s.sandbox, "/bin/tar", []string{
 				"--hard-dereference", "-cf", workspaceCheckpointPath, "-C", defaultE2BWorkspace, ".",

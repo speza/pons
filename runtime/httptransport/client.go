@@ -220,12 +220,8 @@ func (c Client) Events(ctx context.Context, conversationID string, after uint64)
 }
 
 // Send opens the event stream before submitting the message and waits for
-// that message's terminal event.
-func (c Client) Send(ctx context.Context, conversationID, idempotencyKey, text string, onSnapshot func(ponsruntime.ConversationView), onEvent func(ponsruntime.Event)) (SendResult, error) {
-	return c.SendWithOptions(ctx, conversationID, idempotencyKey, text, ponsruntime.ConversationOptions{}, onSnapshot, onEvent)
-}
-
-func (c Client) SendWithOptions(ctx context.Context, conversationID, idempotencyKey, text string, options ponsruntime.ConversationOptions, onSnapshot func(ponsruntime.ConversationView), onEvent func(ponsruntime.Event)) (SendResult, error) {
+// that message's terminal event. Options select the workspace for a new conversation.
+func (c Client) Send(ctx context.Context, conversationID, idempotencyKey, text string, options ponsruntime.ConversationOptions, onSnapshot func(ponsruntime.ConversationView), onEvent func(ponsruntime.Event)) (SendResult, error) {
 	var snapshot ponsruntime.ConversationView
 	after := uint64(0)
 	if conversationID == "" {

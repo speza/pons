@@ -355,61 +355,47 @@ func TestWorkspaceExclusionIsEnforcedByRunnableClaim(t *testing.T) {
 	release <- struct{}{}
 }
 
-func TestCompetingManagersDoNotDuplicateSQLiteClaim(t *testing.T) {
-	// SQLite remains a single-manager backend. This test only proves that its
-	// claim transaction does not hand one submission to two competing local
-	// workers; it does not imply leases, fencing, or supported process failover.
+func TestCompetingSQLiteClaimsDoNotDuplicateSubmission(t *testing.T) {
 	stateDir, workspace := t.TempDir(), t.TempDir()
-	storeA, err := runtimesqlite.Open(stateDir)
+	store, err := runtimesqlite.Open(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer storeA.Close()
-	storeB, err := runtimesqlite.Open(stateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer storeB.Close()
+	defer store.Close()
 	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), Workspace: workspace, CreatedAt: time.Now().UTC()}
-	if err := storeA.CreateConversation(context.Background(), conversation); err != nil {
+	if err := store.CreateConversation(context.Background(), conversation); err != nil {
 		t.Fatal(err)
 	}
-	var executions atomic.Int32
-	started := make(chan struct{}, 2)
-	release := make(chan struct{})
-	runner := RunnerFunc(func(_ context.Context, _ RunRequest) (RunResult, error) {
-		executions.Add(1)
-		started <- struct{}{}
-		<-release
-		return RunResult{Answer: "done"}, nil
-	})
-	managerA, err := New(Config{Store: storeA, Runner: runner, RepairInterval: 10 * time.Millisecond})
-	if err != nil {
+	if _, _, err := store.Accept(context.Background(), conversation.ID, "once", []TextPart{{Type: "text", Text: "go"}}); err != nil {
 		t.Fatal(err)
 	}
-	defer managerA.Close()
-	managerB, err := New(Config{Store: storeB, Runner: runner, RepairInterval: 10 * time.Millisecond})
-	if err != nil {
-		t.Fatal(err)
+	start := make(chan struct{})
+	type claimResult struct {
+		claim *ponsruntime.ClaimedRun
+		err   error
 	}
-	defer managerB.Close()
-	if _, _, err := storeA.Accept(context.Background(), conversation.ID, "once", []TextPart{{Type: "text", Text: "go"}}); err != nil {
-		t.Fatal(err)
+	results := make(chan claimResult, 2)
+	for range 2 {
+		go func() {
+			<-start
+			claim, err := store.ClaimRunnable(context.Background())
+			results <- claimResult{claim, err}
+		}()
 	}
-	select {
-	case <-started:
-	case <-time.After(3 * time.Second):
-		t.Fatal("neither manager claimed durable work")
+	close(start)
+	claimed := 0
+	for range 2 {
+		result := <-results
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if result.claim != nil {
+			claimed++
+		}
 	}
-	select {
-	case <-started:
-		t.Fatal("submission was claimed by both managers")
-	case <-time.After(150 * time.Millisecond):
+	if claimed != 1 {
+		t.Fatalf("claims = %d, want 1", claimed)
 	}
-	if executions.Load() != 1 {
-		t.Fatalf("executions = %d, want 1", executions.Load())
-	}
-	close(release)
 }
 
 func TestSubscribeDuringClaimBroadcastDoesNotDuplicateDurableEvents(t *testing.T) {

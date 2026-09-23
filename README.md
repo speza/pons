@@ -101,6 +101,8 @@ The client selects a host workspace when it creates a local, Seatbelt, or E2B
 archive conversation. `client -workspace` defaults to the client's current
 directory. The selected path must exist on the server host and be inside its
 `-workspace-root` (the server user's home directory by default). The server
+accepts loopback CLI clients; other local processes with access to that
+loopback listener are trusted by this single-user deployment. The server
 does not select a project when it starts. It loads global configuration from
 `~/.pons/config.json`; bundled mode also loads `.pons.json` from its current
 directory. The server stores the canonical host path, so symlink aliases share
@@ -111,8 +113,12 @@ You can also set `"workspace_root": "/path/to/projects"` in the global config.
 Runtime state is stored in SQLite at `<state-dir>/runtime.db` (under
 `~/.pons/runtime/server/` by default, independent of the server's current
 directory). Use `-state-dir` to reopen a previous runtime state directory.
-The server keeps canonical messages and a
-durable event outbox, bounds active runs, serializes each conversation, and
+Only one running Pons server can own a state directory; start one `serve`
+process and connect additional clients to it. A second server exits with a
+state-directory-in-use error rather than interrupting active runs.
+
+The server keeps canonical messages and a durable event outbox, bounds active
+runs, serializes each conversation, and
 prevents simultaneous runs in one workspace. Clients resume from durable
 snapshots and cursors; retries can use `-idempotency-key`.
 
@@ -154,12 +160,15 @@ go run ./cmd/pons -provider codex -sandbox e2b \
 ```
 
 Git provisioning enables sandbox networking and checks out the commit on an
-independent `pons/<workspace>/work` branch before hands starts. Subsequent Git
-commands use the existing bash tool.
+independent `pons/<workspace>/work` branch with its available ancestry before
+hands starts. The branch has no remote upstream; use `git push -u origin HEAD`
+when the agent should publish it. Subsequent Git commands use the existing
+bash tool.
 
 For private GitHub repositories, create a deployment-owned GitHub App with
 Metadata read and Contents read/write permissions, install it on the repositories
 the agent may use, and provide its App ID, installation ID, and private key.
+Protect destination branches in GitHub if the agent has Contents write access.
 The key must be readable only by its owner:
 
 ```sh
@@ -223,8 +232,9 @@ To remove retained pons sandboxes manually, run `make cleanup-e2b`; use
 scoped to the `pons-hands` template; `make cleanup-e2b-all` explicitly targets
 all running and paused sandboxes visible to the API key.
 
-The E2B API key remains on the host, internet access is disabled unless
-`-sandbox-network` is set, and the local workspace is used only to seed a new
+The E2B API key remains on the host. Internet access is disabled unless
+`-sandbox-network` is set or the conversation requests a Git repository or
+installation-wide Git access. The local workspace is used only to seed a new
 logical workspace. Bounded checkpoints are stored under the runtime state
 directory after every run; the source checkout is never replaced. Workspace
 metadata and sandbox placement are persisted separately in SQLite, so a
@@ -246,9 +256,11 @@ include maintenance for all workspaces, including when the server and
 interactive client run together. To keep server logs and the interactive
 prompt in separate terminals, run `serve --debug` in one terminal and
 `client -i` in another.
-If hands stops cleanly but checkpointing fails, the sandbox is quarantined for
-manual recovery for one hour, not deleted immediately. The error includes its
-ID and deadline. New runs for that workspace are blocked during that window;
+If hands shutdown or checkpointing fails, the sandbox is quarantined for
+manual recovery for one hour, not deleted immediately. A shutdown failure
+skips checkpointing because hands may still be changing files. The error
+includes its ID and deadline. New runs for that workspace are blocked during
+that window;
 use E2B's dashboard or SDK to copy `/home/user/pons-workspace` to a safe location
 before the deadline. Do not run the cleanup scripts on a sandbox being recovered.
 There is no automatic checkpoint retry or early release command yet. After

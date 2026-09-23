@@ -30,6 +30,40 @@ func restoreWorkspace(workspace string, archive []byte, limit int64) error {
 	return restoreWorkspaceArchive(workspace, bytes.NewReader(archive), limit)
 }
 
+func TestWorkspaceArchiveRejectsReplacedFile(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "entry")
+	if err := os.WriteFile(path, []byte("public"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, path); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := copyWorkspaceFile(root, "entry", inspected, &out); err == nil {
+		t.Fatal("followed a replaced entry outside the workspace")
+	}
+	if out.Len() != 0 {
+		t.Fatalf("copied secret data: %q", out.String())
+	}
+}
+
 func TestStagedArchiveUploadAndDownload(t *testing.T) {
 	want := "checkpoint content"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

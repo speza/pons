@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/samperrin/pons/environment"
+	"github.com/samperrin/pons/environment/gitworkspace"
 )
 
 func loadOrCreateWorkspace(
@@ -105,12 +106,13 @@ func placeWorkspace(
 	checkpoints environment.CheckpointStore,
 	state environment.WorkspaceState,
 	env map[string]string,
+	credentials gitworkspace.Credentials,
 	limit int64,
 	onError func(error),
 	onDebug func(string),
 ) (environment.WorkspaceState, error) {
 	if state.CheckpointRef == "" {
-		return provisionGitWorkspace(ctx, client, sandbox, store, checkpoints, state, env, limit, onError, onDebug)
+		return provisionGitWorkspace(ctx, client, sandbox, store, checkpoints, state, env, credentials, limit, onError, onDebug)
 	}
 	archive, err := checkpoints.WorkspaceCheckpoint(ctx, state.ID, state.CheckpointRef, limit)
 	if err != nil {

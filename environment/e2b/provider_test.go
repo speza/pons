@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -131,6 +132,66 @@ func TestE2BWorkspaceGetsCredentialsBeforeCreatingSandbox(t *testing.T) {
 	}
 }
 
+func TestE2BStartDoesNotBlockAnotherWorkspaceDuringCredentials(t *testing.T) {
+	firstID, secondID := "repo-a", "repo-b"
+	provider := &Provider{APIKey: "key", CleanupInterval: time.Hour}
+	for provider.workspaceLock(firstID) == provider.workspaceLock(secondID) {
+		secondID += "-next"
+	}
+	startedFirst := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	defer func() {
+		select {
+		case <-releaseFirst:
+		default:
+			close(releaseFirst)
+		}
+	}()
+	store := &recordingStateStore{}
+	provider.stateStore, provider.checkpointStore = store, store
+	provider.GitCredentials = gitCredentialSourceFunc(func(_ context.Context, repository string, _ bool) (gitworkspace.Credentials, error) {
+		if strings.HasSuffix(repository, "/a.git") {
+			close(startedFirst)
+			<-releaseFirst
+		}
+		return gitworkspace.Credentials{}, errors.New("token unavailable")
+	})
+	spec := func(id, repository string) environment.Spec {
+		return environment.Spec{
+			WorkspaceID: id, RunID: "run-" + id, Command: []string{defaultE2BHandsPath}, Network: environment.NetworkEnabled,
+			WorkspacePlan: environment.WorkspacePlan{Strategy: environment.WorkspaceStrategyGit,
+				SourceRef: repository, BaseRevision: strings.Repeat("a", 40)},
+		}
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := provider.Start(context.Background(), spec(firstID, "https://github.com/example/a.git"))
+		firstDone <- err
+	}()
+	select {
+	case <-startedFirst:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first workspace did not reach credential source")
+	}
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := provider.Start(context.Background(), spec(secondID, "https://github.com/example/b.git"))
+		secondDone <- err
+	}()
+	select {
+	case err := <-secondDone:
+		if err == nil || !strings.Contains(err.Error(), "token unavailable") {
+			t.Fatalf("second start = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second workspace blocked behind first workspace")
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err == nil || !strings.Contains(err.Error(), "token unavailable") {
+		t.Fatalf("first start = %v", err)
+	}
+}
+
 func TestConnectSandboxAcceptsBoundedSuccessResponses(t *testing.T) {
 	for _, status := range []int{http.StatusOK, http.StatusCreated} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
@@ -236,6 +297,7 @@ func TestProvisionGitWorkspaceUsesImmutableRevisionAndPersistsCheckpoint(t *test
 			SourceRef: "https://github.com/example/project.git", BaseRevision: revision,
 		},
 		map[string]string{"GIT_CONFIG_VALUE_0": "secret-token"},
+		gitworkspace.HTTPSBasicCredentials("https://github.com/example/project.git", "x-access-token", "secret-token"),
 		1<<20,
 		nil,
 		func(event string) { debugEvents = append(debugEvents, event) },
@@ -244,7 +306,7 @@ func TestProvisionGitWorkspaceUsesImmutableRevisionAndPersistsCheckpoint(t *test
 		t.Fatal(err)
 	}
 	joined := strings.Join(commands, "\n")
-	if !strings.Contains(joined, "git -C "+defaultE2BWorkspace+" fetch --depth=1 --no-tags origin "+revision) ||
+	if !strings.Contains(joined, "git -C "+defaultE2BWorkspace+" fetch --no-tags origin "+revision) ||
 		!strings.Contains(joined, "git -C "+defaultE2BWorkspace+" checkout -b "+gitworkspace.BranchName("workspace")+" FETCH_HEAD") {
 		t.Fatalf("Git commands:\n%s", joined)
 	}
@@ -259,6 +321,53 @@ func TestProvisionGitWorkspaceUsesImmutableRevisionAndPersistsCheckpoint(t *test
 	}
 	if strings.Contains(debug, "secret-token") {
 		t.Fatalf("Git credential leaked in debug events: %s", debug)
+	}
+}
+
+func TestProvisionGitWorkspaceRedactsAuthenticatedFetchFailure(t *testing.T) {
+	credentials := gitworkspace.HTTPSBasicCredentials("https://github.com/example/project.git", "x-access-token", "installation-secret")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/process.Process/Start" {
+			http.NotFound(w, r)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var request struct {
+			Process struct{ Args []string }
+		}
+		if len(body) < 5 || json.Unmarshal(body[5:], &request) != nil {
+			t.Error("invalid process frame")
+			return
+		}
+		w.Header().Set("Content-Type", "application/connect+json")
+		if slices.Contains(request.Process.Args, "fetch") {
+			_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"data": map[string]string{
+				"stderr": base64.StdEncoding.EncodeToString([]byte(credentials.Environment()["GIT_CONFIG_VALUE_0"])),
+			}}})
+			_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"end": map[string]string{"status": "exit status 1"}}})
+			return
+		}
+		_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"end": map[string]string{"status": "exit status 0"}}})
+	}))
+	defer server.Close()
+	store := &recordingStateStore{}
+	_, err := provisionGitWorkspace(
+		context.Background(),
+		&e2bClient{envdURL: server.URL, http: server.Client()},
+		e2bSandbox{ID: "sandbox"},
+		store,
+		store,
+		environment.WorkspaceState{ID: "workspace", Strategy: environment.WorkspaceStrategyGit,
+			SourceRef: "https://github.com/example/project.git", BaseRevision: strings.Repeat("a", 40)},
+		credentials.Environment(),
+		credentials,
+		1<<20,
+		nil,
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "[REDACTED]") || strings.Contains(err.Error(), "installation-secret") ||
+		strings.Contains(err.Error(), credentials.Environment()["GIT_CONFIG_VALUE_0"]) {
+		t.Fatalf("fetch failure was not redacted: %v", err)
 	}
 }
 
@@ -599,10 +708,13 @@ func TestGitCheckpointPruningKeepsOnlyLatestArchive(t *testing.T) {
 	}
 }
 
-func TestSessionCloseSkipsCheckpointAfterHandsFailure(t *testing.T) {
+func TestSessionCloseRetainsSandboxAfterHandsFailure(t *testing.T) {
 	var processStarts, sandboxDeletes atomic.Int32
+	store := &recordingStateStore{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/sandboxes/sandbox/timeout":
+			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodDelete && r.URL.Path == "/sandboxes/sandbox":
 			sandboxDeletes.Add(1)
 			w.WriteHeader(http.StatusNoContent)
@@ -633,12 +745,14 @@ func TestSessionCloseSkipsCheckpointAfterHandsFailure(t *testing.T) {
 		client: &e2bClient{
 			apiKey: "secret", apiURL: server.URL, envdURL: server.URL, http: server.Client(),
 		},
-		sandbox: e2bSandbox{ID: "sandbox"},
+		sandbox:   e2bSandbox{ID: "sandbox"},
+		workspace: environment.WorkspaceState{ID: "workspace"},
+		store:     store,
 	}
-	if err := session.Close(); err == nil || !strings.Contains(err.Error(), "hands unavailable") {
+	if err := session.Close(); err == nil || !strings.Contains(err.Error(), "hands unavailable") || !strings.Contains(err.Error(), "retained for manual recovery") {
 		t.Fatalf("error = %v", err)
 	}
-	if processStarts.Load() != 0 || sandboxDeletes.Load() != 1 {
+	if processStarts.Load() != 0 || sandboxDeletes.Load() != 0 || store.environmentLast.Load().Status != environment.StateRecovery {
 		t.Fatalf("process starts = %d, sandbox deletes = %d", processStarts.Load(), sandboxDeletes.Load())
 	}
 }

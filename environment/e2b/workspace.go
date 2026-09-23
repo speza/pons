@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,29 +18,34 @@ import (
 const maxWorkspaceArchiveEntries = 100_000
 
 func writeWorkspaceArchive(ctx context.Context, out io.Writer, workspace string, limit int64) error {
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		return fmt.Errorf("environment: open workspace root: %w", err)
+	}
+	defer root.Close()
 	entries := 0
 	writer := tar.NewWriter(&limitedWriter{writer: &contextWriter{ctx: ctx, writer: out}, remaining: limit})
-	err := filepath.Walk(workspace, func(path string, info os.FileInfo, walkErr error) error {
+	err = fs.WalkDir(root.FS(), ".", func(rel string, entry fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if walkErr != nil {
 			return walkErr
 		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
 		entries++
 		if entries > maxWorkspaceArchiveEntries {
 			return fmt.Errorf("workspace archive exceeds %d entries", maxWorkspaceArchiveEntries)
-		}
-		rel, err := filepath.Rel(workspace, path)
-		if err != nil {
-			return err
 		}
 		if !info.IsDir() && !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
 			return fmt.Errorf("unsupported workspace entry %q", rel)
 		}
 		link := ""
 		if info.Mode()&os.ModeSymlink != 0 {
-			link, err = os.Readlink(path)
+			link, err = root.Readlink(rel)
 			if err != nil {
 				return err
 			}
@@ -51,18 +57,12 @@ func writeWorkspaceArchive(ctx context.Context, out io.Writer, workspace string,
 		if err != nil {
 			return err
 		}
-		header.Name = filepath.ToSlash(rel)
+		header.Name = rel
 		if err := writer.WriteHeader(header); err != nil {
 			return err
 		}
 		if info.Mode().IsRegular() {
-			file, openErr := os.Open(path)
-			if openErr != nil {
-				return openErr
-			}
-			_, copyErr := io.Copy(writer, file)
-			closeErr := file.Close()
-			return errors.Join(copyErr, closeErr)
+			return copyWorkspaceFile(root, rel, info, writer)
 		}
 		return nil
 	})
@@ -73,6 +73,24 @@ func writeWorkspaceArchive(ctx context.Context, out io.Writer, workspace string,
 		return fmt.Errorf("environment: archive workspace: %w", err)
 	}
 	return nil
+}
+
+func copyWorkspaceFile(root *os.Root, rel string, inspected os.FileInfo, out io.Writer) error {
+	file, err := root.Open(rel)
+	if err != nil {
+		return err
+	}
+	opened, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(inspected, opened) {
+		_ = file.Close()
+		return fmt.Errorf("workspace entry %q changed while archiving", rel)
+	}
+	_, copyErr := io.CopyN(out, file, inspected.Size())
+	return errors.Join(copyErr, file.Close())
 }
 
 // stageWorkspaceArchive returns a rewound private file. The caller closes and

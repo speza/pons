@@ -143,10 +143,12 @@ Checkpointing occurs after every completed run rather than immediately before
 idle deletion. Planned deletion is therefore cheap, and an unplanned VM loss
 loses at most work since the last completed checkpoint.
 
-If hands does not stop cleanly, the sandbox is discarded rather than reused.
-If hands stops cleanly but checkpoint download, validation, or storage fails,
-the prior durable checkpoint remains authoritative and the sandbox is reserved
-for manual recovery for one hour. New runs are blocked during that window.
+If hands does not stop cleanly, checkpointing is skipped because the process
+may still change workspace files. The sandbox is reserved for manual recovery
+for one hour rather than deleted. If hands stops cleanly but checkpoint
+download, validation, or storage fails, the prior durable checkpoint remains
+authoritative and the sandbox is likewise reserved. New runs are blocked
+during that window.
 The error reports the sandbox ID and deadline, or warns that retention could
 not be fully recorded or extended. There is no automatic checkpoint retry.
 

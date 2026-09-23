@@ -93,6 +93,16 @@ func logE2BDebug(logger *slog.Logger, event string) {
 		fields = append(fields, name+"_id", decoded)
 		event = remainder
 	}
+	for token := range strings.FieldsSeq(event) {
+		name, value, ok := strings.Cut(token, "=")
+		if !ok {
+			continue
+		}
+		switch name {
+		case "state", "strategy", "checkpoint", "scope", "network", "revision", "blocked_until", "idle_until", "until":
+			fields = append(fields, name, value)
+		}
+	}
 	logger.Debug("e2b lifecycle", append(fields, "event", event)...)
 }
 
@@ -177,7 +187,7 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 	defer manager.Close()
 	server := &http.Server{
 		Addr:              opts.Address,
-		Handler:           httptransport.Handler(manager),
+		Handler:           loopbackRequestOnly(httptransport.Handler(manager)),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
@@ -225,6 +235,18 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 		}
 		return errors.Join(managerErr, shutdownErr, serveErr)
 	}
+}
+
+func loopbackRequestOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.Host)
+		ip := net.ParseIP(host)
+		if err != nil || (host != "localhost" && (ip == nil || !ip.IsLoopback())) || r.Header.Get("Origin") != "" {
+			http.Error(w, "request must originate from a loopback client", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func logDebugConfiguration(logger *slog.Logger, opts serverOptions) {
@@ -640,7 +662,7 @@ func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, m
 				renderConversationSnapshot(view, debug)
 			}
 		}
-		result, err := client.SendWithOptions(ctx, conversationID, key, text, options, onSnapshot, func(event ponsruntime.Event) {
+		result, err := client.Send(ctx, conversationID, key, text, options, onSnapshot, func(event ponsruntime.Event) {
 			switch event.Type {
 			case ponsruntime.EventRunProgress:
 				if event.RunProgress != nil {

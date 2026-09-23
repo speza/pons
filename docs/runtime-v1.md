@@ -297,6 +297,9 @@ conversation. SQLite startup recovery assumes one exclusive manager and marks
 abandoned requested tools interrupted with an unknown outcome; it never
 silently repeats them. Multiple live processes require renewable leases,
 fencing on every run mutation, and cross-process runnable/outbox notification.
+The SQLite store holds an exclusive advisory lock on the state directory for
+its lifetime. A second process cannot open the same state while the first is
+running; after a process exits, the OS releases the lock for restart recovery.
 
 ### Implementation
 
@@ -316,7 +319,9 @@ with instructions to recreate the runtime state directory rather than migrated.
 ## HTTP API
 
 The first server binds to `127.0.0.1` and has no authentication. It must not
-bind publicly without a future authentication decision.
+bind publicly without a future authentication decision. It rejects non-loopback
+Host headers and browser Origin headers to reduce DNS rebinding exposure. Other
+processes running as the same user on the host remain trusted clients.
 
 ### Create a conversation
 

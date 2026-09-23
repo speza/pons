@@ -226,12 +226,13 @@ func TestDebugConfigurationIncludesSandboxPolicy(t *testing.T) {
 
 func TestE2BDebugLogHasWorkspaceAndSandboxFields(t *testing.T) {
 	var output bytes.Buffer
-	logE2BDebug(newServerLogger(&output, true), `workspace="workspace-1" sandbox="sandbox-1" checkpoint started`)
+	logE2BDebug(newServerLogger(&output, true), `workspace="workspace-1" sandbox="sandbox-1" state=recovery retained until=2026-09-23T12:00:00Z`)
 	var record map[string]any
 	if err := json.Unmarshal(output.Bytes(), &record); err != nil {
 		t.Fatal(err)
 	}
-	if record["workspace_id"] != "workspace-1" || record["sandbox_id"] != "sandbox-1" || record["event"] != "checkpoint started" {
+	if record["workspace_id"] != "workspace-1" || record["sandbox_id"] != "sandbox-1" || record["state"] != "recovery" ||
+		record["until"] != "2026-09-23T12:00:00Z" || record["event"] != "state=recovery retained until=2026-09-23T12:00:00Z" {
 		t.Fatalf("E2B log = %+v", record)
 	}
 }
@@ -244,6 +245,34 @@ func TestRuntimeServerRejectsPublicBind(t *testing.T) {
 		if err := validateLoopbackAddress(address); err != nil {
 			t.Fatalf("loopback %q rejected: %v", address, err)
 		}
+	}
+}
+
+func TestRuntimeServerRejectsBrowserAndReboundRequests(t *testing.T) {
+	handler := loopbackRequestOnly(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for _, test := range []struct {
+		name, host, origin string
+		want               int
+	}{
+		{name: "loopback", host: "127.0.0.1:7337", want: http.StatusNoContent},
+		{name: "localhost", host: "localhost:7337", want: http.StatusNoContent},
+		{name: "rebound host", host: "attacker.example:7337", want: http.StatusForbidden},
+		{name: "browser origin", host: "127.0.0.1:7337", origin: "https://attacker.example", want: http.StatusForbidden},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7337/healthz", nil)
+			request.Host = test.host
+			if test.origin != "" {
+				request.Header.Set("Origin", test.origin)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.want {
+				t.Fatalf("status = %d, want %d", response.Code, test.want)
+			}
+		})
 	}
 }
 

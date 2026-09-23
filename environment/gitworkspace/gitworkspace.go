@@ -61,10 +61,28 @@ func (c Credentials) Environment() map[string]string {
 // It is an accidental-leak safeguard, not a boundary against unrestricted
 // hands deliberately transforming delegated credentials.
 func (c Credentials) RedactResult(result protocol.ToolResult) protocol.ToolResult {
+	if len(c.sensitiveValues) == 0 {
+		return result
+	}
 	result.Output = c.Redact(result.Output)
 	result.Error = c.Redact(result.Error)
-	result.Payload = []byte(c.Redact(string(result.Payload)))
+	if len(result.Payload) != 0 {
+		result.Payload = []byte(c.Redact(string(result.Payload)))
+	}
 	return result
+}
+
+// RedactError keeps the original error when it contains no credential. A
+// credential-bearing error must lose its wrapped cause before leaving hands.
+func (c Credentials) RedactError(err error) error {
+	if err == nil || len(c.sensitiveValues) == 0 {
+		return err
+	}
+	redacted := c.Redact(err.Error())
+	if redacted == err.Error() {
+		return err
+	}
+	return errors.New(redacted)
 }
 
 // Redact replaces exact credential representations in value.

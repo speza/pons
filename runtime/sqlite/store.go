@@ -28,7 +28,8 @@ const (
 // prevent duplicate claims and concurrent conversation/workspace ownership,
 // but they are not renewable leases or a distributed fencing mechanism.
 type Store struct {
-	db *sql.DB
+	db       *sql.DB
+	lockFile *os.File
 }
 
 var (
@@ -47,21 +48,30 @@ func Open(stateDir string) (*Store, error) {
 	if err := os.Chmod(stateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("runtime: secure state directory: %w", err)
 	}
+	lockFile, err := os.OpenFile(filepath.Join(stateDir, ".pons.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("runtime: open state directory lock: %w", err)
+	}
+	if err := lockStateFile(lockFile); err != nil {
+		_ = lockFile.Close()
+		return nil, fmt.Errorf("runtime: state directory %q is already in use or cannot be locked: %w", stateDir, err)
+	}
 	path := filepath.Join(stateDir, runtimeDBName)
 	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: "_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=synchronous(FULL)"}).String()
 	db, err := driver.Open(dsn)
 	if err != nil {
+		_ = lockFile.Close()
 		return nil, fmt.Errorf("runtime: open database: %w", err)
 	}
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(4)
-	store := &Store{db: db}
+	store := &Store{db: db, lockFile: lockFile}
 	if err := store.initializeSchema(context.Background()); err != nil {
-		_ = db.Close()
+		_ = store.Close()
 		return nil, err
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
-		_ = db.Close()
+		_ = store.Close()
 		return nil, fmt.Errorf("runtime: secure database: %w", err)
 	}
 	return store, nil
@@ -225,7 +235,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS execution_environments_provider_id
 	return nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error { return errors.Join(s.db.Close(), s.lockFile.Close()) }
 
 type rowScanner interface {
 	Scan(...any) error

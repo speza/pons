@@ -388,7 +388,7 @@ func TestProviderCloseCancelsBlockedJanitor(t *testing.T) {
 	}
 }
 
-func TestJanitorSkipsBusyLifecycleAndRetriesNextSweep(t *testing.T) {
+func TestJanitorSkipsBusyWorkspaceAndRetriesNextSweep(t *testing.T) {
 	var deletes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		deletes.Add(1)
@@ -399,8 +399,9 @@ func TestJanitorSkipsBusyLifecycleAndRetriesNextSweep(t *testing.T) {
 	p := &Provider{stateStore: store}
 	cfg := e2bConfig{apiURL: server.URL, http: server.Client()}
 	func() {
-		p.lifecycleMu.Lock()
-		defer p.lifecycleMu.Unlock()
+		workspaceLock := p.workspaceLock("workspace")
+		workspaceLock.Lock()
+		defer workspaceLock.Unlock()
 		done := make(chan struct{})
 		go func() {
 			p.cleanExpired(context.Background(), cfg)

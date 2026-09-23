@@ -115,18 +115,10 @@ func main() {
 	}
 
 	// The current directory supplies bundled project settings, not a server-owned workspace.
-	ws := *workspace
-	if ws == "" {
-		ws = "."
-	}
-	ws, err := filepath.Abs(ws)
-	if err != nil {
-		panic(err)
-	}
 	// Standalone servers use global settings. Bundled mode also reads the
 	// current directory's .pons.json; explicit flags win over both files.
 	home, _ := os.UserHomeDir()
-	settingsWorkspace := ws
+	settingsWorkspace := "."
 	if mode == "serve" {
 		settingsWorkspace = ""
 	}

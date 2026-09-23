@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"maps"
 	"net/http"
 	"os"
@@ -60,9 +61,10 @@ type Provider struct {
 	stopJanitor     context.CancelFunc
 	janitorDone     chan struct{}
 	active          map[string]string
+	workspaceLocks  [64]sync.Mutex
 }
 
-func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environment.HandsSession, error) {
+func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSession environment.HandsSession, startErr error) {
 	cfg, err := p.config()
 	if err != nil {
 		return nil, err
@@ -75,20 +77,25 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 		return nil, fmt.Errorf("environment: E2B spec command %q does not match configured hands path %q", spec.Command[0], cfg.handsPath)
 	}
 	client := &e2bClient{apiKey: cfg.apiKey, apiURL: cfg.apiURL, envdURL: cfg.envdURL, http: cfg.http}
+	workspaceID := spec.WorkspaceID
+	workspaceLock := p.workspaceLock(workspaceID)
+	workspaceLock.Lock()
+	defer workspaceLock.Unlock()
 	p.lifecycleMu.Lock()
-	defer p.lifecycleMu.Unlock()
 	store, checkpoints := p.stateStore, p.checkpointStore
 	if store == nil || checkpoints == nil {
+		p.lifecycleMu.Unlock()
 		return nil, errors.New("environment: E2B durable workspace stores are required")
 	}
-	workspaceID := spec.WorkspaceID
 	runID := spec.RunID
 	if p.active == nil {
 		p.active = make(map[string]string)
 	}
 	if activeRun := p.active[workspaceID]; activeRun != "" {
+		p.lifecycleMu.Unlock()
 		return nil, fmt.Errorf("environment: workspace %q already has active E2B run %q", workspaceID, activeRun)
 	}
+	p.lifecycleMu.Unlock()
 	if runID == "" {
 		return nil, errors.New("environment: durable E2B session requires a run ID")
 	}
@@ -107,6 +114,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 	}
 	p.debugf("workspace=%q strategy=%s checkpoint=%t", workspaceID, workspaceState.Strategy, workspaceState.CheckpointRef != "")
 	var credentials gitworkspace.Credentials
+	defer func() { startErr = credentials.RedactError(startErr) }()
 	if spec.GitAllRepositories && p.GitCredentials == nil {
 		return nil, errors.New("environment: installation-wide Git access requires GitHub App authentication")
 	}
@@ -143,7 +151,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 			p.debugf("workspace=%q sandbox=%q restoring checkpoint=%s", workspaceID, sandbox.ID, workspaceState.CheckpointRef)
 		}
 		workspaceState, err = placeWorkspace(
-			ctx, client, sandbox, store, checkpoints, workspaceState, env, cfg.maxWorkspaceBytes, cfg.onError, p.OnDebug,
+			ctx, client, sandbox, store, checkpoints, workspaceState, env, credentials, cfg.maxWorkspaceBytes, cfg.onError, p.OnDebug,
 		)
 		if err != nil {
 			return nil, errors.Join(err, cleanup())
@@ -211,7 +219,9 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (environmen
 		return nil, errors.Join(ctx.Err(), host.Close(), cleanup())
 	}
 	started = true
+	p.lifecycleMu.Lock()
 	p.active[workspaceID] = runID
+	p.lifecycleMu.Unlock()
 	session := &e2bSession{
 		host:              host,
 		cancelTransport:   cancelSession,
@@ -252,6 +262,12 @@ type e2bConfig struct {
 
 func (p *Provider) debugf(format string, args ...any) {
 	debugE2B(p.OnDebug, format, args...)
+}
+
+func (p *Provider) workspaceLock(id string) *sync.Mutex {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(id))
+	return &p.workspaceLocks[hash.Sum32()%uint32(len(p.workspaceLocks))]
 }
 
 func debugE2B(debug func(string), format string, args ...any) {
@@ -460,35 +476,45 @@ func (p *Provider) janitor(ctx context.Context, cfg e2bConfig) {
 func (p *Provider) cleanExpired(ctx context.Context, cfg e2bConfig) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	// Maintenance can wait for the next sweep. Never block shutdown behind a
-	// startup holding the lifecycle lock while doing network I/O.
-	if !p.lifecycleMu.TryLock() {
+	p.lifecycleMu.Lock()
+	store := p.stateStore
+	p.lifecycleMu.Unlock()
+	if store == nil {
 		return
 	}
-	defer p.lifecycleMu.Unlock()
-	if p.stateStore == nil {
-		return
-	}
-	states, err := p.stateStore.ExpiredEnvironmentStates(ctx, "e2b", time.Now().UTC(), 100)
+	states, err := store.ExpiredEnvironmentStates(ctx, "e2b", time.Now().UTC(), 100)
 	if err != nil {
 		p.report(cfg, err)
 		return
 	}
 	client := &e2bClient{apiKey: cfg.apiKey, apiURL: cfg.apiURL, envdURL: cfg.envdURL, http: cfg.http}
 	for _, state := range states {
-		if p.active[state.WorkspaceID] != "" {
-			continue
-		}
-		p.debugf("workspace=%q sandbox=%q cleanup expired state=%s", state.WorkspaceID, state.EnvironmentID, state.Status)
-		if err := client.killSandbox(ctx, state.EnvironmentID); err != nil {
-			p.report(cfg, err)
-			continue
-		}
-		if err := p.stateStore.DeleteEnvironmentState(ctx, state.WorkspaceID, state.EnvironmentID); err != nil {
-			p.report(cfg, err)
-		} else {
-			p.debugf("workspace=%q sandbox=%q deleted", state.WorkspaceID, state.EnvironmentID)
-		}
+		p.cleanExpiredState(ctx, cfg, client, store, state)
+	}
+}
+
+func (p *Provider) cleanExpiredState(ctx context.Context, cfg e2bConfig, client *e2bClient, store environment.StateStore, state environment.State) {
+	workspaceLock := p.workspaceLock(state.WorkspaceID)
+	// Maintenance can wait for the next sweep if this workspace is busy.
+	if !workspaceLock.TryLock() {
+		return
+	}
+	defer workspaceLock.Unlock()
+	p.lifecycleMu.Lock()
+	active := p.active[state.WorkspaceID] != ""
+	p.lifecycleMu.Unlock()
+	if active {
+		return
+	}
+	p.debugf("workspace=%q sandbox=%q cleanup expired state=%s", state.WorkspaceID, state.EnvironmentID, state.Status)
+	if err := client.killSandbox(ctx, state.EnvironmentID); err != nil {
+		p.report(cfg, err)
+		return
+	}
+	if err := store.DeleteEnvironmentState(ctx, state.WorkspaceID, state.EnvironmentID); err != nil {
+		p.report(cfg, err)
+	} else {
+		p.debugf("workspace=%q sandbox=%q deleted", state.WorkspaceID, state.EnvironmentID)
 	}
 }
 

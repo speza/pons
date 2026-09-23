@@ -19,6 +19,7 @@ func provisionGitWorkspace(
 	checkpoints environment.CheckpointStore,
 	state environment.WorkspaceState,
 	env map[string]string,
+	credentials gitworkspace.Credentials,
 	limit int64,
 	onError func(error),
 	onDebug func(string),
@@ -33,7 +34,7 @@ func provisionGitWorkspace(
 		{step: "prepare", command: "/bin/rm", args: []string{"-rf", defaultE2BWorkspace}, cwd: "/home/user"},
 		{step: "git init", command: "/usr/bin/git", args: []string{"init", defaultE2BWorkspace}, cwd: "/home/user"},
 		{step: "git remote add", command: "/usr/bin/git", args: []string{"-C", defaultE2BWorkspace, "remote", "add", "origin", state.SourceRef}, cwd: "/home/user"},
-		{step: "git fetch", command: "/usr/bin/git", args: []string{"-C", defaultE2BWorkspace, "fetch", "--depth=1", "--no-tags", "origin", state.BaseRevision}, cwd: "/home/user", authenticated: true},
+		{step: "git fetch", command: "/usr/bin/git", args: []string{"-C", defaultE2BWorkspace, "fetch", "--no-tags", "origin", state.BaseRevision}, cwd: "/home/user", authenticated: true},
 		{step: "git checkout", command: "/usr/bin/git", args: []string{"-C", defaultE2BWorkspace, "checkout", "-b", gitworkspace.BranchName(state.ID), "FETCH_HEAD"}, cwd: "/home/user"},
 		{step: "archive initial checkout", command: "/bin/tar", args: []string{"--hard-dereference", "-cf", workspaceCheckpointPath, "-C", defaultE2BWorkspace, "."}, cwd: "/home/user"},
 	}
@@ -46,7 +47,7 @@ func provisionGitWorkspace(
 			commandEnv = env
 		}
 		if _, _, err := client.run(ctx, sandbox, command.command, command.args, command.cwd, commandEnv); err != nil {
-			return environment.WorkspaceState{}, fmt.Errorf("environment: provision E2B Git workspace step %q: %w", command.step, err)
+			return environment.WorkspaceState{}, fmt.Errorf("environment: provision E2B Git workspace step %q: %w", command.step, credentials.RedactError(err))
 		}
 		if command.command == "/usr/bin/git" {
 			debugE2B(onDebug, "workspace=%q sandbox=%q %s completed", state.ID, sandbox.ID, command.step)
