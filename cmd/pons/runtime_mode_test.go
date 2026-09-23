@@ -34,6 +34,11 @@ type recordingEnvironment struct {
 
 func (p *recordingEnvironment) Start(_ context.Context, spec environment.Spec) (environment.HandsSession, error) {
 	p.starts.Add(1)
+	if spec.ReportProgress != nil {
+		if err := spec.ReportProgress("sandbox.provision", "Provisioning test sandbox…"); err != nil {
+			return nil, err
+		}
+	}
 	p.specs <- spec
 	return recordingSession{closes: &p.closes}, nil
 }
@@ -119,8 +124,8 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 			GitRepository: "https://github.com/acme/a.git", GitRevision: strings.Repeat("a", 40),
 			Messages: append([]ponsruntime.Message(nil), history...),
 			Emit: func(event ponsruntime.RunEvent) error {
-				if event.Type == ponsruntime.EventRunProgress {
-					progress = append(progress, event.Stage)
+				if event.Type == ponsruntime.EventEnvironmentProgress {
+					progress = append(progress, event.Message)
 				}
 				return nil
 			},
@@ -154,7 +159,7 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 	if got := debugLog.String(); !strings.Contains(got, `"sandbox":"recording"`) || !strings.Contains(got, `"workspace":""`) || !strings.Contains(got, `"conversation_id":"conversation-1"`) || strings.Contains(got, "answer 1") || strings.Contains(got, "answer 2") {
 		t.Fatalf("unexpected structured run log: %s", got)
 	}
-	if len(progress) != 6 || progress[0] != "Preparing sandbox…" || progress[1] != "Sandbox ready" || progress[2] != "Saving sandbox state…" {
+	if len(progress) != 2 || progress[0] != "Provisioning test sandbox…" || progress[1] != "Provisioning test sandbox…" {
 		t.Fatalf("run progress = %v", progress)
 	}
 	for i := 1; i <= 2; i++ {
@@ -196,6 +201,23 @@ func TestRuntimeServerConfiguresAndClosesStatefulEnvironment(t *testing.T) {
 	}
 	if err := <-provider.closed; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAgentRunnerSelectsConversationEnvironment(t *testing.T) {
+	provider := &recordingEnvironment{}
+	runner := &agentRunner{opts: serverOptions{Sandbox: "seatbelt", Environment: provider}}
+
+	selected, _, name, err := runner.executionEnvironment("none")
+	if err != nil || selected != nil || name != "none" {
+		t.Fatalf("in-process selection = provider %v, name %q, err %v", selected, name, err)
+	}
+	selected, _, name, err = runner.executionEnvironment("seatbelt")
+	if err != nil || selected != provider || name != "seatbelt" {
+		t.Fatalf("seatbelt selection = provider %v, name %q, err %v", selected, name, err)
+	}
+	if _, _, _, err := runner.executionEnvironment("unknown"); err == nil {
+		t.Fatal("unknown environment unexpectedly accepted")
 	}
 }
 
@@ -258,6 +280,7 @@ func TestRuntimeServerRejectsBrowserAndReboundRequests(t *testing.T) {
 	}{
 		{name: "loopback", host: "127.0.0.1:7337", want: http.StatusNoContent},
 		{name: "localhost", host: "localhost:7337", want: http.StatusNoContent},
+		{name: "same-origin browser", host: "127.0.0.1:7337", origin: "http://127.0.0.1:7337", want: http.StatusNoContent},
 		{name: "rebound host", host: "attacker.example:7337", want: http.StatusForbidden},
 		{name: "browser origin", host: "127.0.0.1:7337", origin: "https://attacker.example", want: http.StatusForbidden},
 	} {

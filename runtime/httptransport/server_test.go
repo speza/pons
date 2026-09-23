@@ -20,11 +20,19 @@ type fakeRuntime struct {
 	accepted       ponsruntime.AcceptedMessage
 	submitted      []ponsruntime.TextPart
 	createdOptions ponsruntime.ConversationOptions
+	conversations  []ponsruntime.Conversation
+	createdEnv     string
 }
 
 func (f *fakeRuntime) CreateConversation(_ context.Context, options ponsruntime.ConversationOptions) (ponsruntime.Conversation, error) {
 	f.createdOptions = options
+	f.createdEnv = options.Environment
+
 	return f.created, nil
+}
+
+func (f *fakeRuntime) Conversations(context.Context) ([]ponsruntime.Conversation, error) {
+	return f.conversations, nil
 }
 
 func (f *fakeRuntime) Submit(_ context.Context, _, _ string, parts []ponsruntime.TextPart) (ponsruntime.AcceptedMessage, error) {
@@ -84,6 +92,20 @@ func TestCreateConversationPassesGitSelection(t *testing.T) {
 	}
 }
 
+func TestCreateConversationPassesGitBranch(t *testing.T) {
+	runtime := &fakeRuntime{created: ponsruntime.Conversation{ID: "session-1"}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/conversations", strings.NewReader(`{
+		"environment":"e2b",
+		"git_repository":"https://github.com/acme/a.git",
+		"git_revision":"refs/heads/feature/work"
+	}`))
+	recorder := httptest.NewRecorder()
+	Handler(runtime).ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusCreated || runtime.createdOptions.GitRevision != "refs/heads/feature/work" {
+		t.Fatalf("status = %d, options = %+v", recorder.Code, runtime.createdOptions)
+	}
+}
+
 func TestCreateConversationPassesHostWorkspace(t *testing.T) {
 	runtime := &fakeRuntime{created: ponsruntime.Conversation{ID: "session-1"}}
 	req := httptest.NewRequest(http.MethodPost, "/v1/conversations", strings.NewReader(`{"workspace":"/projects/repo-a"}`))
@@ -91,6 +113,49 @@ func TestCreateConversationPassesHostWorkspace(t *testing.T) {
 	Handler(runtime).ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusCreated || runtime.createdOptions.Workspace != "/projects/repo-a" {
 		t.Fatalf("status = %d, options = %+v", recorder.Code, runtime.createdOptions)
+
+	}
+}
+
+func TestHandlerListsConversations(t *testing.T) {
+	runtime := &fakeRuntime{conversations: []ponsruntime.Conversation{{ID: "conversation-1", Workspace: "/workspace"}}}
+	req := httptest.NewRequest(http.MethodGet, "/v1/conversations", nil)
+	recorder := httptest.NewRecorder()
+	Handler(runtime).ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if body := recorder.Body.String(); !strings.Contains(body, `"conversation_id":"conversation-1"`) {
+		t.Fatalf("list body = %s", body)
+	}
+}
+
+func TestHandlerCreatesConversationWithEnvironment(t *testing.T) {
+	runtime := &fakeRuntime{created: ponsruntime.Conversation{ID: "conversation-1"}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/conversations", strings.NewReader(`{"environment":"seatbelt"}`))
+	recorder := httptest.NewRecorder()
+	Handler(runtime).ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if runtime.createdEnv != "seatbelt" {
+		t.Fatalf("created environment = %q", runtime.createdEnv)
+	}
+}
+
+func TestHandlerReportsConfiguredOptions(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/options", nil)
+	recorder := httptest.NewRecorder()
+	HandlerWithOptions(&fakeRuntime{}, HandlerOptions{
+		Environments:       []string{"none", "seatbelt"},
+		DefaultEnvironment: "seatbelt",
+	}).ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"environments":["none","seatbelt"]`) || !strings.Contains(body, `"default_environment":"seatbelt"`) {
+		t.Fatalf("options body = %s", body)
 	}
 }
 

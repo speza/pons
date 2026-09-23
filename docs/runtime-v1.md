@@ -86,7 +86,21 @@ The first runtime does not include:
 
 The public HTTP resource and logical interaction. Its opaque server-generated
 ID identifies the canonical messages, submissions, runs, tools, and events in
-the runtime store.
+the runtime store. A conversation also records its selected execution
+environment; the server validates this opaque choice against the providers it
+configured before persisting the conversation. `none` uses the in-process
+hands, while `seatbelt` or `e2b` selects the corresponding configured provider.
+
+`POST /v1/conversations` requires a host workspace or a Git repository with a
+base commit or branch.
+The environment may be selected alongside the source:
+
+```json
+{"workspace":"/absolute/path/to/workspace","environment":"seatbelt"}
+```
+
+`GET /v1/options` returns the environment names and default exposed by the
+server so clients do not have to guess which providers are available.
 
 ### Inbound message
 
@@ -273,7 +287,9 @@ transaction.
 
 The event outbox supports bounded catch-up between a snapshot and a live SSE
 subscription. It is not a second conversation history. Token deltas, tool
-progress, run progress, and heartbeats bypass the outbox and are transient.
+progress and heartbeats bypass the outbox and are transient. Curated
+environment setup steps are durable events and also appear in snapshots so a
+client can reopen the setup log after a disconnect.
 
 The manager depends on the consumer-owned `runtime.Store` interface. Its
 operations describe atomic runtime transitions rather than SQL tables, so a
@@ -320,7 +336,7 @@ with instructions to recreate the runtime state directory rather than migrated.
 
 The first server binds to `127.0.0.1` and has no authentication. It must not
 bind publicly without a future authentication decision. It rejects non-loopback
-Host headers and browser Origin headers to reduce DNS rebinding exposure. Other
+Host headers and cross-origin browser Origin headers to reduce DNS rebinding exposure. Other
 processes running as the same user on the host remain trusted clients.
 
 ### Create a conversation
@@ -330,17 +346,35 @@ POST /v1/conversations
 Content-Type: application/json
 
 {
-  "git_repository": "https://github.com/OWNER/REPO.git",
-  "git_revision": "FULL_40_CHARACTER_COMMIT_ID",
-  "git_all_repositories": false
+  "workspace": "/absolute/path/to/workspace",
+  "environment": "seatbelt"
 }
 ```
+
+For a Git-backed conversation, use:
+
+```json
+{
+  "git_repository": "https://github.com/OWNER/REPO.git",
+  "git_revision": "FULL_40_CHARACTER_COMMIT_ID",
+  "git_all_repositories": false,
+  "environment": "e2b"
+}
+```
+
+To start from a branch, set `git_revision` to a fully qualified ref such as
+`"refs/heads/main"` instead of a commit ID. The branch tip is fetched when the
+workspace is first provisioned; subsequent runs restore its checkpoint.
+
+The `environment` field may be omitted to use the default returned by
+`GET /v1/options`.
 
 Response:
 
 ```json
 {
-  "conversation_id": "..."
+  "conversation_id": "...",
+  "environment": "seatbelt"
 }
 ```
 
@@ -353,6 +387,16 @@ instead provide `{"workspace":"/absolute/path/on/server"}`. The server
 validates that path against its configured root and state directory at creation
 and again before each run. It stores the canonical path so symlink aliases use
 the same workspace lock. The agent is the single configured agent, `pons`.
+
+### List conversations
+
+```http
+GET /v1/conversations
+```
+
+The response is an array of conversation metadata ordered newest first. It is
+intended for clients that need to restore a conversation picker without
+hydrating every conversation snapshot.
 
 ### Hydrate a conversation
 
@@ -381,8 +425,9 @@ snapshot's `event_cursor`. Durable events committed in between are replayed.
 If the requested cursor is older than the retained outbox, the server requires
 a new snapshot.
 
-Durable client events are entity-shaped updates that can be applied
-idempotently to the same local model returned by the snapshot API:
+Durable client events update entities or append curated environment progress.
+They can be applied idempotently to the same local model returned by the
+snapshot API:
 
 ```text
 message.upserted
@@ -391,6 +436,7 @@ submission.updated
 tool_call.updated
 run.updated
 conversation.updated
+environment.progress
 ```
 
 Transient live events are:
@@ -398,7 +444,6 @@ Transient live events are:
 ```text
 assistant.delta
 tool.progress
-run.progress
 heartbeat
 ```
 
@@ -407,10 +452,15 @@ receive a replay guarantee or advance the durable cursor. The complete
 assistant message and terminal tool state replace any live draft or progress
 display.
 
-`run.progress` carries a `run_progress.stage` string describing preparation,
-readiness, or sandbox shutdown for the active run. It is scoped by
-`conversation_id`, `run_id`, and `inbound_message_id`. Clients use it for a
-live status display; a reconnect may miss earlier stages.
+`environment.progress` carries an `environment_progress` object with a stable
+`step` identifier and a curated, human-readable `message`. Steps cover initial
+workspace preparation, E2B startup, Git fetch and checkout, checkpoint restore,
+and readiness. Warm runs that reconnect to the existing sandbox emit no setup
+steps; replacing a sandbox emits restore and readiness steps. Each event is
+scoped by `conversation_id`, `run_id`, and `inbound_message_id`, receives a
+durable cursor, and appears in the snapshot's
+`environment_events` list. The messages are deliberately authored by the
+server and provider rather than copied from raw commands or provider output.
 
 Each durable event has a cursor plus correlation fields where applicable:
 
@@ -418,7 +468,7 @@ Each durable event has a cursor plus correlation fields where applicable:
 conversation_id
 run_id
 inbound_message_id
-message | submission | tool_call | run
+message | submission | tool_call | run | environment_progress
 ```
 
 ### Submit a message
@@ -457,6 +507,10 @@ existing conversation: fetch snapshot -> render -> connect SSE after cursor
 
 A combined convenience endpoint can be added later; it is not the primitive
 contract.
+
+The server also serves the embedded browser client at `/` (with `/ui/` as an
+alias). It uses the same snapshot, submission, and SSE endpoints described
+above; it does not introduce a separate web-specific runtime model.
 
 ## Future extension points
 

@@ -2,8 +2,8 @@
 
 Configure one Pons server with an E2B template and, for private repositories,
 one GitHub App installation. Each client conversation chooses its own repository
-and pinned commit. Conversations using the same repository have independent
-branches, sandboxes, and checkpoints.
+and base branch or pinned commit. Conversations using the same repository have
+independent branches, sandboxes, and checkpoints.
 
 ## 1. Build the E2B template
 
@@ -80,14 +80,19 @@ the server.
 
 ## 4. Create and resume conversations
 
-In another terminal, supply a credential-free HTTPS URL and a full 40-character
-commit ID. The commit must exist in the selected repository:
+In another terminal, supply a credential-free HTTPS URL and either a remote
+branch name or a full 40-character commit ID:
 
 ```sh
 go run ./cmd/pons client -i \
   -git-repository https://github.com/OWNER/repo-a.git \
   -git-revision FULL_COMMIT_SHA
 ```
+
+To start from the tip of a branch, use `-git-branch main` instead of
+`-git-revision FULL_COMMIT_SHA`. Pons fetches that branch on the first run and
+keeps the resulting checkout in its workspace checkpoint. Later changes to the
+remote branch do not move an existing conversation.
 
 The client prints a conversation ID. Continue the same checkout with:
 
@@ -97,8 +102,8 @@ go run ./cmd/pons client -i -conversation CONVERSATION_ID
 
 Start another client without `-conversation` for an independent checkout,
 whether it uses `repo-a` again or a different repository. Git conversations
-do not need a host `-workspace`. Pons fetches the pinned commit with its
-ancestry and checks it out on `pons/<workspace>/work` without an upstream. The
+do not need a host `-workspace`. Pons fetches the selected commit or branch
+with its ancestry and checks it out on `pons/<workspace>/work` without an upstream. The
 agent can inspect history, commit, and push; to publish the branch it can run
 `git push -u origin HEAD`.
 

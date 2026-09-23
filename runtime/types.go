@@ -17,12 +17,12 @@ const (
 	EventToolCallUpdated     = "tool_call.updated"
 	EventRunUpdated          = "run.updated"
 	EventConversationUpdated = "conversation.updated"
+	EventEnvironmentProgress = "environment.progress"
 
 	// Transient events are delivered live but never persisted and never advance
 	// the durable reconnect cursor.
 	EventAssistantDelta = "assistant.delta"
 	EventToolProgress   = "tool.progress"
-	EventRunProgress    = "run.progress"
 	EventHeartbeat      = "heartbeat"
 
 	// Runner events are internal signals translated by Manager into the public
@@ -110,32 +110,33 @@ type Submission struct {
 }
 
 type ConversationView struct {
-	Conversation Conversation `json:"conversation"`
-	Messages     []Message    `json:"messages"`
-	Submissions  []Submission `json:"submissions,omitempty"`
-	ActiveRun    *Run         `json:"active_run,omitempty"`
-	ToolCalls    []ToolCall   `json:"tool_calls,omitempty"`
-	EventCursor  uint64       `json:"event_cursor"`
+	Conversation      Conversation `json:"conversation"`
+	Messages          []Message    `json:"messages"`
+	Submissions       []Submission `json:"submissions,omitempty"`
+	ActiveRun         *Run         `json:"active_run,omitempty"`
+	ToolCalls         []ToolCall   `json:"tool_calls,omitempty"`
+	EnvironmentEvents []Event      `json:"environment_events,omitempty"`
+	EventCursor       uint64       `json:"event_cursor"`
 }
 
 // Event is either a durable entity update (ID > 0) or a transient live event
 // (ID == 0). Durable events are replayable after ID; transient events never
 // advance Last-Event-ID.
 type Event struct {
-	ID               uint64                     `json:"cursor,omitempty"`
-	Type             string                     `json:"type"`
-	ConversationID   string                     `json:"conversation_id"`
-	RunID            string                     `json:"run_id,omitempty"`
-	InboundMessageID string                     `json:"inbound_message_id,omitempty"`
-	Message          *Message                   `json:"message,omitempty"`
-	Submission       *Submission                `json:"submission,omitempty"`
-	ToolCall         *ToolCall                  `json:"tool_call,omitempty"`
-	Run              *Run                       `json:"run,omitempty"`
-	Delta            *TextDelta                 `json:"delta,omitempty"`
-	Progress         *ToolProgress              `json:"progress,omitempty"`
-	RunProgress      *RunProgress               `json:"run_progress,omitempty"`
-	Metadata         map[string]json.RawMessage `json:"metadata,omitempty"`
-	CreatedAt        time.Time                  `json:"created_at"`
+	ID                  uint64                     `json:"cursor,omitempty"`
+	Type                string                     `json:"type"`
+	ConversationID      string                     `json:"conversation_id"`
+	RunID               string                     `json:"run_id,omitempty"`
+	InboundMessageID    string                     `json:"inbound_message_id,omitempty"`
+	Message             *Message                   `json:"message,omitempty"`
+	Submission          *Submission                `json:"submission,omitempty"`
+	ToolCall            *ToolCall                  `json:"tool_call,omitempty"`
+	Run                 *Run                       `json:"run,omitempty"`
+	Delta               *TextDelta                 `json:"delta,omitempty"`
+	Progress            *ToolProgress              `json:"progress,omitempty"`
+	EnvironmentProgress *EnvironmentProgress       `json:"environment_progress,omitempty"`
+	Metadata            map[string]json.RawMessage `json:"metadata,omitempty"`
+	CreatedAt           time.Time                  `json:"created_at"`
 }
 
 type TextDelta struct {
@@ -149,8 +150,9 @@ type ToolProgress struct {
 	Text       string `json:"text,omitempty"`
 }
 
-type RunProgress struct {
-	Stage string `json:"stage"`
+type EnvironmentProgress struct {
+	Step    string `json:"step"`
+	Message string `json:"message"`
 }
 
 type RunRequest struct {
@@ -158,6 +160,7 @@ type RunRequest struct {
 	RunID              string
 	InboundMessageID   string
 	Workspace          string
+	Environment        string
 	GitRepository      string
 	GitRevision        string
 	GitAllRepositories bool
@@ -168,7 +171,8 @@ type RunRequest struct {
 
 type RunEvent struct {
 	Type       string
-	Stage      string
+	Step       string
+	Message    string
 	Text       string
 	MessageID  string
 	PartID     string
@@ -198,6 +202,7 @@ type Conversation struct {
 	ID                 string    `json:"conversation_id"`
 	Workspace          string    `json:"workspace"`
 	WorkspaceLock      string    `json:"-"`
+	Environment        string    `json:"environment,omitempty"`
 	GitRepository      string    `json:"git_repository,omitempty"`
 	GitRevision        string    `json:"git_revision,omitempty"`
 	GitAllRepositories bool      `json:"git_all_repositories,omitempty"`
@@ -206,6 +211,7 @@ type Conversation struct {
 
 type ConversationOptions struct {
 	Workspace          string `json:"workspace,omitempty"`
+	Environment        string `json:"environment,omitempty"`
 	GitRepository      string `json:"git_repository,omitempty"`
 	GitRevision        string `json:"git_revision,omitempty"`
 	GitAllRepositories bool   `json:"git_all_repositories,omitempty"`

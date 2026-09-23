@@ -136,17 +136,20 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 	}
 
 	runner := &agentRunner{opts: opts, logger: logger}
+	environmentOptions := configuredEnvironments(opts)
 	backgroundErrors := make(chan error, 1)
 	manager, err := ponsruntime.New(ponsruntime.Config{
-		Store:                 store,
-		IndependentWorkspaces: opts.Sandbox == "e2b",
-		Runner:                runner, MaxConcurrent: opts.MaxConcurrent,
+		Store:              store,
+		Runner:             runner,
+		MaxConcurrent:      opts.MaxConcurrent,
+		EnvironmentOptions: environmentOptions,
+		DefaultEnvironment: defaultEnvironment(opts),
 		PrepareConversation: func(selection ponsruntime.ConversationOptions) (ponsruntime.ConversationOptions, error) {
 			if (selection.GitRepository == "") != (selection.GitRevision == "") {
 				return selection, errors.New("git repository and revision must be set together")
 			}
 			if selection.GitRepository != "" {
-				if opts.Sandbox != "e2b" {
+				if opts.Sandbox != "e2b" || selection.Environment != "e2b" {
 					return selection, errors.New("git workspace requires E2B sandbox")
 				}
 				if selection.Workspace != "" {
@@ -168,6 +171,9 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 				}
 			}
 			if selection.GitAllRepositories {
+				if selection.Environment != "e2b" {
+					return selection, errors.New("installation-wide Git access requires E2B sandbox")
+				}
 				provider, ok := opts.Environment.(*e2b.Provider)
 				if !ok || provider.GitCredentials == nil {
 					return selection, errors.New("installation-wide Git access requires E2B with GitHub App authentication")
@@ -175,6 +181,7 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 			}
 			return selection, nil
 		},
+
 		OnError: func(err error) {
 			logger.Error("runtime background failure", "error", err)
 			select {
@@ -189,8 +196,9 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 
 	defer manager.Close()
 	server := &http.Server{
-		Addr:              opts.Address,
-		Handler:           loopbackRequestOnly(httptransport.Handler(manager)),
+		Addr:    opts.Address,
+		Handler: loopbackRequestOnly(httptransport.HandlerWithOptions(manager, httptransport.HandlerOptions{Environments: environmentOptions, DefaultEnvironment: defaultEnvironment(opts)})),
+
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
@@ -246,7 +254,9 @@ func loopbackRequestOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, _, err := net.SplitHostPort(r.Host)
 		ip := net.ParseIP(host)
-		if err != nil || (host != "localhost" && (ip == nil || !ip.IsLoopback())) || r.Header.Get("Origin") != "" {
+		origin := r.Header.Get("Origin")
+		if err != nil || (host != "localhost" && (ip == nil || !ip.IsLoopback())) ||
+			(origin != "" && origin != "http://"+r.Host) {
 			http.Error(w, "request must originate from a loopback client", http.StatusForbidden)
 			return
 		}
@@ -254,7 +264,24 @@ func loopbackRequestOnly(next http.Handler) http.Handler {
 	})
 }
 
+func configuredEnvironments(opts serverOptions) []string {
+	options := []string{"none"}
+	sandbox := strings.TrimSpace(opts.Sandbox)
+	if opts.Environment != nil && sandbox != "" && !slices.Contains(options, sandbox) {
+		options = append(options, sandbox)
+	}
+	return options
+}
+
+func defaultEnvironment(opts serverOptions) string {
+	if opts.Environment != nil && strings.TrimSpace(opts.Sandbox) != "" {
+		return strings.TrimSpace(opts.Sandbox)
+	}
+	return "none"
+}
+
 func logDebugConfiguration(logger *slog.Logger, opts serverOptions) {
+
 	if !opts.Debug {
 		return
 	}
@@ -482,8 +509,11 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}()
 	plugins := make([]pons.Plugin, 0, 4+len(r.opts.PluginPaths))
 	effectiveSandbox, effectiveNetwork, effectiveEnvironmentID := "none", "host", ""
-	if r.opts.Environment != nil {
-		spec := r.opts.EnvironmentSpec
+	provider, spec, selectedEnvironment, environmentErr := r.executionEnvironment(request.Environment)
+	if environmentErr != nil {
+		return result, environmentErr
+	}
+	if provider != nil {
 		spec.WorkspaceID = request.ConversationID
 		spec.WorkspacePath = request.Workspace
 		spec.RunID = request.RunID
@@ -496,25 +526,20 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 			}
 		}
 		spec.GitAllRepositories = request.GitAllRepositories
+		reportProgress := func(step, message string) error {
+			return request.Emit(ponsruntime.RunEvent{Type: ponsruntime.EventEnvironmentProgress, Step: step, Message: message})
+		}
+		spec.ReportProgress = reportProgress
 		if request.GitRepository != "" || request.GitAllRepositories {
 			spec.Network = environment.NetworkEnabled
 		}
-		if emitErr := request.Emit(ponsruntime.RunEvent{Type: ponsruntime.EventRunProgress, Stage: "Preparing sandbox…"}); emitErr != nil {
-			return result, emitErr
-		}
 		runLog.Debug("environment starting", "sandbox", r.opts.Sandbox)
-		session, startErr := r.opts.Environment.Start(ctx, spec)
+		session, startErr := provider.Start(ctx, spec)
+
 		if startErr != nil {
 			return result, fmt.Errorf("start execution environment: %w", startErr)
 		}
 		defer func() {
-			stage := "Closing sandbox…"
-			if r.opts.Sandbox == "e2b" {
-				stage = "Saving sandbox state…"
-			}
-			if emitErr := request.Emit(ponsruntime.RunEvent{Type: ponsruntime.EventRunProgress, Stage: stage}); emitErr != nil {
-				err = errors.Join(err, emitErr)
-			}
 			closeErr := session.Close()
 			err = errors.Join(err, closeErr)
 			if closeErr == nil {
@@ -527,7 +552,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		effectiveNetwork = string(metadata.Network)
 		effectiveEnvironmentID = metadata.EnvironmentID
 		if effectiveSandbox == "" {
-			effectiveSandbox = r.opts.Sandbox
+			effectiveSandbox = selectedEnvironment
 		}
 		if effectiveNetwork == "" {
 			effectiveNetwork = string(spec.Network)
@@ -565,11 +590,6 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 
 	runLog.Debug("hands ready", "sandbox", effectiveSandbox, "sandbox_id", effectiveEnvironmentID,
 		"network", effectiveNetwork, "workspace", request.Workspace, "tools", len(core.ToolSpecs()))
-	if r.opts.Environment != nil {
-		if emitErr := request.Emit(ponsruntime.RunEvent{Type: ponsruntime.EventRunProgress, Stage: "Sandbox ready"}); emitErr != nil {
-			return result, emitErr
-		}
-	}
 	core.OnEventError(func(event pons.Event) error {
 		switch event.Type {
 		case pons.EventAssistantResponse:
@@ -609,6 +629,29 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}
 	runLog.Debug("answer ready", "turns", runResult.Turns, "answer_chars", len(runResult.Answer))
 	return ponsruntime.RunResult{Answer: runResult.Answer}, nil
+}
+
+func (r *agentRunner) executionEnvironment(requested string) (environment.Provider, environment.Spec, string, error) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		requested = strings.TrimSpace(r.opts.Sandbox)
+		// Direct agentRunner users may inject a provider without naming it.
+		// Server-created conversations always carry a configured choice.
+		if requested == "" && r.opts.Environment != nil {
+			return r.opts.Environment, r.opts.EnvironmentSpec, requested, nil
+		}
+	}
+	switch requested {
+	case "", "none":
+		return nil, environment.Spec{}, "none", nil
+	case "seatbelt", "e2b":
+		if r.opts.Environment == nil || strings.TrimSpace(r.opts.Sandbox) != requested {
+			return nil, environment.Spec{}, requested, fmt.Errorf("execution environment %q is not configured", requested)
+		}
+		return r.opts.Environment, r.opts.EnvironmentSpec, requested, nil
+	default:
+		return nil, environment.Spec{}, requested, fmt.Errorf("execution environment %q is not supported", requested)
+	}
 }
 
 func runtimeTurns(messages []ponsruntime.Message) ([]llm.Turn, error) {
@@ -676,9 +719,9 @@ func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, m
 		}
 		result, err := client.Send(ctx, conversationID, key, text, options, onSnapshot, func(event ponsruntime.Event) {
 			switch event.Type {
-			case ponsruntime.EventRunProgress:
-				if event.RunProgress != nil {
-					fmt.Printf("  %s\n", event.RunProgress.Stage)
+			case ponsruntime.EventEnvironmentProgress:
+				if event.EnvironmentProgress != nil {
+					fmt.Printf("  %s\n", event.EnvironmentProgress.Message)
 				}
 			case ponsruntime.EventToolCallUpdated:
 				if event.ToolCall != nil && event.ToolCall.Status == ponsruntime.ToolRequested {

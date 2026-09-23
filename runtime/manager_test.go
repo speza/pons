@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -132,6 +133,54 @@ func TestConversationUsesClientSelectedWorkspace(t *testing.T) {
 		Workspace: firstPath, GitRepository: "https://github.com/example/repo.git",
 	}); err == nil {
 		t.Fatal("conversation with both host and Git sources accepted")
+
+	}
+}
+
+func TestManagerPersistsConfiguredConversationEnvironment(t *testing.T) {
+	store, err := runtimesqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager, err := New(Config{
+		Store:              store,
+		Runner:             RunnerFunc(func(context.Context, RunRequest) (RunResult, error) { return RunResult{}, nil }),
+		EnvironmentOptions: []string{"none", "seatbelt", "e2b"},
+		DefaultEnvironment: "seatbelt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+
+	workspace := t.TempDir()
+	defaultConversation, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultConversation.Environment != "seatbelt" {
+		t.Fatalf("default environment = %q", defaultConversation.Environment)
+	}
+	inProcess, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: workspace, Environment: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inProcess.Environment != "none" {
+		t.Fatalf("explicit environment = %q", inProcess.Environment)
+	}
+	if defaultConversation.WorkspaceLock != workspace || inProcess.WorkspaceLock != workspace {
+		t.Fatalf("host workspace locks = %q, %q, want %q", defaultConversation.WorkspaceLock, inProcess.WorkspaceLock, workspace)
+	}
+	sandboxed, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: workspace, Environment: "e2b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sandboxed.WorkspaceLock != sandboxed.ID {
+		t.Fatalf("E2B workspace lock = %q, want %q", sandboxed.WorkspaceLock, sandboxed.ID)
+	}
+	if _, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: workspace, Environment: "unknown"}); !errors.Is(err, ponsruntime.ErrInvalidEnvironment) {
+		t.Fatalf("unknown environment error = %v", err)
 	}
 }
 
@@ -231,6 +280,7 @@ func TestRepairScanFindsWorkAfterLostWake(t *testing.T) {
 	defer manager.Close()
 	waitUntil(t, func() bool { return store.claimCalls.Load() > 0 }, "initial runnable check did not run")
 	conversation, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,6 +525,7 @@ func TestConversationSerializesMessagesAndDeduplicates(t *testing.T) {
 	})
 	m := testManager(t, runner)
 	conversation, err := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,6 +582,7 @@ func TestBackgroundStoreFailureIsReported(t *testing.T) {
 	}
 	defer manager.Close()
 	conversation, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -561,6 +613,7 @@ func TestSnapshotThenEventsHasNoDurableGap(t *testing.T) {
 		}
 	}))
 	conversation, _ := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+
 	view, err := m.View(context.Background(), conversation.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -598,10 +651,10 @@ func TestSnapshotThenEventsHasNoDurableGap(t *testing.T) {
 	}
 }
 
-func TestTransientDeltaIsLiveOnlyAndDoesNotAdvanceCursor(t *testing.T) {
+func TestEnvironmentProgressIsDurableWhileDeltaIsLiveOnly(t *testing.T) {
 	release := make(chan struct{})
 	m := testManager(t, RunnerFunc(func(ctx context.Context, request RunRequest) (RunResult, error) {
-		if err := request.Emit(RunEvent{Type: ponsruntime.EventRunProgress, Stage: "Preparing sandbox…"}); err != nil {
+		if err := request.Emit(RunEvent{Type: ponsruntime.EventEnvironmentProgress, Step: "sandbox.prepare", Message: "Preparing sandbox…"}); err != nil {
 			return RunResult{}, err
 		}
 		if err := request.Emit(RunEvent{Type: EventAssistantDelta, MessageID: "draft", PartID: "text", Text: "hel"}); err != nil {
@@ -615,6 +668,7 @@ func TestTransientDeltaIsLiveOnlyAndDoesNotAdvanceCursor(t *testing.T) {
 		}
 	}))
 	conversation, _ := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+
 	ctx := t.Context()
 	stream, err := m.Subscribe(ctx, conversation.ID, 0)
 	if err != nil {
@@ -628,8 +682,8 @@ func TestTransientDeltaIsLiveOnlyAndDoesNotAdvanceCursor(t *testing.T) {
 	for {
 		select {
 		case event := <-stream:
-			if event.Type == ponsruntime.EventRunProgress {
-				if event.ID != 0 || event.RunProgress == nil || event.RunProgress.Stage != "Preparing sandbox…" {
+			if event.Type == ponsruntime.EventEnvironmentProgress {
+				if event.ID == 0 || event.EnvironmentProgress == nil || event.EnvironmentProgress.Step != "sandbox.prepare" || event.EnvironmentProgress.Message != "Preparing sandbox…" {
 					t.Fatalf("progress = %+v", event)
 				}
 				seenProgress = true
@@ -646,13 +700,21 @@ func TestTransientDeltaIsLiveOnlyAndDoesNotAdvanceCursor(t *testing.T) {
 					t.Fatal(loadErr)
 				}
 				for _, durable := range persisted {
-					if durable.Type == EventAssistantDelta || durable.Type == ponsruntime.EventRunProgress {
+					if durable.Type == EventAssistantDelta {
 						t.Fatal("transient event was persisted")
 					}
+				}
+				if !slices.ContainsFunc(persisted, func(event Event) bool {
+					return event.Type == ponsruntime.EventEnvironmentProgress && event.EnvironmentProgress != nil && event.EnvironmentProgress.Step == "sandbox.prepare"
+				}) {
+					t.Fatal("environment progress was not persisted")
 				}
 				view, viewErr := m.View(context.Background(), conversation.ID)
 				if viewErr != nil {
 					t.Fatal(viewErr)
+				}
+				if len(view.EnvironmentEvents) != 1 || view.EnvironmentEvents[0].EnvironmentProgress.Message != "Preparing sandbox…" {
+					t.Fatalf("environment progress snapshot = %+v", view.EnvironmentEvents)
 				}
 				for _, message := range view.Messages {
 					if message.ID == "draft" {
@@ -681,6 +743,7 @@ func TestToolLifecycleUsesEntityUpserts(t *testing.T) {
 		return RunResult{Answer: "hello " + request.Text}, nil
 	}))
 	conversation, err := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -720,6 +783,7 @@ func TestFailedRunIsDurableAndNotRetried(t *testing.T) {
 		return RunResult{}, errors.New("failed after intent")
 	}))
 	conversation, _ := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+
 	_, err := m.Submit(context.Background(), conversation.ID, "once", []TextPart{{Type: "text", Text: "go"}})
 	if err != nil {
 		t.Fatal(err)

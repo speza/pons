@@ -15,25 +15,47 @@ import (
 	"time"
 
 	ponsruntime "github.com/samperrin/pons/runtime"
+	"github.com/samperrin/pons/web"
 )
 
 // Runtime is the transport-independent conversation surface required by the
 // native HTTP adapter.
 type Runtime interface {
 	CreateConversation(context.Context, ponsruntime.ConversationOptions) (ponsruntime.Conversation, error)
+	Conversations(context.Context) ([]ponsruntime.Conversation, error)
+
 	Submit(context.Context, string, string, []ponsruntime.TextPart) (ponsruntime.AcceptedMessage, error)
 	View(context.Context, string) (ponsruntime.ConversationView, error)
 	Subscribe(context.Context, string, uint64) (<-chan ponsruntime.Event, error)
 }
 
+type HandlerOptions struct {
+	Environments       []string `json:"environments"`
+	DefaultEnvironment string   `json:"default_environment"`
+}
+
 // Handler exposes the runtime v1 loopback HTTP API.
 func Handler(runtime Runtime) http.Handler {
-	server := server{runtime: runtime}
+	return HandlerWithOptions(runtime, HandlerOptions{})
+}
+
+// HandlerWithOptions exposes the runtime API and the execution environments
+// available to new conversations. The list is composed by the server, so the
+// browser cannot select an unconfigured or arbitrary provider.
+func HandlerWithOptions(runtime Runtime, options HandlerOptions) http.Handler {
+	server := server{runtime: runtime, options: cloneHandlerOptions(options)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/conversations", server.createConversation)
+	mux.HandleFunc("GET /v1/conversations", server.listConversations)
+	mux.HandleFunc("GET /v1/options", server.getOptions)
 	mux.HandleFunc("GET /v1/conversations/{id}", server.getConversation)
 	mux.HandleFunc("POST /v1/conversations/{id}/messages", server.submitMessage)
 	mux.HandleFunc("GET /v1/conversations/{id}/events", server.events)
+	mux.HandleFunc("GET /ui", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/", http.StatusPermanentRedirect)
+	})
+	mux.Handle("GET /ui/", http.StripPrefix("/ui", web.Handler()))
+	mux.Handle("GET /", web.Handler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"status":"ok"}`+"\n")
@@ -41,7 +63,25 @@ func Handler(runtime Runtime) http.Handler {
 	return securityHeaders(mux)
 }
 
-type server struct{ runtime Runtime }
+func cloneHandlerOptions(options HandlerOptions) HandlerOptions {
+	options.Environments = append([]string(nil), options.Environments...)
+	if len(options.Environments) == 0 {
+		options.Environments = []string{"none"}
+	}
+	if strings.TrimSpace(options.DefaultEnvironment) == "" {
+		options.DefaultEnvironment = options.Environments[0]
+	}
+	return options
+}
+
+type server struct {
+	runtime Runtime
+	options HandlerOptions
+}
+
+type conversationBody struct {
+	Environment string `json:"environment,omitempty"`
+}
 
 type messageBody struct {
 	Parts []ponsruntime.TextPart `json:"parts"`
@@ -60,9 +100,25 @@ func (s server) getConversation(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, view)
 }
 
+func (s server) listConversations(w http.ResponseWriter, r *http.Request) {
+	conversations, err := s.runtime.Conversations(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, conversations)
+}
+
+func (s server) getOptions(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.options)
+}
+
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		next.ServeHTTP(w, r)
 	})
@@ -70,12 +126,14 @@ func securityHeaders(next http.Handler) http.Handler {
 
 func (s server) createConversation(w http.ResponseWriter, r *http.Request) {
 	var options ponsruntime.ConversationOptions
+
 	if r.Body != nil {
 		defer r.Body.Close()
 		dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&options); err != nil && !errors.Is(err, io.EOF) {
-			writeAPIError(w, http.StatusBadRequest, "invalid JSON body")
+			writeAPIError(w, http.StatusBadRequest, "invalid conversation body: "+err.Error())
+
 			return
 		}
 		var extra any
@@ -88,10 +146,11 @@ func (s server) createConversation(w http.ResponseWriter, r *http.Request) {
 	conversation, err := s.runtime.CreateConversation(r.Context(), options)
 	if err != nil {
 		status := http.StatusInternalServerError
-		if errors.Is(err, ponsruntime.ErrInvalidConversation) {
+		if errors.Is(err, ponsruntime.ErrInvalidConversation) || errors.Is(err, ponsruntime.ErrInvalidEnvironment) {
 			status = http.StatusBadRequest
 		} else if errors.Is(err, ponsruntime.ErrClosed) {
 			status = http.StatusServiceUnavailable
+
 		}
 		writeAPIError(w, status, err.Error())
 		return

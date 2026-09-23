@@ -7,7 +7,7 @@ GOLANGCI_LINT_VERSION ?= v2.13.2
 LINT_GOTOOLCHAIN ?= go1.27.1
 E2B_CLI_VERSION ?= 2.20.0
 
-.PHONY: fmt fmt-check test test-race test-integration test-integration-race test-integration-seatbelt test-integration-e2b vet lint check install-tools smoke-runtime smoke-e2b cleanup-e2b cleanup-e2b-all build-e2b-hands e2b-template
+.PHONY: fmt fmt-check test test-race test-integration test-integration-race test-integration-seatbelt test-integration-e2b vet lint check install-tools smoke-runtime smoke-e2b cleanup-e2b cleanup-e2b-all build-e2b-hands e2b-template web-install web-check web-build
 
 fmt:
 	@if [ -n "$(GO_FILES)" ]; then gofmt -w $(GO_FILES); fi
@@ -71,3 +71,12 @@ build-e2b-hands:
 e2b-template: build-e2b-hands
 	@test -n "$$E2B_API_KEY" || (echo "E2B_API_KEY is required"; exit 1)
 	npx --yes @e2b/cli@$(E2B_CLI_VERSION) template create pons-hands --dockerfile e2b.Dockerfile
+
+web-install:
+	npm --prefix web install
+
+web-check:
+	npm --prefix web run check
+
+web-build:
+	npm --prefix web run build

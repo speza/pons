@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/samperrin/pons/environment/gitworkspace"
 	"github.com/samperrin/pons/plugins/brain/llm"
 	"github.com/samperrin/pons/protocol"
 	ponsruntime "github.com/samperrin/pons/runtime"
@@ -61,13 +62,14 @@ func main() {
 	flag.Var(&fallbackFlags, "fallback", "fallback provider as provider or provider:model (repeatable; tried in order when the primary fails)")
 	interactive := flag.Bool("i", false, "interactive runtime client: read tasks from stdin, one per line")
 	pluginPath := flag.String("plugin-path", "", "PATH supplied to external plugin children (credentials are not inherited by default)")
-	sandbox := flag.String("sandbox", "", `per-run execution environment: "seatbelt" | "e2b" (default: in-process)`)
+	sandbox := flag.String("sandbox", "", `default execution environment for conversations: "seatbelt" | "e2b" (default: in-process)`)
 	sandboxNetwork := flag.Bool("sandbox-network", false, "allow network access inside the per-run sandbox")
 	handsCommand := flag.String("hands-command", "", "local pons-hands executable used by Seatbelt (default: find pons-hands on PATH)")
 	e2bTemplate := flag.String("e2b-template", "", `E2B template containing pons-hands (default: "pons-hands")`)
 	e2bHandsPath := flag.String("e2b-hands-path", "", "absolute pons-hands path inside the E2B template (default: /usr/local/bin/pons-hands)")
 	gitRepository := flag.String("git-repository", "", "credential-free HTTPS repository to clone into a new E2B workspace")
 	gitRevision := flag.String("git-revision", "", "full immutable commit ID to check out in a new E2B Git workspace")
+	gitBranch := flag.String("git-branch", "", "remote branch to use for a new E2B Git workspace (alternative to --git-revision)")
 	gitAllRepositories := flag.Bool("git-all-repositories", false, "allow this session to clone any repository available to the GitHub App installation")
 	githubAppID := flag.Int64("github-app-id", 0, "deployment-owned GitHub App ID for private repository access")
 	githubAppInstallationID := flag.Int64("github-app-installation-id", 0, "GitHub App installation ID whose repositories are available to E2B hands")
@@ -81,8 +83,21 @@ func main() {
 	var pluginPaths repeatableStrings
 	flag.Var(&pluginPaths, "plugin", "explicit external hands plugin manifest (repeatable; never discovered implicitly)")
 	flag.Parse()
+	selectedGitRevision := *gitRevision
+	if *gitBranch != "" {
+		if *gitRevision != "" || *gitRepository == "" {
+			logger.Print("--git-branch requires --git-repository and cannot be combined with --git-revision")
+			os.Exit(1)
+		}
+		var err error
+		selectedGitRevision, err = gitworkspace.BranchRef(*gitBranch)
+		if err != nil {
+			logger.Printf("--git-branch: %v", err)
+			os.Exit(1)
+		}
+	}
 	conversationOptions := ponsruntime.ConversationOptions{
-		GitRepository: *gitRepository, GitRevision: *gitRevision,
+		GitRepository: *gitRepository, GitRevision: selectedGitRevision,
 		GitAllRepositories: *gitAllRepositories,
 	}
 	if *conversationID == "" && *gitRepository == "" {
@@ -253,7 +268,7 @@ func main() {
 		FSReadBytes: *fsReadBytes, BashTimeout: *bashTimeout, BashMaxLines: *bashMaxLines, BashMaxBytes: *bashMaxBytes,
 		PluginPaths: pluginPaths, PluginPath: *pluginPath, PluginMaxResultBytes: *pluginMaxResultBytes, Debug: *debug,
 		Sandbox: *sandbox, E2BTemplate: *e2bTemplate, E2BHandsPath: *e2bHandsPath,
-		GitRepository: *gitRepository, GitRevision: *gitRevision,
+		GitRepository: *gitRepository, GitRevision: selectedGitRevision,
 		GitAllRepositories: *gitAllRepositories,
 		GitHubAppID:        *githubAppID, GitHubAppInstallationID: *githubAppInstallationID, GitHubAppPrivateKey: *githubAppPrivateKey,
 		E2BAPIKey:          e2bAPIKey,
