@@ -287,7 +287,9 @@ transaction.
 
 The event outbox supports bounded catch-up between a snapshot and a live SSE
 subscription. It is not a second conversation history. Token deltas, tool
-progress, run progress, and heartbeats bypass the outbox and are transient.
+progress and heartbeats bypass the outbox and are transient. Curated
+environment setup steps are durable events and also appear in snapshots so a
+client can reopen the setup log after a disconnect.
 
 The manager depends on the consumer-owned `runtime.Store` interface. Its
 operations describe atomic runtime transitions rather than SQL tables, so a
@@ -423,8 +425,9 @@ snapshot's `event_cursor`. Durable events committed in between are replayed.
 If the requested cursor is older than the retained outbox, the server requires
 a new snapshot.
 
-Durable client events are entity-shaped updates that can be applied
-idempotently to the same local model returned by the snapshot API:
+Durable client events update entities or append curated environment progress.
+They can be applied idempotently to the same local model returned by the
+snapshot API:
 
 ```text
 message.upserted
@@ -433,6 +436,7 @@ submission.updated
 tool_call.updated
 run.updated
 conversation.updated
+environment.progress
 ```
 
 Transient live events are:
@@ -440,7 +444,6 @@ Transient live events are:
 ```text
 assistant.delta
 tool.progress
-run.progress
 heartbeat
 ```
 
@@ -449,11 +452,13 @@ receive a replay guarantee or advance the durable cursor. The complete
 assistant message and terminal tool state replace any live draft or progress
 display.
 
-`run.progress` carries a `run_progress.stage` string describing workspace
-preparation, E2B startup, Git fetch and checkout, readiness, or sandbox
-shutdown for the active run. It is scoped by
-`conversation_id`, `run_id`, and `inbound_message_id`. Clients use it for a
-live status display; a reconnect may miss earlier stages.
+`environment.progress` carries an `environment_progress` object with a stable
+`step` identifier and a curated, human-readable `message`. Steps cover workspace
+preparation, E2B startup, Git fetch and checkout, checkpoint restore, readiness,
+and sandbox shutdown. Each event is scoped by `conversation_id`, `run_id`, and
+`inbound_message_id`, receives a durable cursor, and appears in the snapshot's
+`environment_events` list. The messages are deliberately authored by the
+server and provider rather than copied from raw commands or provider output.
 
 Each durable event has a cursor plus correlation fields where applicable:
 
@@ -461,7 +466,7 @@ Each durable event has a cursor plus correlation fields where applicable:
 conversation_id
 run_id
 inbound_message_id
-message | submission | tool_call | run
+message | submission | tool_call | run | environment_progress
 ```
 
 ### Submit a message

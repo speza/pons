@@ -112,16 +112,14 @@ func (c *liveConversation) emitRunEvent(run Run, source RunEvent) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	switch source.Type {
-	case EventRunProgress:
-		c.broadcastLocked(Event{
-			Type:             EventRunProgress,
-			ConversationID:   run.ConversationID,
-			RunID:            run.ID,
-			InboundMessageID: run.InboundMessageID,
-			RunProgress:      &RunProgress{Stage: source.Stage},
-			CreatedAt:        time.Now().UTC(),
+	case EventEnvironmentProgress:
+		event, err := c.manager.store.AppendEnvironmentProgress(context.Background(), run, EnvironmentProgress{
+			Step: source.Step, Message: source.Message,
 		})
-		return nil
+		if err == nil {
+			c.broadcastLocked(event)
+		}
+		return err
 	case EventAssistantDelta:
 		messageID, partID := source.MessageID, source.PartID
 		if messageID == "" {

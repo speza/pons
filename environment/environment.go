@@ -65,8 +65,8 @@ type Spec struct {
 	Limits             ResourceLimits
 	WorkspacePlan      WorkspacePlan
 	GitAllRepositories bool
-	// ReportProgress emits transient, per-run setup stages to the caller.
-	ReportProgress func(string) error
+	// ReportProgress emits curated setup steps; callers may persist them.
+	ReportProgress func(step, message string) error
 }
 
 // Metadata identifies the effective backend and policy for audit and UI use.

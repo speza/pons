@@ -67,7 +67,7 @@ type Provider struct {
 func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSession environment.HandsSession, startErr error) {
 	progress := spec.ReportProgress
 	if progress == nil {
-		progress = func(string) error { return nil }
+		progress = func(string, string) error { return nil }
 	}
 	cfg, err := p.config()
 	if err != nil {
@@ -105,7 +105,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 	if runID == "" {
 		return nil, errors.New("environment: durable E2B session requires a run ID")
 	}
-	if err := progress("Preparing workspace source…"); err != nil {
+	if err := progress("workspace.prepare", "Preparing workspace source…"); err != nil {
 		return nil, err
 	}
 	workspaceState, err := loadOrCreateWorkspace(
@@ -129,7 +129,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 		return nil, errors.New("environment: installation-wide Git access requires GitHub App authentication")
 	}
 	if p.GitCredentials != nil && (spec.WorkspacePlan.Strategy == environment.WorkspaceStrategyGit || spec.GitAllRepositories) {
-		if err := progress("Requesting Git access…"); err != nil {
+		if err := progress("git.credentials", "Requesting Git access…"); err != nil {
 			return nil, err
 		}
 		p.debugf("workspace=%q requesting GitHub credentials scope=%s", workspaceID, gitScope(spec.GitAllRepositories))
@@ -140,7 +140,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 		maps.Copy(env, credentials.Environment())
 	}
 
-	if err := progress("Starting or reconnecting E2B sandbox…"); err != nil {
+	if err := progress("sandbox.start", "Starting or reconnecting E2B sandbox…"); err != nil {
 		return nil, err
 	}
 	sandbox, resumed, err := p.acquireSandbox(ctx, client, cfg, workspaceID, runID, network)
@@ -231,7 +231,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 	if err != nil {
 		return nil, errors.Join(err, cleanup())
 	}
-	if err := progress("Starting agent tools…"); err != nil {
+	if err := progress("tools.start", "Starting agent tools…"); err != nil {
 		return nil, errors.Join(err, host.Close(), cleanup())
 	}
 	if err := host.Start(ctx); err != nil {

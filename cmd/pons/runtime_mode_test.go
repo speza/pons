@@ -35,7 +35,7 @@ type recordingEnvironment struct {
 func (p *recordingEnvironment) Start(_ context.Context, spec environment.Spec) (environment.HandsSession, error) {
 	p.starts.Add(1)
 	if spec.ReportProgress != nil {
-		if err := spec.ReportProgress("Provisioning test sandbox…"); err != nil {
+		if err := spec.ReportProgress("sandbox.provision", "Provisioning test sandbox…"); err != nil {
 			return nil, err
 		}
 	}
@@ -124,8 +124,8 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 			GitRepository: "https://github.com/acme/a.git", GitRevision: strings.Repeat("a", 40),
 			Messages: append([]ponsruntime.Message(nil), history...),
 			Emit: func(event ponsruntime.RunEvent) error {
-				if event.Type == ponsruntime.EventRunProgress {
-					progress = append(progress, event.Stage)
+				if event.Type == ponsruntime.EventEnvironmentProgress {
+					progress = append(progress, event.Message)
 				}
 				return nil
 			},

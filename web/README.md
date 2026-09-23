@@ -19,3 +19,7 @@ README](../README.md#quick-start).
 
 Run `make web-build` after editing the frontend. The browser client and runtime
 API are still under development.
+
+Sandbox conversations show an environment setup log below the message that
+started each run. It opens while the run is active and remains available after
+reconnecting or reopening the conversation.

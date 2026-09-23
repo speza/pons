@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -640,10 +641,10 @@ func TestSnapshotThenEventsHasNoDurableGap(t *testing.T) {
 	}
 }
 
-func TestTransientDeltaIsLiveOnlyAndDoesNotAdvanceCursor(t *testing.T) {
+func TestEnvironmentProgressIsDurableWhileDeltaIsLiveOnly(t *testing.T) {
 	release := make(chan struct{})
 	m := testManager(t, RunnerFunc(func(ctx context.Context, request RunRequest) (RunResult, error) {
-		if err := request.Emit(RunEvent{Type: ponsruntime.EventRunProgress, Stage: "Preparing sandbox…"}); err != nil {
+		if err := request.Emit(RunEvent{Type: ponsruntime.EventEnvironmentProgress, Step: "sandbox.prepare", Message: "Preparing sandbox…"}); err != nil {
 			return RunResult{}, err
 		}
 		if err := request.Emit(RunEvent{Type: EventAssistantDelta, MessageID: "draft", PartID: "text", Text: "hel"}); err != nil {
@@ -671,8 +672,8 @@ func TestTransientDeltaIsLiveOnlyAndDoesNotAdvanceCursor(t *testing.T) {
 	for {
 		select {
 		case event := <-stream:
-			if event.Type == ponsruntime.EventRunProgress {
-				if event.ID != 0 || event.RunProgress == nil || event.RunProgress.Stage != "Preparing sandbox…" {
+			if event.Type == ponsruntime.EventEnvironmentProgress {
+				if event.ID == 0 || event.EnvironmentProgress == nil || event.EnvironmentProgress.Step != "sandbox.prepare" || event.EnvironmentProgress.Message != "Preparing sandbox…" {
 					t.Fatalf("progress = %+v", event)
 				}
 				seenProgress = true
@@ -689,13 +690,21 @@ func TestTransientDeltaIsLiveOnlyAndDoesNotAdvanceCursor(t *testing.T) {
 					t.Fatal(loadErr)
 				}
 				for _, durable := range persisted {
-					if durable.Type == EventAssistantDelta || durable.Type == ponsruntime.EventRunProgress {
+					if durable.Type == EventAssistantDelta {
 						t.Fatal("transient event was persisted")
 					}
+				}
+				if !slices.ContainsFunc(persisted, func(event Event) bool {
+					return event.Type == ponsruntime.EventEnvironmentProgress && event.EnvironmentProgress != nil && event.EnvironmentProgress.Step == "sandbox.prepare"
+				}) {
+					t.Fatal("environment progress was not persisted")
 				}
 				view, viewErr := m.View(context.Background(), conversation.ID)
 				if viewErr != nil {
 					t.Fatal(viewErr)
+				}
+				if len(view.EnvironmentEvents) != 1 || view.EnvironmentEvents[0].EnvironmentProgress.Message != "Preparing sandbox…" {
+					t.Fatalf("environment progress snapshot = %+v", view.EnvironmentEvents)
 				}
 				for _, message := range view.Messages {
 					if message.ID == "draft" {

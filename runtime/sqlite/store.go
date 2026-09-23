@@ -558,6 +558,35 @@ func appendEventTx(ctx context.Context, tx *sql.Tx, event ponsruntime.Event) (po
 	return event, nil
 }
 
+func (s *Store) AppendEnvironmentProgress(ctx context.Context, run ponsruntime.Run, progress ponsruntime.EnvironmentProgress) (ponsruntime.Event, error) {
+	if run.ID == "" || run.ConversationID == "" || progress.Step == "" || progress.Message == "" {
+		return ponsruntime.Event{}, errors.New("runtime: incomplete environment progress")
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return ponsruntime.Event{}, err
+	}
+	defer tx.Rollback()
+	var status string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM runs WHERE id = ? AND conversation_id = ?`, run.ID, run.ConversationID).Scan(&status); err != nil {
+		return ponsruntime.Event{}, err
+	}
+	if status != ponsruntime.RunRunning {
+		return ponsruntime.Event{}, errors.New("runtime: environment progress requires a running run")
+	}
+	event, err := appendEventTx(ctx, tx, ponsruntime.Event{
+		Type: ponsruntime.EventEnvironmentProgress, ConversationID: run.ConversationID,
+		RunID: run.ID, InboundMessageID: run.InboundMessageID, EnvironmentProgress: &progress,
+	})
+	if err != nil {
+		return ponsruntime.Event{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ponsruntime.Event{}, err
+	}
+	return event, nil
+}
+
 func (s *Store) Accept(ctx context.Context, conversationID, key string, parts []ponsruntime.TextPart) (ponsruntime.AcceptedMessage, []ponsruntime.Event, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
@@ -1211,6 +1240,10 @@ func (s *Store) View(ctx context.Context, conversationID string) (ponsruntime.Co
 	if err != nil {
 		return ponsruntime.ConversationView{}, err
 	}
+	view.EnvironmentEvents, err = loadEnvironmentProgressTx(ctx, tx, conversationID)
+	if err != nil {
+		return ponsruntime.ConversationView{}, err
+	}
 	view.ActiveRun, err = loadActiveRunTx(ctx, tx, conversationID)
 	if err != nil {
 		return ponsruntime.ConversationView{}, err
@@ -1219,6 +1252,29 @@ func (s *Store) View(ctx context.Context, conversationID string) (ponsruntime.Co
 		return ponsruntime.ConversationView{}, err
 	}
 	return view, nil
+}
+
+func loadEnvironmentProgressTx(ctx context.Context, tx *sql.Tx, conversationID string) ([]ponsruntime.Event, error) {
+	rows, err := tx.QueryContext(ctx, `
+SELECT payload FROM events WHERE conversation_id = ? AND type = ? ORDER BY cursor`,
+		conversationID, ponsruntime.EventEnvironmentProgress)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []ponsruntime.Event
+	for rows.Next() {
+		var payload []byte
+		if err := rows.Scan(&payload); err != nil {
+			return nil, err
+		}
+		var event ponsruntime.Event
+		if err := json.Unmarshal(payload, &event); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
 }
 
 func loadSubmissionsTx(ctx context.Context, tx *sql.Tx, conversationID string) ([]ponsruntime.Submission, error) {

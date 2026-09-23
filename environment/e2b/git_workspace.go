@@ -23,10 +23,10 @@ func provisionGitWorkspace(
 	limit int64,
 	onError func(error),
 	onDebug func(string),
-	progress func(string) error,
+	progress func(string, string) error,
 ) (environment.WorkspaceState, error) {
 	if progress == nil {
-		progress = func(string) error { return nil }
+		progress = func(string, string) error { return nil }
 	}
 	commands := []struct {
 		step          string
@@ -44,19 +44,19 @@ func provisionGitWorkspace(
 	}
 
 	for _, command := range commands {
-		var stage string
+		var step, message string
 		switch command.step {
 		case "prepare":
-			stage = "Preparing Git workspace…"
+			step, message = "git.prepare", "Preparing Git workspace…"
 		case "git fetch":
-			stage = "Fetching repository…"
+			step, message = "git.fetch", "Fetching repository…"
 		case "git checkout":
-			stage = "Creating work branch…"
+			step, message = "git.checkout", "Creating work branch…"
 		case "archive initial checkout":
-			stage = "Saving initial checkout…"
+			step, message = "checkpoint.save", "Saving initial checkout…"
 		}
-		if stage != "" {
-			if err := progress(stage); err != nil {
+		if step != "" {
+			if err := progress(step, message); err != nil {
 				return environment.WorkspaceState{}, err
 			}
 		}
@@ -75,7 +75,7 @@ func provisionGitWorkspace(
 		}
 	}
 
-	if err := progress("Downloading initial checkout…"); err != nil {
+	if err := progress("checkpoint.download", "Downloading initial checkout…"); err != nil {
 		return environment.WorkspaceState{}, err
 	}
 	body, err := stageWorkspaceArchive(func(out io.Writer) error {

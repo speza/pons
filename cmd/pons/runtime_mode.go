@@ -527,13 +527,14 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 			}
 		}
 		spec.GitAllRepositories = request.GitAllRepositories
-		spec.ReportProgress = func(stage string) error {
-			return request.Emit(ponsruntime.RunEvent{Type: ponsruntime.EventRunProgress, Stage: stage})
+		reportProgress := func(step, message string) error {
+			return request.Emit(ponsruntime.RunEvent{Type: ponsruntime.EventEnvironmentProgress, Step: step, Message: message})
 		}
+		spec.ReportProgress = reportProgress
 		if request.GitRepository != "" || request.GitAllRepositories {
 			spec.Network = environment.NetworkEnabled
 		}
-		if emitErr := request.Emit(ponsruntime.RunEvent{Type: ponsruntime.EventRunProgress, Stage: "Preparing sandbox…"}); emitErr != nil {
+		if emitErr := reportProgress("sandbox.prepare", "Preparing sandbox…"); emitErr != nil {
 			return result, emitErr
 		}
 		runLog.Debug("environment starting", "sandbox", r.opts.Sandbox)
@@ -543,11 +544,11 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 			return result, fmt.Errorf("start execution environment: %w", startErr)
 		}
 		defer func() {
-			stage := "Closing sandbox…"
+			step, message := "sandbox.close", "Closing sandbox…"
 			if r.opts.Sandbox == "e2b" {
-				stage = "Saving sandbox state…"
+				step, message = "sandbox.save", "Saving sandbox state…"
 			}
-			if emitErr := request.Emit(ponsruntime.RunEvent{Type: ponsruntime.EventRunProgress, Stage: stage}); emitErr != nil {
+			if emitErr := reportProgress(step, message); emitErr != nil {
 				err = errors.Join(err, emitErr)
 			}
 			closeErr := session.Close()
@@ -600,8 +601,8 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 
 	runLog.Debug("hands ready", "sandbox", effectiveSandbox, "sandbox_id", effectiveEnvironmentID,
 		"network", effectiveNetwork, "workspace", request.Workspace, "tools", len(core.ToolSpecs()))
-	if r.opts.Environment != nil {
-		if emitErr := request.Emit(ponsruntime.RunEvent{Type: ponsruntime.EventRunProgress, Stage: "Sandbox ready"}); emitErr != nil {
+	if provider != nil {
+		if emitErr := request.Emit(ponsruntime.RunEvent{Type: ponsruntime.EventEnvironmentProgress, Step: "sandbox.ready", Message: "Sandbox ready"}); emitErr != nil {
 			return result, emitErr
 		}
 	}
@@ -734,9 +735,9 @@ func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, m
 		}
 		result, err := client.Send(ctx, conversationID, key, text, options, onSnapshot, func(event ponsruntime.Event) {
 			switch event.Type {
-			case ponsruntime.EventRunProgress:
-				if event.RunProgress != nil {
-					fmt.Printf("  %s\n", event.RunProgress.Stage)
+			case ponsruntime.EventEnvironmentProgress:
+				if event.EnvironmentProgress != nil {
+					fmt.Printf("  %s\n", event.EnvironmentProgress.Message)
 				}
 			case ponsruntime.EventToolCallUpdated:
 				if event.ToolCall != nil && event.ToolCall.Status == ponsruntime.ToolRequested {

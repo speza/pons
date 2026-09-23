@@ -1,4 +1,5 @@
 import {
+  Fragment,
   type FormEvent,
   type KeyboardEvent,
   useCallback,
@@ -83,6 +84,7 @@ function applyEvent(view: ConversationView, event: RuntimeEvent): ConversationVi
     messages: view.messages,
     submissions: view.submissions,
     tool_calls: view.tool_calls,
+    environment_events: view.environment_events,
     active_run: view.active_run,
   };
   if (event.cursor && event.cursor > next.event_cursor) next.event_cursor = event.cursor;
@@ -99,6 +101,12 @@ function applyEvent(view: ConversationView, event: RuntimeEvent): ConversationVi
       break;
     case "run.updated":
       next.active_run = event.run && ["queued", "running"].includes(event.run.status) ? event.run : undefined;
+      break;
+    case "environment.progress":
+      if (event.cursor && event.environment_progress &&
+          !next.environment_events?.some((entry) => entry.cursor === event.cursor)) {
+        next.environment_events = [...(next.environment_events ?? []), event];
+      }
       break;
   }
   return next;
@@ -146,7 +154,6 @@ function App() {
   const [error, setError] = useState("");
   const [liveDraft, setLiveDraft] = useState("");
   const [toolProgress, setToolProgress] = useState<Record<string, string>>({});
-  const [runProgress, setRunProgress] = useState<{ runId: string; stage: string } | null>(null);
   const [followingChat, setFollowingChat] = useState(true);
   const messageScrollRef = useRef<HTMLElement | null>(null);
   const shouldFollowChat = useRef(true);
@@ -220,7 +227,6 @@ function App() {
     setView(null);
     setLiveDraft("");
     setToolProgress({});
-    setRunProgress(null);
     shouldFollowChat.current = true;
     setFollowingChat(true);
     setConnection("loading");
@@ -246,12 +252,6 @@ function App() {
           ...current,
           [`${event.run_id ?? ""}:${event.progress!.tool_call_id}`]: event.progress!.text ?? "",
         }));
-      }
-      if (event.type === "run.progress" && event.run_progress) {
-        setRunProgress({ runId: event.run_id ?? "", stage: event.run_progress.stage });
-      }
-      if (event.type === "run.updated" && event.run && !["queued", "running"].includes(event.run.status)) {
-        setRunProgress(null);
       }
       if (event.type === "tool_call.updated" && event.tool_call) {
         const tool = event.tool_call;
@@ -305,7 +305,7 @@ function App() {
   useLayoutEffect(() => {
     const scroll = messageScrollRef.current;
     if (scroll && shouldFollowChat.current) scroll.scrollTop = scroll.scrollHeight;
-  }, [activeId, view?.messages, view?.tool_calls, liveDraft, toolProgress]);
+  }, [activeId, view?.messages, view?.tool_calls, view?.environment_events, liveDraft, toolProgress]);
 
   const updateChatFollow = () => {
     const scroll = messageScrollRef.current;
@@ -353,6 +353,16 @@ function App() {
       toolResultsByKey: results,
     };
   }, [view?.messages, view?.tool_calls]);
+  const environmentLogsByMessage = useMemo(() => {
+    const grouped = new Map<string, RuntimeEvent[]>();
+    for (const event of view?.environment_events ?? []) {
+      if (!event.inbound_message_id || !event.environment_progress) continue;
+      const entries = grouped.get(event.inbound_message_id) ?? [];
+      entries.push(event);
+      grouped.set(event.inbound_message_id, entries);
+    }
+    return grouped;
+  }, [view?.environment_events]);
 
   const createNewConversation = async () => {
     setCreating(true);
@@ -418,12 +428,9 @@ function App() {
     reconnecting: "Reconnecting",
     error: "Unavailable",
   }[connection];
-  const runStatus = view?.conversation.conversation_id === activeId
-    ? view.active_run?.status ?? (runProgress ? "running" : null)
-    : null;
-  const runStage = runStatus === "running" && runProgress &&
-    (!view?.active_run || runProgress.runId === view.active_run.id)
-    ? runProgress.stage
+  const runStatus = view?.conversation.conversation_id === activeId ? view.active_run?.status : null;
+  const runStage = runStatus === "running"
+    ? [...(view?.environment_events ?? [])].reverse().find((event) => event.run_id === view?.active_run?.id)?.environment_progress?.message
     : null;
   const gitSourceSelected = newEnvironment === "e2b" && newSource === "git";
   const canCreateConversation = gitSourceSelected
@@ -644,13 +651,20 @@ function App() {
                 </div>
               )}
               {visibleMessages.map((message) => (
-                <MessageBubble
-                  key={message.id}
-                  message={message}
-                  toolProgress={toolProgress}
-                  toolCallsByKey={toolCallsByKey}
-                  toolResultsByKey={toolResultsByKey}
-                />
+                <Fragment key={message.id}>
+                  <MessageBubble
+                    message={message}
+                    toolProgress={toolProgress}
+                    toolCallsByKey={toolCallsByKey}
+                    toolResultsByKey={toolResultsByKey}
+                  />
+                  {message.role === "user" && environmentLogsByMessage.has(message.id) && (
+                    <EnvironmentSetupLog
+                      entries={environmentLogsByMessage.get(message.id)!}
+                      active={view?.active_run?.inbound_message_id === message.id}
+                    />
+                  )}
+                </Fragment>
               ))}
               {liveDraft && (
                 <article className="message message--assistant message--draft">
@@ -691,6 +705,29 @@ function App() {
         )}
       </main>
     </div>
+  );
+}
+
+function EnvironmentSetupLog({ entries, active }: { entries: RuntimeEvent[]; active: boolean }) {
+  const [expanded, setExpanded] = useState(active);
+  return (
+    <details className="setup-log" open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
+      <summary>
+        <span className="setup-log-title">Environment setup</span>
+        <span className="setup-log-count">{entries.length} {entries.length === 1 ? "step" : "steps"}</span>
+        {active && <span className="tool-spinner" aria-hidden="true" />}
+      </summary>
+      <ol className="setup-log-entries">
+        {entries.map((event) => (
+          <li key={event.cursor}>
+            <time dateTime={event.created_at}>
+              {new Intl.DateTimeFormat(undefined, { timeStyle: "medium" }).format(new Date(event.created_at))}
+            </time>
+            <span>{event.environment_progress?.message}</span>
+          </li>
+        ))}
+      </ol>
+    </details>
   );
 }
 

@@ -308,8 +308,8 @@ func testProvisionGitWorkspace(t *testing.T, revision string) {
 		1<<20,
 		nil,
 		func(event string) { debugEvents = append(debugEvents, event) },
-		func(stage string) error {
-			progressStages = append(progressStages, stage)
+		func(_, message string) error {
+			progressStages = append(progressStages, message)
 			return nil
 		},
 	)

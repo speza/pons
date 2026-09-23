@@ -85,6 +85,7 @@ export interface ConversationView {
   submissions?: Submission[];
   active_run?: Run;
   tool_calls?: ToolCall[];
+  environment_events?: RuntimeEvent[];
   event_cursor: number;
 }
 
@@ -99,8 +100,9 @@ export interface ToolProgress {
   text?: string;
 }
 
-export interface RunProgress {
-  stage: string;
+export interface EnvironmentProgress {
+  step: string;
+  message: string;
 }
 
 export interface RuntimeEvent {
@@ -115,7 +117,7 @@ export interface RuntimeEvent {
   run?: Run;
   delta?: TextDelta;
   progress?: ToolProgress;
-  run_progress?: RunProgress;
+  environment_progress?: EnvironmentProgress;
   created_at: string;
 }
 

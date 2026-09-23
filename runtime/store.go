@@ -36,6 +36,7 @@ type Store interface {
 	// renewable lease or distributed fencing contract.
 	ClaimRunnable(context.Context) (*ClaimedRun, error)
 	CommitAssistantTurn(context.Context, Run, []MessagePart) ([]Event, error)
+	AppendEnvironmentProgress(context.Context, Run, EnvironmentProgress) (Event, error)
 	ToolCompleted(context.Context, Run, protocol.ToolResult) ([]Event, error)
 	FinishRun(context.Context, Run, string) (Message, []Event, error)
 	// FailRun atomically resolves every still-requested tool as interrupted and
