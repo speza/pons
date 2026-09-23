@@ -141,6 +141,8 @@ remaining runtime contracts cover
 [agent memory](docs/adr-0019-agent-memory.md),
 [artifact transfer](docs/adr-0020-agent-artifact-transfer.md), and
 [durable work and approvals](docs/adr-0021-durable-work-and-waits.md).
+The [ADR implementation status](docs/adr-implementation-status.md) separates
+accepted decisions from features present in the current code.
 
 ### Web testing UI
 
