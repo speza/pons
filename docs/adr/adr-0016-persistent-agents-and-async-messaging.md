@@ -1,4 +1,4 @@
-# ADR-0016: Persistent agents delegate work through durable asynchronous messages
+# ADR-0016: Persistent agents run finite activations and start private tasks
 
 **Status:** Proposed
 **Implementation:** Not implemented
@@ -47,54 +47,32 @@ Idle agents consume no worker. `Core` remains the finite
 `respond -> execute -> interpret` kernel and does not own identity, routing,
 scheduling, or persistence.
 
-### 2. One agent shape, managed definitions, and revisions
+### 2. One agent shape and revisions
 
-There are no agent kinds. Every agent has the same definition shape: a stable
-non-secret ID, a persona (display name and administrator-written
-instructions), a provider slot, tools and capability grants, workspace and
-environment policy, memory capture policy, authorization policy, task
-profiles (section 7), and run limits. The owner names their agent and shapes
-it through conversation; nothing about it is fixed to a role. The runtime never branches on what
-kind of agent something is.
+There are no agent kinds. Every agent has the same definition: a stable
+non-secret ID, a persona, a provider slot, tools and grants, workspace and
+memory policy, task profiles (section 7), and run limits. The runtime never
+branches on what kind of agent something is. pons ships one default agent,
+which the owner names and shapes through conversation; context isolation
+comes from tasks, not from more agents.
 
-Context isolation comes from tasks, not from separate agents: the agent keeps
-one long-lived context and starts a task with a clean context, its own
-workspace, and a narrower profile when work should not pollute it. Additional
-agents remain possible, for example one per household member.
+The persona lives in a host-owned, versioned `PERSONA.md`, optionally seeded
+from configuration. It changes only when the owner edits it or accepts an
+exact proposal the agent made in the owner's conversation. The agent's file
+tools cannot write it, and learned memory under ADR-0019 never becomes
+persona by itself.
 
-Definitions are managed runtime resources stored in SQLite. An authorized
-administrator creates, edits, and disables agents through the management API,
-CLI, or web UI without restarting the server; a configuration file may seed
-definitions on first start. pons ships one default agent, which the owner
-names, with built-in general and coding task profiles; additional agents use
-the same storage and arrive later without a schema change. Until then the
-default agent's definition comes from configuration, each change is recorded
-as a new revision at startup, and management editing arrives with
-additional agents. One definition is the
-default, preserving the single-agent experience. Models cannot create or edit
-agent definitions.
+Every change to a definition, including the persona, is an immutable revision
+with a deterministic, non-secret fingerprint. Submissions and runs keep the
+revision they were accepted under; new work uses the current one. A revision
+that cannot be resolved fails closed rather than running under changed
+authority or falling back to another agent.
 
-Each edit creates an immutable revision with a deterministic, non-secret
-fingerprint. Submissions and runs record the revision they started under and
-keep it until they finish; new submissions use the current revision. A
-revision that cannot be resolved fails closed; work never runs under changed
-authority or falls back to the default agent. Disabling an agent stops new
-work, and history remains readable.
-
-The persona lives in a versioned `PERSONA.md` owned by the host, seeded from
-configuration. It changes only when the owner edits it or accepts an exact
-proposal the agent made in the owner's conversation; the agent's file tools
-cannot write it, and learned memory never becomes persona by itself. Each
-accepted change is a new revision for new work.
-
-A definition references provider and credential slots by name. Creating or
-editing an agent never creates, reads, or reveals a secret. The persona is
-trusted administrator input and stays separate from memory under ADR-0019,
-which is always rendered as data.
-
-The runtime directory exposes only identity, routing, scheduling, and policy
-facts. Application composition constructs brains, tools, and environments from
-the resolved revision.
+A definition references provider and credential slots by name and never
+contains secrets. Models cannot create or edit definitions. Additional agents,
+for example one per household member, use the same definitions and are
+managed through an owner-only surface when they arrive; until then the one
+agent comes from configuration and `PERSONA.md`.
 
 ### 3. Conversation ownership and workspaces
 
@@ -109,9 +87,8 @@ exclusion uses the stable `workspace_id`, which replaces the current use of
 conversation ID as `environment.Spec.WorkspaceID`. ADR-0022 defines how agent
 policy resolves it. Per-agent active-run capacity defaults to one.
 
-Composition validates workspace identity before accepting work: one ID maps
-to one provider, strategy, backing resource, and source configuration, and two
-local writable paths resolving to the same directory must share an ID.
+ADR-0022 also defines how workspace IDs are validated against their backing
+resources.
 
 ### 4. One trusted submission envelope
 
@@ -314,8 +291,8 @@ Denials use stable codes such as `task_profile_not_allowed` and
 
 The manager reserves a global `MaxConcurrent` slot before calling
 `ClaimRunnable`, as in ADR-0012. The claim enforces conversation and workspace
-exclusion and the agent's active-run cap. Fair queuing, token or cost budgets,
-and distributed workers are deferred.
+exclusion and the agent's active-run cap. Per-agent token budgets arrive with
+schedules; fair queuing and distributed workers are deferred.
 
 ### 12. Runtime and HTTP boundaries
 
@@ -323,16 +300,14 @@ Conversation creation accepts an optional `agent_id`; omission selects the
 default. Views expose ownership, source attribution, a conversation's
 delegations, and lineage status; `delegation.updated` is emitted on the
 parent's cursor. The API adds delegation and lineage cancellation and a
-lineage status read. The management surface adds agent create, edit,
-disable, and list under section 2. Remote authentication is a separate
-decision.
+lineage status read. Remote authentication is a separate decision.
 
 ## Store changes
 
 The store exposes domain transitions, not generic queue CRUD: create a
 delegation with its child and submission, finish a child while routing its
 result, cancel a delegation or lineage, and end a lineage. The store adds
-`agents` with immutable revisions, `delegations`, and `lineages`;
+`agent_revisions`, `delegations`, and `lineages`;
 conversations, submissions, and runs gain agent, revision, workspace, and
 envelope fields. The SQLite schema version
 increases; old databases may need recreation under the pre-compatibility
@@ -346,13 +321,10 @@ identity (sections 1–3) and lineages (sections 4–6) first, tasks
 
 Deterministic tests, without provider credentials or network, prove:
 
-- ownership selects the non-default agent, and different definitions produce
-  different composition through the same `Core`;
-- an agent created or edited at runtime serves new work without a restart,
-  in-flight work keeps its starting revision, and no model-facing tool can
-  create or edit a definition;
-- an unresolvable revision fails closed, and workspace IDs reject conflicting
-  mappings and path aliases;
+- a persona or definition change creates a new revision, in-flight work
+  keeps its starting revision, and an unresolvable revision fails closed;
+- the agent cannot change `PERSONA.md` except through an accepted proposal,
+  and no model-facing tool can create or edit a definition;
 - an empty or exhausted run cannot complete a lineage or delegation, and an
   early root response does not end the client's wait while delegations are
   outstanding;
@@ -369,8 +341,8 @@ Deterministic tests, without provider credentials or network, prove:
 - profile, workspace, egress, size, and per-lineage limits fail closed; and
 - an ineligible hands provider is rejected when delegation is enabled.
 
-Black-box coverage exercises two scripted agents through HTTP, SQLite, the
-scheduler, restart, and event replay.
+Black-box coverage exercises a scripted agent and a task through HTTP,
+SQLite, the scheduler, restart, and event replay.
 
 ## Alternatives and non-goals
 
@@ -391,19 +363,17 @@ broadcasts, priorities, workflow DAGs, or exactly-once external effects.
 ## Consequences
 
 One lightweight architecture lets a single named agent handle day-to-day,
-coding, and research work through tasks, extending existing queueing, persistence, recovery, and events rather
-than adding a service. Idle agents stay cheap, and private children with
+coding, and research work through tasks, extending existing queueing,
+persistence, recovery, and events rather than adding a service. Idle agents stay cheap, and private children with
 profile-scoped authority reduce leakage.
 
-Agents must write self-contained requests. Definition edits apply to new work
+Tasks need self-contained requests. Definition changes apply to new work
 only, and the generic tool crash window can still report an accepted
 delegation's receipt as outcome unknown.
 
 ## Deferred questions
 
-- Which use case, if any, justifies delegation deeper than one level?
-- How should token and cost budgets compose with retries and provider
-  failover?
+- Which use case, if any, justifies tasks that start further tasks?
 
 ## References
 

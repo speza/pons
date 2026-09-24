@@ -95,15 +95,15 @@ no use case needs is a candidate to simplify or defer.
 
 | ID | Use case |
 | --- | --- |
-| U1 | **Morning brief.** At 07:00 the assistant summarizes the owner's day to their chat channel, or stays silent when there is nothing worth sending. |
-| U2 | **Chat from anywhere.** The owner messages the assistant from phone or web; it remembers preferences across both. |
+| U1 | **Morning brief.** At 07:00 the agent summarizes the owner's day to their chat channel, or stays silent when there is nothing worth sending. |
+| U2 | **Chat from anywhere.** The owner messages the agent from phone or web; it remembers preferences across both. |
 | U3 | **Reminders.** "Remind me Friday to call X." |
 | U4 | **Watch for something.** "Tell me when PR #12 merges; give up after a week." |
 | U5 | **Coding from a phone.** The agent starts a coding task in a sandbox with the chosen repository and replies with the result. |
 | U6 | **Approve from a phone.** A coding task wants to push; the owner approves in chat hours later. |
 | U7 | **Research report.** A research task produces a file which comes back to the owner. |
-| U8 | **Household.** Two people share one assistant; each person's memory stays private. |
-| U9 | **The agent's own computer.** Over months the assistant keeps notes, scripts, and data in its workspace without Git; they survive sandbox loss, and the owner can roll back a bad change. |
+| U8 | **Household.** Two people share one agent; each person's memory stays private. |
+| U9 | **The agent's own computer.** Over months the agent keeps notes, scripts, and data in its workspace without Git; they survive sandbox loss, and the owner can roll back a bad change. |
 | U10 | **A second agent.** The owner creates another agent without a restart, for example for a household member who wants their own. |
 | U11 | **Inbox triage.** The agent sorts new email in a low-privilege task and drafts replies; nothing is sent until the owner approves. |
 | U12 | **Onboarding by chat.** A new agent asks what to call itself and what the owner wants help with; its name, role, and routines take effect once the owner confirms them. |
@@ -111,9 +111,9 @@ no use case needs is a candidate to simplify or defer.
 ## Your agent and its tasks
 
 The owner gets one agent and names it, usually by chatting with it: a new
-agent asks what to call itself, and the owner confirms its proposal. It has no predefined role: its
-persona, preferences, and routines come from the owner's instructions and
-its memory. It keeps one long-lived context, workspace, and memory, which is
+agent asks what to call itself, and the owner confirms its proposal. It has
+no predefined role: its persona, preferences, and routines come from the
+owner's instructions and its memory. It keeps one long-lived context, workspace, and memory, which is
 what makes it useful day to day.
 
 Work that would pollute that context runs as a **task**: a private
@@ -140,7 +140,8 @@ directly.
 
 ## Prior art
 
-Two hosted products launched in 2026 take the same broad shape.
+Two hosted products launched in 2026 take the same broad shape. The
+summaries below reflect their launch announcements as of September 2026.
 
 - [Grok Bot](https://x.ai/news/designing-grok-bot) (xAI) gives each account
   many named bots. Memory and routines belong to each bot; tools and skills
@@ -192,44 +193,20 @@ These explain the decisions below and should settle future disputes.
 
 ## Key decisions
 
-Each decision is summarized here; its ADR holds the contract.
+Each ADR holds the contract for its decision.
 
-- **One named agent with managed definitions** (ADR-0016). The agent is a
-  versioned definition in the runtime, so editing it never changes work
-  already in flight. *Why:* the owner shapes one agent instead of designing
-  roles, and more agents need no restart or new types.
-- **Lineages and explicit outcomes** (ADR-0016). Every external message
-  starts a lineage that ends as completed, failed, or cancelled, with
-  `no_update` as an explicit silent success. *Why:* a scheduled check that
-  finds nothing must be distinguishable from a crash.
-- **Tasks under owner-configured profiles** (ADR-0016). The agent starts
-  private, one-run tasks with a clean context and a profile's tools,
-  workspace, and memory access; tasks cannot start tasks. *Why:* context
-  isolation for coding and research without predefined agents, and without
-  the hardest multi-level lifecycle rules.
-- **Triggers and delivery around the same queue** (ADR-0018). Chat,
-  schedules, and events enter through one path; replies leave through a
-  durable outbox to a destination the owner configured. *Why:* one runner,
-  no model-chosen destinations, and no reruns when a send fails.
-- **Owner-linked identities** (ADR-0018). The owner declares which chat
-  accounts belong to which person. *Why:* memory follows a person across
-  apps without guessing identity.
-- **File-based, mount-scoped memory** (ADR-0019). Each agent has a
-  `MEMORY.md` tree with a folder per person; a run sees only the folders it
-  is entitled to, and the host saves and versions changes. *Why:* inspectable
-  and familiar to agents, while keeping household members private.
-- **Durable workspaces without Git** (ADR-0022). Workspaces are per task,
-  per agent, or per codebase, checkpointed with history, restore, and
-  optional off-host storage. *Why:* agents keep their work, and context
-  isolation is a workspace choice.
-- **Work items for ongoing intent** (ADR-0021). Reminders and watches are
-  stored with their wake conditions, not held by a running agent. *Why:*
-  weeks-long intent must survive restarts and cost nothing while waiting.
-- **Artifacts and durable approvals** (ADR-0020, ADR-0021). Summarized now,
-  specified when built. *Why:* needed for U6 and U7, but far enough away
-  that details would go stale.
-- **One trust domain per runtime** (ADR-0017). *Why:* honest security
-  claims, and a simple local runtime.
+| Decision | ADR | Why |
+| --- | --- | --- |
+| One named agent, versioned; persona in a host-owned `PERSONA.md` | 0016 | The owner shapes one agent instead of designing roles; edits never change work in flight |
+| Lineages with explicit outcomes, including silent `no_update` | 0016 | A check that finds nothing must be distinguishable from a crash |
+| Private one-level tasks under owner-configured profiles | 0016 | Context isolation for coding and research without predefined agents |
+| Chat, schedules, and events share one intake; replies leave through a durable outbox | 0018 | One runner, owner-set destinations, no reruns when a send fails |
+| Owner-linked identities across chat apps | 0018 | Memory follows a person without guessing identity |
+| File-based memory, scoped by what each run mounts | 0019 | Inspectable and familiar to agents, while keeping people apart |
+| Durable workspaces without Git | 0022 | The agent keeps its work across sandboxes and months |
+| Work items for reminders and watches | 0021 | Weeks-long intent survives restarts and costs nothing while waiting |
+| Artifacts and durable approvals, summarized for now | 0020, 0021 | Needed for later use cases; details would go stale |
+| One trust domain per runtime | 0017 | Honest security claims and a simple local runtime |
 
 ## Alternatives considered
 
@@ -269,22 +246,20 @@ Each decision is summarized here; its ADR holds the contract.
 
 ## Success measures
 
-- M1: the owner messages their agent from a real chat app and gets a
-  durable reply across a server restart.
-- M2: a morning brief arrives, or explicitly does not, every day for two
-  weeks without duplicates or silent failures, using the owner's memory.
-- M3: a coding task started from a phone returns a result without leaking
-  the agent's conversation context.
-- Throughout: nothing runs while idle, and the owner can inspect and correct
-  every memory and workspace change.
+The [plan's milestones](persistent-agents-v1.md#milestones) define each
+demonstration. Beyond them:
+
+- a daily brief runs for two weeks with no duplicates and no silent failures;
+- nothing runs while the agent is idle; and
+- the owner can inspect and roll back every memory, persona, and workspace
+  change.
 
 ## Open questions
 
-- Which chat app is the first connector?
-- What should the owner's management surface be first: web UI or CLI?
+- Telegram is proposed as the first chat connector; confirm before the plan
+  reaches it.
 - How much should automatic memory extraction save before review becomes
   necessary?
-- Do agents need token or cost budgets before M2?
 - Is serialized handling acceptable for the agent's own conversations, or
   does it need a second lane for quick replies?
 - **Households.** Should each household member get their own agent, as with

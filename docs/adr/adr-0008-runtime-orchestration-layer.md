@@ -1,6 +1,6 @@
 # ADR-0008: Long-lived orchestration is a pluggable runtime above the pons kernel
 
-**Status:** Accepted; state, storage, and coordination refined by ADR-0010 through ADR-0012, persistent multi-agent delegation proposed by ADR-0016, and trust-domain scope defined by ADR-0017
+**Status:** Accepted; state, storage, and coordination refined by ADR-0010 through ADR-0012, persistent agents and tasks proposed by ADR-0016, and trust-domain scope defined by ADR-0017
 **Implementation:** Local runtime implemented; other channel adapters remain proposed
 **Date:** 2026-09-18
 **Related:** ADR-0001, ADR-0007, ADR-0009, ADR-0010, ADR-0011, ADR-0012, ADR-0016, ADR-0017
@@ -217,9 +217,8 @@ When eventually added, handoff will fork a completed active transcript path
 into a new conversation; it will not roll back or fork real-world tool side
 effects.
 
-ADR-0016 separately proposes persistent agent identities and asynchronous
-agent-to-agent delegation over durable messages and private child
-conversations. That design extends the durable submission path without
+ADR-0016 separately proposes a persistent, owner-named agent that starts
+private tasks over durable messages and child conversations. That design extends the durable submission path without
 changing this ADR's finite-core boundary.
 
 ADR-0017 defines one runtime instance as one trusted administrative domain.

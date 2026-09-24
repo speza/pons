@@ -79,7 +79,7 @@ The first runtime does not include:
 
 - WhatsApp, Slack, Telegram, or other remote channels;
 - cross-channel identity linking or handoff;
-- multiple agents (proposed in
+- persistent agents and tasks (proposed in
   [ADR-0016](adr/adr-0016-persistent-agents-and-async-messaging.md));
 - mutually untrusted tenants in one runtime;
 - multi-process workers or distributed leases;

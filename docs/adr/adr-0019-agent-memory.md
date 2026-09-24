@@ -10,7 +10,7 @@
 A persistent agent owns many conversations and runs only when work arrives.
 Neither one unbounded conversation nor a resident model process is a sound
 memory system. A personal assistant needs durable preferences, facts, and
-commitments; a coding agent needs project conventions and decisions.
+commitments; coding work needs project conventions and decisions.
 
 Agents are already effective with files. A `MEMORY.md` index plus one file per
 memory is readable by the model, searchable with ordinary file tools, easy for

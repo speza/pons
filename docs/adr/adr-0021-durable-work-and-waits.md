@@ -76,6 +76,11 @@ cancelled lineage cannot stage a new wait. Work creation and decisions have
 policy limits on count, frequency, duration, and allowed event keys. An agent
 cannot create an unbounded self-wake loop or wait on an arbitrary URL.
 
+An agent may propose a recurring work item, such as a daily brief, from the
+owner's conversation. It is a confirmation of the exact recurrence, target,
+and task; nothing runs until the owner accepts it, and the accepted item then
+belongs to the owner's configuration like any configured schedule.
+
 A waiting item has no claimed run or workspace. The store owns its wake
 condition. Timer and event adapters from ADR-0018 atomically match and accept
 the next submission; repeated wakes use stable event IDs. Events arriving
@@ -169,6 +174,6 @@ and exact-action approval resume adds substantial runner complexity. These
 costs are explicit rather than hidden in a permanently running agent.
 
 This ADR does not define an autonomous planner, arbitrary workflow DAGs,
-shared team task lists, model-owned recurring schedules, detached
+shared team task lists, recurring work without owner confirmation, detached
 delegations, or a general external event broker. Those can build on work
 items only with their own authorization and lifecycle decisions.
