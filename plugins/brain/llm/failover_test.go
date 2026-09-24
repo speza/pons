@@ -3,6 +3,8 @@ package llm
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/samperrin/pons"
@@ -109,5 +111,31 @@ func TestNewRejectsBrokenFallback(t *testing.T) {
 		Fallbacks: []Fallback{{Provider: "openai", APIKey: "k"}},
 	}); err != nil {
 		t.Fatalf("fallback without env keys is fine when APIKey given: %v", err)
+	}
+}
+
+func TestNewUsesPrimarySlotIDForCodexAuth(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".pons"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store := `{"codex":{"access":"personal"},"codex-work":{"access":"work"}}`
+	if err := os.WriteFile(filepath.Join(home, ".pons", "auth.json"), []byte(store), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for id, want := range map[string]string{"": LegacyAuthID, "primary": LegacyAuthID, "codex-work": "codex-work"} {
+		b, err := New(Config{ID: id, Provider: "codex"})
+		if err != nil {
+			t.Fatalf("ID %q: %v", id, err)
+		}
+		client, ok := b.client.(*responsesClient)
+		if !ok {
+			t.Fatalf("ID %q: client %T", id, b.client)
+		}
+		if client.auth.id != want {
+			t.Fatalf("ID %q authenticated as %q, want %q", id, client.auth.id, want)
+		}
 	}
 }

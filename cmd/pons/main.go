@@ -225,6 +225,7 @@ func main() {
 	}
 
 	brainConfig := llm.Config{
+		ID:           primary.ID,
 		Provider:     primary.Provider,
 		Model:        primary.Model,
 		BaseURL:      primary.BaseURL,

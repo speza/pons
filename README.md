@@ -270,8 +270,9 @@ An agent without a name says so when asked, rather than using the model's own
 name.
 
 The agent's name appears in `GET /v1/options`, conversation snapshots, the
-CLI, and the web UI. Credentials stay in `~/.pons/config.json`, which has no
-agent settings.
+CLI, and the web UI. Provider settings and credentials stay in
+`~/.pons/config.json` and `~/.pons/auth.json`; the agent refers to a slot only
+by its `id`.
 
 Each start records an agent revision: a SHA-256 fingerprint of the name,
 persona, provider slot ID, model, maximum turns, and plugin paths, never
@@ -282,8 +283,10 @@ revision. Work whose revision snapshot is missing or altered fails rather
 than running under the current one.
 
 Codex credentials are stored with restrictive permissions in
-`~/.pons/auth.json`. Multiple named credentials and provider slots are
-supported.
+`~/.pons/auth.json`. A Codex slot in the `providers` list uses the credential
+saved under its `id` with `-login -as <id>`; a bare `-login` saves the one used
+by an unnamed provider. With a single saved credential, every Codex slot uses
+it.
 
 ## Development
 

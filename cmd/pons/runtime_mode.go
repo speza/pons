@@ -332,7 +332,8 @@ func (r *agentRunner) brainConfig(agent ponsruntime.AgentDefinition) (llm.Config
 			BaseURL: config.BaseURL, APIKey: config.APIKey,
 		}
 		config.Fallbacks = slices.Concat([]llm.Fallback{primary}, config.Fallbacks[:index], config.Fallbacks[index+1:])
-		config.Provider, config.BaseURL, config.APIKey = selected.Provider, selected.BaseURL, selected.APIKey
+		config.ID, config.Provider = selected.ID, selected.Provider
+		config.BaseURL, config.APIKey = selected.BaseURL, selected.APIKey
 	}
 	config.Model = agent.Model
 	config.Persona = personaPrompt(agent)

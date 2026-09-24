@@ -680,7 +680,8 @@ func TestAgentRunnerSelectsRevisionProviderSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Provider != "anthropic" || config.APIKey != "two" || config.Model != "pinned" || config.Persona != "Your name is Ada." {
+	if config.ID != "backup" || config.Provider != "anthropic" || config.APIKey != "two" || config.Model != "pinned" ||
+		config.Persona != "Your name is Ada." {
 		t.Fatalf("brain config = %+v", config)
 	}
 	var chain []string
