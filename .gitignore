@@ -2,3 +2,6 @@
 /pons
 /pons-demo
 /.build/
+
+# Built web client; run `make web-build`
+/web/dist/app/

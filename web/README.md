@@ -2,7 +2,9 @@
 
 This UI exists to exercise and inspect the HTTP/SSE runtime during web
 development and testing. It is not intended for use outside that workflow.
-The Go server embeds the built frontend. From the repository root, run:
+The Go server embeds the built frontend from `web/dist/app/`, which is not
+committed. Without it the server still builds, and serves a page explaining how
+to build the UI. From the repository root, run:
 
 ```sh
 make web-install
@@ -19,7 +21,7 @@ absolute host path inside `workspace_root` (the server user's home directory by
 default). Configure a brain provider first; see the [root
 README](../README.md#quick-start).
 
-Run `make web-build` after editing the frontend. The browser UI and runtime API
+Run `make web-build` after editing the frontend, then rebuild the server. The browser UI and runtime API
 are still under development.
 
 Sandbox conversations show an environment setup log below the message when E2B
