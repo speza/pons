@@ -128,14 +128,13 @@ Steps:
    for a single-principal agent). The owner can read or edit it, but should
    never need to.
 2. **Grant.** Grant each run the memory directory itself: a read-write
-   Seatbelt grant, or its plain path in the unsandboxed composition. E2B
-   copies it into the sandbox at run start and, when the session closes,
-   applies only the files the run added, changed, or deleted, so the agent
+   Seatbelt grant, or in E2B a copy made at run start whose added, changed,
+   or deleted files are applied back when the session closes, so the agent
    uses memory like any other directory. Only the memory directory is granted:
-   `PERSONA.md`, `agent.json`, and `revisions/` stay outside every grant. In
-   the unsandboxed composition unrestricted `bash` can still reach the state
-   directory, so these guarantees hold only under Seatbelt; the unsandboxed
-   setup is for a trusted owner's development.
+   `PERSONA.md`, `agent.json`, and `revisions/` stay outside every grant.
+   Hands always run in a sandbox, so the grant is always enforced: the server
+   no longer has in-process hands, and refuses to start without Seatbelt or
+   E2B. A local Linux sandbox (such as bubblewrap) is future work.
 3. **Prompt.** Add harness guidance for keeping memory: update it when the
    owner states or corrects something worth keeping, one topic per file, one
    line per file in `MEMORY.md`, update rather than duplicate. Hydrate

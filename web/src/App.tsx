@@ -133,7 +133,7 @@ function shortId(id: string): string {
 }
 
 function environmentLabel(value: string | undefined): string {
-  if (!value || value === "none") return "In-process";
+  if (!value) return "Unknown sandbox";
   if (value === "seatbelt") return "macOS Seatbelt";
   return value;
 }
@@ -163,10 +163,10 @@ function App() {
   const shouldFollowChat = useRef(true);
   const [runtimeOptions, setRuntimeOptions] = useState<RuntimeOptions>({
     agent: { id: "default" },
-    environments: ["none"],
-    default_environment: "none",
+    environments: [],
+    default_environment: "",
   });
-  const [newEnvironment, setNewEnvironment] = useState("none");
+  const [newEnvironment, setNewEnvironment] = useState("");
   const [newWorkspace, setNewWorkspace] = useState("");
   const [newSource, setNewSource] = useState<"workspace" | "git">("workspace");
   const [newGitRepository, setNewGitRepository] = useState("");
@@ -199,7 +199,7 @@ function App() {
     const controller = new AbortController();
     void getRuntimeOptions(controller.signal)
       .then((options) => {
-        const environments = options.environments.length > 0 ? options.environments : ["none"];
+        const environments = options.environments;
         const defaultEnvironment = environments.includes(options.default_environment)
           ? options.default_environment
           : environments[0];

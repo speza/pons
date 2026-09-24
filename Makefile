@@ -35,7 +35,7 @@ test-integration-race:
 
 test-integration-seatbelt:
 	@if [ "$$(uname -s)" != "Darwin" ]; then echo "Seatbelt integration test requires macOS"; exit 0; fi
-	PONS_SEATBELT_TEST=1 go test -tags integration -count=1 ./integration -run TestRuntimeBlackBoxSeatbelt
+	PONS_SEATBELT_TEST=1 go test -tags integration -count=1 ./integration ./environment/seatbelt
 
 test-integration-e2b:
 	@test -n "$$E2B_API_KEY" || (echo "E2B_API_KEY is required"; exit 1)

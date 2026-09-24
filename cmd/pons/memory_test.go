@@ -113,10 +113,10 @@ func bundledRun(t *testing.T, stateDir, providerURL, message string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	err := runBundled(ctx, newServerLogger(io.Discard, false), serverOptions{
+	err := runBundled(ctx, newServerLogger(io.Discard, false), testServerOptions(serverOptions{
 		StateDir: stateDir, WorkspaceRoot: os.TempDir(), ClientWorkspace: t.TempDir(), MaxTurns: 4, MaxConcurrent: 1,
 		Brain: llm.Config{Provider: "openai", Model: "test", APIKey: "test", BaseURL: providerURL + "/v1"},
-	}, "", "", message, false)
+	}), "", "", message, false)
 	if err != nil {
 		t.Fatal(err)
 	}

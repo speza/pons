@@ -1,7 +1,7 @@
 # ADR-0009: Hands execute inside provider-backed environments
 
 **Status:** Accepted
-**Implementation:** Environment contract, Seatbelt, and E2B providers implemented
+**Implementation:** Environment contract, Seatbelt, and E2B providers implemented; in-process hands removed from the server (persistent-agents plan phase 2)
 **Date:** 2026-09-18
 **Related:** ADR-0004, ADR-0007, ADR-0008
 
@@ -46,6 +46,11 @@ The abstraction is intentionally not named after OCI, containers, Seatbelt, or
 any one remote service. An environment provider owns provisioning, policy,
 connectivity, health, and teardown. The host continues to own action
 correlation and execution deadlines.
+
+Every run executes its hands in an environment. The server has no in-process
+hands composition and refuses to start without a provider: Seatbelt is the
+default on macOS, and E2B is required elsewhere until a local Linux provider
+exists.
 
 ### 2. One complete tool host runs inside an environment
 

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
 	"slices"
 	"time"
 
@@ -54,12 +53,11 @@ func New(cfg Config) (*Host, error) {
 	// the boundary (ADR-0004): file tools resolve relative paths in the
 	// workspace but accept any absolute path, as bash already can, and the
 	// environment decides what is reachable.
-	anywhere := []string{string(filepath.Separator)}
-	fsTools, err := fs.New(fs.Config{Root: cfg.Workspace, ExtraRoots: anywhere, MaxReadBytes: cfg.FSReadBytes})
+	fsTools, err := fs.New(fs.Config{Root: cfg.Workspace, Unconfined: true, MaxReadBytes: cfg.FSReadBytes})
 	if err != nil {
 		return nil, err
 	}
-	editTool, err := edit.New(edit.Config{Root: cfg.Workspace, ExtraRoots: anywhere})
+	editTool, err := edit.New(edit.Config{Root: cfg.Workspace, Unconfined: true})
 	if err != nil {
 		return nil, err
 	}

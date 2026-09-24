@@ -30,17 +30,31 @@ jobs:
       - name: Race tests
         run: make test-race
 
-      - name: Deterministic integration tests
-        run: make test-integration
-
-      - name: Deterministic integration race tests
-        run: make test-integration-race
-
       - name: Lint
         uses: golangci/golangci-lint-action@v8
         with:
           version: v2.13.2
           args: --timeout=5m
+
+  # Hands run only in a sandbox, and Seatbelt is the local one, so the
+  # compiled-server integration tests run on macOS.
+  integration:
+    runs-on: macos-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Integration tests under Seatbelt
+        run: make test-integration-seatbelt
+
+      - name: Integration race tests
+        run: make test-integration-race
 
   web:
     runs-on: ubuntu-latest

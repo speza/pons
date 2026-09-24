@@ -190,7 +190,7 @@ func TestRuntimeServerConfiguresAndClosesStatefulEnvironment(t *testing.T) {
 	go func() {
 		done <- runServerReady(ctx, newServerLogger(io.Discard, false), serverOptions{
 			Address: "127.0.0.1:0", StateDir: stateDir, WorkspaceRoot: workspace,
-			MaxConcurrent: 1, Environment: provider,
+			MaxConcurrent: 1, Sandbox: "test", Environment: provider,
 		}, started)
 	}()
 	<-started
@@ -210,16 +210,35 @@ func TestAgentRunnerSelectsConversationEnvironment(t *testing.T) {
 	provider := &recordingEnvironment{}
 	runner := &agentRunner{opts: serverOptions{Sandbox: "seatbelt", Environment: provider}}
 
-	selected, _, name, err := runner.executionEnvironment("none")
-	if err != nil || selected != nil || name != "none" {
-		t.Fatalf("in-process selection = provider %v, name %q, err %v", selected, name, err)
+	for _, requested := range []string{"", "seatbelt"} {
+		selected, _, name, err := runner.executionEnvironment(requested)
+		if err != nil || selected != provider || name != "seatbelt" {
+			t.Fatalf("selection %q = provider %v, name %q, err %v", requested, selected, name, err)
+		}
 	}
-	selected, _, name, err = runner.executionEnvironment("seatbelt")
-	if err != nil || selected != provider || name != "seatbelt" {
-		t.Fatalf("seatbelt selection = provider %v, name %q, err %v", selected, name, err)
+	// There is no in-process fallback.
+	for _, requested := range []string{"none", "e2b", "unknown"} {
+		if _, _, _, err := runner.executionEnvironment(requested); err == nil {
+			t.Fatalf("environment %q unexpectedly accepted", requested)
+		}
 	}
-	if _, _, _, err := runner.executionEnvironment("unknown"); err == nil {
-		t.Fatal("unknown environment unexpectedly accepted")
+	if _, _, _, err := (&agentRunner{}).executionEnvironment(""); err == nil {
+		t.Fatal("runner without an environment unexpectedly accepted")
+	}
+}
+
+func TestServerRequiresSandbox(t *testing.T) {
+	err := runServer(context.Background(), newServerLogger(io.Discard, false), serverOptions{
+		Address: "127.0.0.1:0", StateDir: t.TempDir(), WorkspaceRoot: t.TempDir(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "only in a sandbox") {
+		t.Fatalf("server without a sandbox = %v", err)
+	}
+	if sandbox, err := defaultSandbox("darwin"); err != nil || sandbox != "seatbelt" {
+		t.Fatalf("macOS default = %q, %v", sandbox, err)
+	}
+	if _, err := defaultSandbox("linux"); err == nil || !strings.Contains(err.Error(), "-sandbox e2b") {
+		t.Fatalf("Linux default error = %v", err)
 	}
 }
 
@@ -308,9 +327,9 @@ func TestRuntimeServerShutdownClosesActiveSSE(t *testing.T) {
 	done := make(chan error, 1)
 	stateDir, workspace := t.TempDir(), t.TempDir()
 	go func() {
-		done <- runServerReady(ctx, newServerLogger(io.Discard, false), serverOptions{
+		done <- runServerReady(ctx, newServerLogger(io.Discard, false), testServerOptions(serverOptions{
 			Address: "127.0.0.1:0", StateDir: stateDir, WorkspaceRoot: workspace, MaxConcurrent: 1,
-		}, started)
+		}), started)
 	}()
 	serverURL := <-started
 	response, err := http.Post(serverURL+"/v1/conversations", "application/json", strings.NewReader(fmt.Sprintf(`{"workspace":%q}`, workspace)))
@@ -590,10 +609,10 @@ func TestBundledCLIUsesRuntimeServerPath(t *testing.T) {
 	defer provider.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := runBundled(ctx, newServerLogger(&bytes.Buffer{}, false), serverOptions{
+	err := runBundled(ctx, newServerLogger(&bytes.Buffer{}, false), testServerOptions(serverOptions{
 		StateDir: t.TempDir(), WorkspaceRoot: os.TempDir(), ClientWorkspace: t.TempDir(), MaxTurns: 3, MaxConcurrent: 1,
 		Brain: llm.Config{Provider: "openai", Model: "test", APIKey: "test", BaseURL: provider.URL + "/v1"},
-	}, "", "stable", "hello", false)
+	}), "", "stable", "hello", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -744,10 +763,10 @@ func TestEditedPersonaChangesIdentityAfterRestart(t *testing.T) {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		err := runBundled(ctx, newServerLogger(io.Discard, false), serverOptions{
+		err := runBundled(ctx, newServerLogger(io.Discard, false), testServerOptions(serverOptions{
 			StateDir: stateDir, WorkspaceRoot: os.TempDir(), ClientWorkspace: t.TempDir(), MaxTurns: 3, MaxConcurrent: 1,
 			Brain: llm.Config{Provider: "openai", Model: "test", APIKey: "test", BaseURL: provider.URL + "/v1"},
-		}, "", "", "who are you?", false)
+		}), "", "", "who are you?", false)
 		if err != nil {
 			t.Fatal(err)
 		}

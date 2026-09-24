@@ -58,7 +58,8 @@ func Patch(path, patch string) protocol.Action {
 
 // Edit is the edit_file tool plugin.
 type Edit struct {
-	roots []string // resolved jail roots; the first is the workspace
+	root       string // resolved jail root
+	unconfined bool
 	// The operation is a read-modify-write. Serialize edits so concurrent
 	// actions cannot lose one another's changes (ADR-0006).
 	mu sync.Mutex
@@ -67,18 +68,19 @@ type Edit struct {
 // Config tunes the plugin.
 type Config struct {
 	Root string // jail root; "" = process cwd
-	// ExtraRoots are further directories absolute paths may address, such
-	// as a host-granted memory directory. Relative paths stay under Root.
-	ExtraRoots []string
+	// Unconfined accepts absolute paths outside Root, for hands running in an
+	// execution environment that alone decides what is reachable (ADR-0004).
+	// Relative paths still resolve under Root.
+	Unconfined bool
 }
 
 // New creates the plugin (installed with pons.Core.Use).
 func New(cfg Config) (*Edit, error) {
-	roots, err := jail.ResolveRoots(cfg.Root, cfg.ExtraRoots)
+	root, err := jail.Resolve(cfg.Root)
 	if err != nil {
 		return nil, fmt.Errorf("edit: %w", err)
 	}
-	return &Edit{roots: roots}, nil
+	return &Edit{root: root, unconfined: cfg.Unconfined}, nil
 }
 
 // Setup registers the edit tool.
@@ -161,7 +163,11 @@ func (p *Edit) apply(ctx context.Context, a protocol.Action) (protocol.ToolResul
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: "invalid arguments: " + err.Error()}, nil
 	}
 
-	path, err := jail.ResolvePathWithin(p.roots, pathArg)
+	resolve := jail.ResolvePath
+	if p.unconfined {
+		resolve = jail.ResolvePathUnconfined
+	}
+	path, err := resolve(p.root, pathArg)
 	if err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 	}

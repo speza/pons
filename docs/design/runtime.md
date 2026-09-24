@@ -31,11 +31,11 @@ and SSE path.
 
 Runs are globally bounded and SQLite claims runnable work only when its
 conversation and workspace have no active run. This is transactional local
-exclusion, not a renewable distributed lease. When an
-execution-environment provider is configured, each run starts a fresh hands
-session, registers only its discovered proxy tools, and closes the session
-before becoming idle. The Seatbelt provider launches `pons-hands`; the
-unsandboxed development composition registers in-process tools explicitly.
+exclusion, not a renewable distributed lease. Each run starts a fresh hands
+session in the configured execution environment, registers only its
+discovered proxy tools, and closes the session before becoming idle. The
+Seatbelt and E2B providers both launch `pons-hands`; the server has no
+in-process hands and refuses to start without a provider.
 
 The runtime persists semantic messages, operational state, and a durable event
 outbox in one SQLite database. It does not run a second session recorder or
@@ -95,8 +95,8 @@ The public HTTP resource and logical interaction. Its opaque server-generated
 ID identifies the canonical messages, submissions, runs, tools, and events in
 the runtime store. A conversation also records its selected execution
 environment; the server validates this opaque choice against the providers it
-configured before persisting the conversation. `none` uses the in-process
-hands, while `seatbelt` or `e2b` selects the corresponding configured provider.
+configured before persisting the conversation. The server configures one
+provider, `seatbelt` or `e2b`, and an unset choice selects it.
 
 `POST /v1/conversations` requires a host workspace or a Git repository with a
 base commit or branch.

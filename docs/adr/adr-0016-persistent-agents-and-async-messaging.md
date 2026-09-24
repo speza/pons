@@ -66,9 +66,8 @@ persona and never proposed or changed by the agent.
 
 `PERSONA.md` changes only when the owner edits it or accepts an exact
 proposal the agent made in the owner's conversation. The agent's hands never
-receive a grant to `agent.json`, `PERSONA.md`, or revisions, so under a
-sandboxed provider it cannot write them; the unsandboxed development
-composition trusts its owner instead. Learned memory under ADR-0019 never
+receive a grant to `agent.json`, `PERSONA.md`, or revisions, and hands always
+run in a sandboxed provider (ADR-0009), so it cannot write them. Learned memory under ADR-0019 never
 becomes persona by itself.
 
 Every change to a definition, including the persona, is an immutable revision
@@ -285,8 +284,6 @@ run. Against current providers:
   contains the runtime state directory (default `~/.pons/runtime/`) or
   credential store.
 - **E2B** is eligible unless a host port is exposed into the sandbox.
-- **Unsandboxed in-process tools**, including unrestricted `bash`, are
-  ineligible.
 
 Composition rejects an ineligible delegation setup at startup and reports
 why. Delegation also requires long-lived `pons serve`; the bundled ephemeral

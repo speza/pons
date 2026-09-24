@@ -147,14 +147,14 @@ func TestHandlerReportsConfiguredOptions(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/options", nil)
 	recorder := httptest.NewRecorder()
 	HandlerWithOptions(&fakeRuntime{}, HandlerOptions{
-		Environments:       []string{"none", "seatbelt"},
+		Environments:       []string{"seatbelt"},
 		DefaultEnvironment: "seatbelt",
 	}).ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 	body := recorder.Body.String()
-	if !strings.Contains(body, `"environments":["none","seatbelt"]`) || !strings.Contains(body, `"default_environment":"seatbelt"`) {
+	if !strings.Contains(body, `"environments":["seatbelt"]`) || !strings.Contains(body, `"default_environment":"seatbelt"`) {
 		t.Fatalf("options body = %s", body)
 	}
 }

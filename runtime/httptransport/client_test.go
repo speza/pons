@@ -74,7 +74,7 @@ func TestClientReadsRuntimeOptions(t *testing.T) {
 			http.Error(w, "unexpected request", http.StatusBadRequest)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(HandlerOptions{Environments: []string{"none", "seatbelt"}, DefaultEnvironment: "seatbelt"})
+		_ = json.NewEncoder(w).Encode(HandlerOptions{Environments: []string{"seatbelt"}, DefaultEnvironment: "seatbelt"})
 	}))
 	defer server.Close()
 
@@ -82,7 +82,7 @@ func TestClientReadsRuntimeOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.DefaultEnvironment != "seatbelt" || len(options.Environments) != 2 {
+	if options.DefaultEnvironment != "seatbelt" || len(options.Environments) != 1 {
 		t.Fatalf("options = %+v", options)
 	}
 }

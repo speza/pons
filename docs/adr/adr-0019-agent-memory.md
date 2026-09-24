@@ -85,9 +85,8 @@ Mounting is provider-specific but must keep unmounted scopes unreadable:
 
 - Seatbelt grants only the run's materialized scope directories.
 - E2B uploads the scopes at run start and downloads them at commit.
-- Unsandboxed in-process tools cannot enforce this boundary. A composition
-  using them may enable memory only for an agent with at most one principal,
-  and must report that memory is unscoped.
+- The runtime has no unsandboxed hands, so every run's grant is enforced by
+  its provider.
 
 ### 3. Runs work on a copy; the host commits
 
@@ -173,18 +172,18 @@ scopes, E2B, and a background memory agent in phase 7.
 
 ### Phase 2 simplification
 
-Phase 2 implements sections 1, 2 (one agent-wide scope), and 6's hydration, but
-deliberately not sections 3 to 5. Seatbelt and in-process runs are granted
-the canonical `agents/<id>/memory/` directory itself. E2B copies it into the
-sandbox at run start and, when the session closes, applies only the files the
-run added, changed, or deleted, so concurrent runs collide only on the same
-file. There are no commits, conflict retention, revision log, or management
-commands. Memory should need
-no attention from its owner, and models curate their own memory poorly through
-tools, so host-side versioning added machinery without making memory better.
-The agent keeps direct file access so it can apply corrections, and curation
-moves to a background memory agent (section 6's extraction and consolidation)
-in phase 7, which revisits sections 3 to 5 for multi-principal writes.
+Phase 2 implements sections 1, 2 (one agent-wide scope), and 6's hydration,
+but deliberately not sections 3 to 5. Seatbelt runs are granted the canonical
+`agents/<id>/memory/` directory itself. E2B copies it into the sandbox at run
+start and, when the session closes, applies only the files the run added,
+changed, or deleted, so concurrent runs collide only on the same file. There
+are no commits, conflict retention, revision log, or management commands.
+Memory should need no attention from its owner, and models curate their own
+memory poorly through tools, so host-side versioning added machinery without
+making memory better. The agent keeps direct file access so it can apply
+corrections, and curation moves to a background memory agent (section 6's
+extraction and consolidation) in phase 7, which revisits sections 3 to 5 for
+multi-principal writes.
 
 ## Verification requirements
 
@@ -206,9 +205,7 @@ Deterministic tests without provider credentials or network prove:
   new revision without changing history;
 - `MEMORY.md` is rendered as attributed data within its byte budget;
 - an extraction run runs once per lineage, touches only its memory mounts, and
-  under review does not change materialized memory until accepted; and
-- the unsandboxed composition refuses memory for an agent with more than one
-  principal.
+  under review does not change materialized memory until accepted.
 
 ## Alternatives
 
