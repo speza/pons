@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,7 +19,6 @@ import (
 	"time"
 
 	"github.com/samperrin/pons/environment"
-	"github.com/samperrin/pons/internal/dirsync"
 	"github.com/samperrin/pons/plugins/external/sdk"
 )
 
@@ -32,7 +32,10 @@ type fakeSyncEnvd struct {
 	events []string
 }
 
-var extractCommand = regexp.MustCompile(`tar -xf (\S+) -C (\S+)`)
+var (
+	extractCommand = regexp.MustCompile(`tar -xf (\S+) -C (\S+)`)
+	packCommand    = regexp.MustCompile(`find (\S+) -type l -delete && tar --hard-dereference -cf (\S+) -C \S+ \.`)
+)
 
 func (f *fakeSyncEnvd) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
@@ -69,11 +72,21 @@ func (f *fakeSyncEnvd) run(command string, args []string) error {
 	f.events = append(f.events, command)
 	switch command {
 	case "/bin/sh":
-		match := extractCommand.FindStringSubmatch(args[1])
-		tree, err := dirsync.Unarchive(bytes.NewReader(f.files[match[1]]), 1000, 1<<20)
-		if err != nil {
+		if match := packCommand.FindStringSubmatch(args[1]); match != nil {
+			dir := f.local(match[1])
+			if err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+				if err == nil && entry.Type()&fs.ModeSymlink != 0 {
+					return os.Remove(path)
+				}
+				return err
+			}); err != nil {
+				return err
+			}
+			archive, err := archiveWorkspace(dir, 1<<20)
+			f.files[match[2]] = archive
 			return err
 		}
+		match := extractCommand.FindStringSubmatch(args[1])
 		dir := f.local(match[2])
 		if err := os.RemoveAll(dir); err != nil {
 			return err
@@ -81,15 +94,10 @@ func (f *fakeSyncEnvd) run(command string, args []string) error {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
-		_, err = dirsync.Apply(dir, nil, tree)
-		return err
+		return restoreWorkspace(dir, f.files[match[1]], 1<<20)
 	case "/bin/tar":
-		out, dir := flagValue(args, "-cf"), flagValue(args, "-C")
-		tree, err := dirsync.Read(f.local(dir))
-		if err != nil {
-			return err
-		}
-		f.files[out], err = dirsync.Archive(tree)
+		archive, err := archiveWorkspace(f.local(flagValue(args, "-C")), 1<<20)
+		f.files[flagValue(args, "-cf")] = archive
 		return err
 	}
 	return nil
@@ -143,13 +151,20 @@ func TestSyncedDirectoryRoundTripsOnlyTheRunsChanges(t *testing.T) {
 		t.Fatalf("remote copy = %q, %v", data, err)
 	}
 
-	// The agent edits its copy while another run changes tea.md on the host.
+	// The agent edits its copy, including links that are never synced, while
+	// another run changes tea.md on the host.
 	write(filepath.Join(remote, "MEMORY.md"), "- [Tea](tea.md)\n- [Coffee](coffee.md)\n")
+	if err := os.Symlink("/etc/passwd", filepath.Join(remote, "passwd.md")); err != nil {
+		t.Fatal(err)
+	}
 	write(filepath.Join(remote, "coffee.md"), "flat white\n")
 	write(filepath.Join(memory, "tea.md"), "oolong\n")
 
 	var reported []error
-	session := &e2bSession{client: client, sandbox: sandbox, synced: synced, onError: func(err error) { reported = append(reported, err) }}
+	session := &e2bSession{
+		client: client, sandbox: sandbox, synced: synced, maxWorkspaceBytes: 1 << 20,
+		onError: func(err error) { reported = append(reported, err) },
+	}
 	session.syncDirectoriesOut()
 	if len(reported) != 0 {
 		t.Fatalf("sync errors = %v", reported)
@@ -162,6 +177,9 @@ func TestSyncedDirectoryRoundTripsOnlyTheRunsChanges(t *testing.T) {
 		if data, err := os.ReadFile(filepath.Join(memory, name)); err != nil || string(data) != want {
 			t.Fatalf("%s = %q, %v; want %q", name, data, err, want)
 		}
+	}
+	if _, err := os.Lstat(filepath.Join(memory, "passwd.md")); !os.IsNotExist(err) {
+		t.Fatalf("a sandbox link was synced back: %v", err)
 	}
 }
 

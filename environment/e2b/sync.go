@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -89,22 +91,43 @@ func (s *e2bSession) syncDirectoriesOut() {
 }
 
 func (s *e2bSession) syncDirectoryOut(ctx context.Context, i int, dir syncedDirectory) error {
+	// Links are never synced: drop them from the discarded sandbox copy so a
+	// link pointing outside it cannot reject the whole archive, and flatten
+	// hard links as workspace checkpoints do.
 	out := "/tmp/pons-sync-out-" + strconv.Itoa(i) + ".tar"
-	// Hard links become regular files; symlinks are skipped on unarchive.
-	if _, _, err := s.client.run(ctx, s.sandbox, "/bin/tar", []string{
-		"--hard-dereference", "-cf", out, "-C", dir.remote, ".",
+	if _, _, err := s.client.run(ctx, s.sandbox, "/bin/sh", []string{
+		"-c", "find " + dir.remote + " -type l -delete && tar --hard-dereference -cf " + out + " -C " + dir.remote + " .",
 	}, "/home/user", nil); err != nil {
 		return err
 	}
-	maxFiles, maxBytes, maxArchive := dir.base.Limits()
-	var archive bytes.Buffer
-	if err := s.client.download(ctx, s.sandbox, out, &archive, maxArchive); err != nil {
-		return err
-	}
-	result, err := dirsync.Unarchive(&archive, maxFiles, maxBytes)
+	archive, err := stageWorkspaceArchive(func(w io.Writer) error {
+		return s.client.download(ctx, s.sandbox, out, w, s.maxWorkspaceBytes)
+	})
 	if err != nil {
 		return err
 	}
+	defer os.Remove(archive.Name())
+	defer archive.Close()
+
+	// Extract with the same validation and limits as workspace checkpoints,
+	// then read back only regular files.
+	parent, err := os.MkdirTemp("", "pons-e2b-sync-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = removeWorkspaceTree(parent) }()
+	extracted := filepath.Join(parent, "copy")
+	if err := os.Mkdir(extracted, 0o700); err != nil {
+		return err
+	}
+	if err := restoreWorkspaceArchive(extracted, &contextReader{ctx: ctx, reader: archive}, s.maxWorkspaceBytes); err != nil {
+		return err
+	}
+	result, err := dirsync.Read(extracted)
+	if err != nil {
+		return err
+	}
+
 	changed, err := dirsync.Apply(dir.host, dir.base, result)
 	if len(changed) != 0 {
 		s.debugf("synced %d changed file(s) back to %s", len(changed), dir.host)

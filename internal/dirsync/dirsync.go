@@ -1,8 +1,8 @@
-// Package dirsync copies a small host directory into a remote environment and
-// applies the remote copy's changes back. Only regular files are synced.
-// Applying writes just the files a run added, changed, or deleted relative to
-// the snapshot it started from, so concurrent runs only collide on the same
-// file.
+// Package dirsync snapshots a host directory for a remote copy and applies
+// the copy's changes back. Only regular files are synced. Applying writes
+// just the files a run added, changed, or deleted relative to the snapshot it
+// started from, so concurrent runs only collide on the same file. Moving the
+// copy in and out, and validating what comes back, belongs to the caller.
 package dirsync
 
 import (
@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"maps"
 	"os"
@@ -20,26 +19,8 @@ import (
 	"time"
 )
 
-const (
-	// GrowthFiles and GrowthBytes bound how much a remote copy may grow
-	// beyond the snapshot it started from. The host directory itself is
-	// unbounded, so whatever local runs write never stops a remote run.
-	GrowthFiles = 2000
-	GrowthBytes = 16 << 20
-)
-
 // Tree maps slash-separated relative paths to regular file contents.
 type Tree map[string][]byte
-
-// Limits returns the file count, content bytes, and archive bytes accepted
-// back from a remote copy that started from t.
-func (t Tree) Limits() (files int, content, archive int64) {
-	for _, data := range t {
-		content += int64(len(data))
-	}
-	files, content = len(t)+GrowthFiles, content+GrowthBytes
-	return files, content, content + int64(files)*2048 + 4096
-}
 
 // Read snapshots dir's regular files. Symlinks and special files are
 // skipped: they are never synced, so a remote copy cannot smuggle one back.
@@ -71,7 +52,8 @@ func Read(dir string) (Tree, error) {
 	return tree, nil
 }
 
-// Archive returns a tar archive of the tree.
+// Archive returns a tar archive of exactly the snapshot, so what a remote
+// copy starts from always matches the base its changes are compared with.
 func Archive(tree Tree) ([]byte, error) {
 	var buffer bytes.Buffer
 	writer := tar.NewWriter(&buffer)
@@ -91,40 +73,6 @@ func Archive(tree Tree) ([]byte, error) {
 		return nil, fmt.Errorf("dirsync: archive: %w", err)
 	}
 	return buffer.Bytes(), nil
-}
-
-// Unarchive reads a tar archive produced by a remote environment. Regular
-// files are kept; directories, links, and special entries are skipped, as
-// Read skips them locally. An unsafe path or an overrun of the limits
-// rejects the whole archive.
-func Unarchive(archive io.Reader, maxFiles int, maxBytes int64) (Tree, error) {
-	reader := tar.NewReader(archive)
-	tree, total := Tree{}, int64(0)
-	for {
-		header, err := reader.Next()
-		if errors.Is(err, io.EOF) {
-			return tree, nil
-		}
-		if err != nil {
-			return nil, fmt.Errorf("dirsync: unarchive: %w", err)
-		}
-		name := strings.TrimPrefix(header.Name, "./")
-		if header.Typeflag != tar.TypeReg {
-			continue
-		}
-		if !safeName(name) {
-			return nil, fmt.Errorf("dirsync: unsafe path %q", header.Name)
-		}
-		if len(tree) == maxFiles || header.Size < 0 || total+header.Size > maxBytes {
-			return nil, errors.New("dirsync: archive exceeds its limits")
-		}
-		data, err := io.ReadAll(io.LimitReader(reader, header.Size))
-		if err != nil {
-			return nil, fmt.Errorf("dirsync: unarchive %s: %w", name, err)
-		}
-		total += int64(len(data))
-		tree[name] = data
-	}
 }
 
 // Apply writes result's changes relative to base into dir: files added or
