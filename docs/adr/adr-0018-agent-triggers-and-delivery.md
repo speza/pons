@@ -24,16 +24,12 @@ nothing to report; an empty answer caused by an interrupted run is different.
 
 Each trusted ingress adapter authenticates or validates its source, resolves
 an agent and conversation, and submits through the same store acceptance path
-as a human message. The accepted record carries runtime-owned metadata:
-
-```text
-source.kind              human | agent | system
-source.adapter_id        native | schedule | connector ID | internal
-source.external_event_id adapter-scoped idempotency identity, when available
-source.principal_id      verified human or service identity, when available
-root_id                  new external lineage or inherited child-result lineage
-causation_id             event or transition which caused the submission
-```
+as a human message. The accepted record carries ADR-0016's canonical source
+envelope. An ingress adapter populates only `source.kind` (`human` or
+`system`), `source.adapter_id`, `source.external_event_id` when its source
+supplies a stable ID, and `source.principal_id` when the sender resolves to a
+registered principal under section 6. The runtime assigns a new `root_id` and
+the `causation_id`.
 
 Adapters cannot set agent source or inherit another lineage. Raw sender
 names, webhook bodies, and channel labels remain untrusted content. The host
@@ -57,7 +53,11 @@ This avoids making one ever-growing transcript the definition of agent memory.
 
 Schedule definitions are administrator-owned configuration with stable IDs,
 agent, conversation policy or work-item target, time zone, recurrence, payload
-template, and enabled state. The store persists `next_fire_at` and the last
+template, optional principal, optional delivery target, and enabled state. A
+schedule's principal lets the run use that principal's memory scope under
+ADR-0019; without one, the run is an unattributed system root. A schedule's
+delivery target is where its lineage results go under section 4; without one,
+results stay in the runtime and are visible only to native clients. The store persists `next_fire_at` and the last
 accepted slot. A work-item target must be owned by the configured agent. The
 scheduler atomically advances the slot and accepts either
 a direct submission or a durable pending work-item wake with idempotency key
@@ -91,22 +91,22 @@ in lineage status and audit events. A stopped, exhausted, or crashed run with
 no explicit outcome fails or waits according to ADR-0016; it never becomes a
 successful silent check by accident.
 
-The runner gains a host-side, run-scoped outcome capability for system roots.
-Its model-facing operation is conceptually `complete_no_update()`; it stages
-the outcome before the model finishes. Only the latest successful root run's
-staged outcome can commit when the lineage becomes terminal; an earlier run's
-directive is discarded if child results reactivate the root. A failed or stale
-run cannot publish it. A human request or delegated child cannot use
-`no_update` to evade its expected response. Staging `no_update` alongside a
-final response is invalid. This capability is not handed to untrusted hands
-or added as channel behavior in `Core`.
+The runner gains a host-side outcome capability for system roots. Its
+model-facing operation is conceptually `complete_no_update()`. It is a staged
+terminal decision under ADR-0016 section 6, which defines when it commits and
+when it is discarded. It is available only to system roots: a human request or
+delegated child cannot use `no_update` to evade its expected response. Staging
+`no_update` alongside a final response is invalid.
 
 ### 4. Delivery is a second durable boundary
 
-An inbound binding may carry a host-configured delivery target. The model
-cannot supply an arbitrary destination in its answer. Acceptance pins the
-target and binding revision to the root lineage; a later binding edit cannot
-silently redirect its result. When a root lineage
+A delivery target is host-configured on an inbound binding, a schedule, or a
+work item under ADR-0021. A lineage takes its target from the source that
+accepted it: the binding for channel input, the schedule for a direct firing,
+or the work item for a work-item activation. The model cannot supply an
+arbitrary destination in its answer. Acceptance pins the target and its source
+revision to the root lineage; a later configuration edit cannot silently
+redirect its result. When a root lineage
 reaches a deliverable terminal result, the same transaction writes an
 outbound intent keyed by `(root_id, target_id)`. The intent contains a bounded
 projection of the final response and authorized artifact
@@ -134,6 +134,10 @@ delivery needs its own bounded, authorized policy and cannot quietly turn
 every internal event into an external message. Native SSE remains a cursor
 view of runtime events, not this outbound transport outbox.
 
+An adapter may emit transient presence signals, such as a typing indicator,
+to a lineage's target while a run is active. They are best-effort, carry no
+content, are never durable, and are not retried.
+
 ### 5. Security and lifecycle
 
 Connector credentials stay in host composition and are never exposed to
@@ -150,22 +154,45 @@ The first implementation may support one local schedule adapter and one
 scripted delivery adapter. Remote chat providers and webhook gateways can be
 added without changing the canonical submission or outbox transitions.
 
-## Store and implementation sequence
+### 6. Principals are declared and linked by the administrator
 
-Minimum durable additions are schedule definitions and slots, connector
-bindings, verified source attribution, explicit root outcome kind, and
-outbound intents with attempts and status. Store operations accept a trigger
+A **principal** is a person or service the administrator has registered in the
+runtime's domain. Each principal has a stable opaque ID, a display name, and a
+set of linked external accounts `(adapter_id, external_account_id)`. The
+native client acts as a configured principal.
+
+The administrator declares these links through configuration or a trusted
+management surface. The runtime never infers that two accounts are the same
+person from names, message content, or model output. An adapter resolves a
+verified sender to at most one principal; an unlinked sender has no
+`source.principal_id` and is subject to binding policy for unknown senders,
+which denies by default.
+
+Linking lets one person reach the same agent from several channels with the
+same principal-scoped memory under ADR-0019. Unlinking removes future
+resolution but does not rewrite accepted submissions or memory provenance.
+
+Group conversations with several principals in one external thread are not
+part of this contract. A binding for such a thread records the verified sender
+per submission, but principal-scoped memory and delivery assume one principal
+per conversation until a separate decision defines group semantics.
+
+## Store changes
+
+Minimum durable additions are principals and linked accounts, schedule
+definitions and slots, connector bindings, verified source attribution,
+explicit root outcome kind, and outbound intents with attempts and status. Store operations accept a trigger
 slot or external event atomically with its submission, and commit a terminal
 lineage with its outbound intent atomically. Reconciliation scans due slots
 and pending delivery in bounded batches; in-memory wakeups are hints.
 Trusted management surfaces create, inspect, and disable schedules and
 bindings, and expose delivery status; model-controlled hands cannot call them.
 
-1. Add source attribution, binding resolution, and explicit root outcomes.
-2. Add due-schedule acceptance and restart reconciliation.
-3. Add outbound intents and a scripted delivery adapter.
-4. Add authenticated connectors only with source verification, delivery
-   reconciliation, and loop controls.
+[`docs/persistent-agents-v1.md`](../persistent-agents-v1.md) sequences this
+work: explicit outcomes land with lineage completion (phase 2); principals,
+bindings, delivery, and the first authenticated connector next (phase 3); and
+schedules after delivery exists (phase 4). Authenticated connectors ship only
+with source verification, delivery reconciliation, and loop controls.
 
 ## Verification requirements
 
@@ -183,7 +210,11 @@ Deterministic tests without provider credentials or external network prove:
 - delivery failure never reruns the agent, and unknown non-idempotent sends
   are not retried automatically;
 - a disabled schedule or revoked binding rejects new work without erasing
-  already accepted history; and
+  already accepted history;
+- a schedule's result reaches its configured delivery target, and a lineage
+  keeps its pinned target after the schedule or binding is edited;
+- two linked accounts resolve to one principal, an unlinked sender resolves
+  to none, and message content cannot create or change a link; and
 - no model-controlled hands process can reach connector credentials or the
   native runtime listener in a delegation-enabled composition.
 
@@ -194,7 +225,8 @@ finite. Accepted work and outbound delivery have separate durable lifecycles.
 The additional store rows and adapter-specific authentication are the cost of
 honest restart and delivery behavior.
 
-This ADR does not define cross-channel identity linking, public webhook
-hosting, arbitrary model-selected destinations, exactly-once delivery to
-providers without idempotency, or autonomous goal planning. ADR-0021 owns
+This ADR does not define inferred cross-channel identity, group conversation
+semantics, streaming partial responses to channels, public webhook hosting,
+arbitrary model-selected destinations, exactly-once delivery to providers
+without idempotency, or autonomous goal planning. ADR-0021 owns
 durable work that spans multiple root lineages.

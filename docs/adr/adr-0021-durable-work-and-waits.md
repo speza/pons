@@ -24,8 +24,11 @@ whose lifetime can span several completed root lineages.
 ### 1. A work item spans activations
 
 A `work_item` represents one bounded, inspectable ongoing intent. It has an
-owning agent, creator, task text, optional root conversation, status, revision,
-limits, creation time, and latest lineage. The creator is a verified client,
+owning agent, creator, task text, optional root conversation, optional
+principal, optional delivery target, status, revision, limits, creation time,
+and latest lineage. Its principal and delivery target behave as a schedule's
+do under ADR-0018 section 2. An agent-created item inherits them from the
+creating lineage; the model cannot supply either. The creator is a verified client,
 system trigger, or policy-authorized agent; model text cannot forge it. A
 work item is not a transcript, memory namespace, worker, or workflow DAG.
 Client creation is idempotent by client key; agent creation is idempotent by
@@ -55,13 +58,17 @@ On a successful activation, the agent may stage one host-validated work
 decision: `complete`, `wait_until(time)`, or `wait_for(configured_event_key,
 optional_deadline)`. The decision and bounded updated task summary commit
 with the terminal lineage transition, after its attached delegations finish.
-Only the latest successful root run's staged decision can commit. A decision
-from an earlier run is discarded if child results reactivate the root.
 The model-facing operation is conceptually
 `decide_work(decision, condition, summary)` and is available only while
-running an item. A second decision in one run replaces the first only under
-an explicit revision check; otherwise it is rejected as a conflicting
-transition.
+running an item. It is a staged terminal decision under ADR-0016 section 6,
+which defines commit, replacement, and discard rules. It may be combined with
+`complete_no_update` from ADR-0018.
+
+When a `wait_for` deadline passes before its event arrives, the store accepts
+one system wake with `source.adapter_id = internal` and a
+`deadline_expired` cause, idempotent by work-item revision and deadline. The
+activation decides whether to wait again, complete, or report. A matching
+event committed first wins, and the deadline wake is not created.
 
 Without an explicit decision, an ordinary interactive work item completes;
 a configured recurring item returns to its existing schedule. A failed or
@@ -89,44 +96,25 @@ project are not automatically folded into it without a verified binding.
 
 ### 2. Durable approval is a pause in one lineage
 
-ADR-0014's `Ask` decision may outlive a client connection. The runtime first
-commits the complete assistant turn and exact requested tool intents, as it
-already does before execution. Preflight runs in plan order before any sibling
-action executes. If a tool needs approval, the store records a pending
-approval with the run, lineage, action ID, exact arguments, agent revision,
-policy/resource fingerprint, authorized approver scope, and expiry. The run
-becomes `waiting_approval`; it releases the worker, workspace claim, and hands
-session. Later queued submissions in that conversation do not pass the paused
-run. A dedicated work-item conversation avoids blocking unrelated threads.
-The lineage remains active and may be cancelled.
+This section is a decision summary. Its detailed contract is written when
+phase 10 of [`docs/persistent-agents-v1.md`](../persistent-agents-v1.md)
+begins, after ADR-0014's preflight authorization stage exists.
 
-Only an authenticated, authorized approver can allow or deny that exact
-action. At resume, the runtime obtains a new claim/fence, resolves the pinned
-agent revision, and rechecks hard policy, tool availability, workspace
-identity, credentials, and approval expiry. A grant cannot override a new
-hard deny or become a general permission. The runner resumes the persisted
-plan without asking the brain to generate another action first. It records
-one result for the exact action, then continues the finite loop. Other
-actions in the plan are reauthorized before execution. A denial or expiry
-records a normal denied tool result so the brain can respond. Cancellation
-fences both approval and resumed execution.
-
-The native loopback server may serve a trusted local approver. A remote
-approval surface requires authenticated routing and object authorization;
-untrusted hands cannot reach the approval endpoint. An approval request is
-bound to the exact action and lineage, never to a general agent permission.
-
-Approval is granted before an external side effect, not proof of that side
-effect's outcome. If execution was requested and its result becomes unknown
-after a crash, ADR-0012's at-most-one-automatic-attempt policy still applies.
-It is not retried merely because approval exists. If no approver or durable
-pause adapter is configured, unattended `Ask` still fails closed with
-`approval_unavailable` as ADR-0016 specifies.
-
-The resume operation is a runtime/runner contract over persisted turn state;
-it does not serialize a live `Core` object or leave a goroutine blocked. The
-finite core may need a resume entry point for a previously committed plan,
-but does not acquire schedules, channel identities, or work item policy.
+- ADR-0014's `Ask` may outlive a client connection. The runtime records a
+  pending approval bound to the exact action, arguments, run, lineage, agent
+  revision, approver scope, and expiry, then releases the worker, workspace
+  claim, and hands session. Later submissions in that conversation wait
+  behind it; the lineage stays active and cancellable.
+- Only an authenticated, authorized approver can allow or deny that one
+  action. An approval is never a general permission.
+- Resume takes a new claim, revalidates hard policy, revision, workspace, and
+  expiry, and executes the persisted action without asking the brain to plan
+  again. A denial or expiry becomes a normal denied tool result.
+- Approval does not change crash semantics: an action whose outcome is
+  unknown is not retried automatically.
+- Resume works from persisted turn state; it never serializes `Core` or
+  blocks a goroutine. Without an approval surface, unattended `Ask` fails
+  closed with `approval_unavailable`.
 
 ### 3. Results and visibility
 
@@ -145,21 +133,16 @@ continuation. Agent memory in ADR-0019 stores reusable cross-item knowledge.
 Artifacts in ADR-0020 carry large files. None of these stores is silently
 hydrated as a system prompt.
 
-## Store and implementation sequence
+## Store changes
 
 The store adds `work_items`, versioned task summaries, wake conditions,
-pending wakes, and approvals. A work decision is staged by a run-scoped host
+pending wakes, and later approvals. A work decision is staged by a run-scoped host
 callback and committed only when the fenced lineage finishes. The same
 transaction updates item state and emits its event. Timer/event matching,
 approval resolution, and cancellation are idempotent store transitions.
 
-1. Add work item creation, inspection, cancellation, and one-active-lineage
-   exclusion; exercise a timer wake through ADR-0018's submission path.
-2. Add explicit terminal work decisions, bounded pending wakes, and event
-   matching; verify restart and revision conflicts.
-3. Persist pending approvals and paused turns; add exact-action resume with
-   new fencing and policy revalidation.
-4. Add authorized client approval surfaces and delivery of status events.
+[`docs/persistent-agents-v1.md`](../persistent-agents-v1.md) places work items
+in phase 7 and durable approvals in phase 10.
 
 ## Verification requirements
 
@@ -172,14 +155,10 @@ Deterministic tests without provider credentials or external network prove:
 - pending events are bounded, schedule slots coalesce as specified, and
   unrelated work remains runnable;
 - a work decision from a failed, stale, or cancelled run cannot commit;
-- cancellation fences an active lineage, queued wake, and pending approval;
-- a paused approval holds no worker or workspace claim but blocks later
-  submissions in its own conversation;
-- approval resumes the exact persisted action after revalidating hard policy,
-  grants, revision, and workspace, without a new model-selected action;
-- a denied or expired approval creates one model-visible result;
-- crash recovery never automatically repeats an action whose external outcome
-  is unknown; and
+- a passed `wait_for` deadline creates one wake, and an event committed first
+  suppresses it;
+- a work item's results reach its pinned delivery target;
+- cancellation fences an active lineage and any queued wake; and
 - one work item cannot escape its count, rate, duration, or event-key policy.
 
 ## Consequences and non-goals

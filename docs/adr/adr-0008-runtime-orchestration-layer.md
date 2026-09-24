@@ -269,7 +269,7 @@ runtime cells, not in `Core` or the local conversation contract.
   isolated-cell hosting boundary
 - `core.go` — finite agent loop and core plugin composition
 - `protocol/` — brain/hands wire types
-- `sessions/` — transcript and session storage contract
+- `runtime/`, `runtime/sqlite/` — runtime manager, store contract, and SQLite store
 - `docs/adr/adr-0001-pluggable-minimal-harness.md` — core architecture
-- `docs/adr/adr-0005-transcript-model-vs-engine.md` — session model and composition
+- `docs/adr/adr-0011-server-centred-runtime-storage.md` — server-owned runtime storage
 - `docs/adr/adr-0007-language-neutral-plugin-runtime.md` — external hands plugins

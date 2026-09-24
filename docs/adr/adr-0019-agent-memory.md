@@ -1,167 +1,220 @@
-# ADR-0019: Agent memory is explicit, scoped, and separate from transcripts
+# ADR-0019: Agent memory is a scoped file tree owned by one agent
 
 **Status:** Proposed
 **Implementation:** Not implemented
-**Date:** 2026-09-23
-**Related:** ADR-0005, ADR-0008, ADR-0010, ADR-0016, ADR-0017, ADR-0018, ADR-0020
+**Date:** 2026-09-24
+**Related:** ADR-0009, ADR-0016, ADR-0017, ADR-0018, ADR-0020, ADR-0021, ADR-0022
 
 ## Context
 
-A persistent agent can own many conversations and run only when work arrives.
+A persistent agent owns many conversations and runs only when work arrives.
 Neither one unbounded conversation nor a resident model process is a sound
-memory system. Coding agents need project facts and decisions; ongoing
-assistants need durable preferences and commitments. Both must be able to
-inspect what was retained and distinguish remembered data from trusted
-instructions.
+memory system. A personal assistant needs durable preferences, facts, and
+commitments; a coding agent needs project conventions and decisions.
+
+Agents are already effective with files. A `MEMORY.md` index plus one file per
+memory is readable by the model, searchable with ordinary file tools, easy for
+the owner to inspect and edit, and needs no bespoke recall API. The risk is
+that a plain shared directory has none of the scoping, provenance, or history
+a runtime needs: in a household, one person's memories must never appear in
+another person's run.
 
 Canonical conversations remain the audit history. Brain context compaction
-changes only one provider request and does not create durable memory. Workspace
-files and transferable artifacts have different ownership and lifecycle from
-agent memory.
+changes only one provider request and does not create durable memory.
+Workspace files, transferable artifacts, and work-item state have different
+ownership and lifecycles.
 
 ## Decision
 
-### 1. Agent-owned records
+### 1. Memory is a per-agent file tree
 
-The runtime stores small, versioned memory records under an owning `agent_id`.
-A record contains:
+Each agent with memory enabled owns one memory tree:
 
 ```text
-id, agent_id, scope_kind, scope_id, revision, text, status
-source.kind, source.conversation_id, source.run_id, source.message_id
-created_at, updated_at, optional expires_at
+memory/
+├── MEMORY.md                 agent-wide index
+├── <topic>.md                agent-wide memories
+└── principals/<principal-id>/
+    ├── MEMORY.md             this principal's index
+    └── <topic>.md            this principal's memories
 ```
 
-The first visibility scopes are agent-wide, workspace, conversation, and
-verified principal. Agent-wide records are suitable only for facts that may
-appear in any conversation owned by that agent. Workspace scope uses
-ADR-0016's validated `workspace_id`, not path spelling. A principal scope
-uses the adapter and verified principal identity from ADR-0018; two channel
-accounts are not silently treated as one person. Human-sourced writes default
-to their conversation scope. Widening one to workspace or agent-wide requires
-an explicit grant or administrator action. Model arguments may request a scope
-kind but cannot invent or override its runtime-derived identity.
+The recommended convention is one fact or topic per file and one line per file
+in the scope's `MEMORY.md`. The runtime does not parse or enforce file
+contents beyond the limits in section 4.
 
-Source pointers are runtime-derived and remain readable for audit, subject to
-normal retention. Agent-generated text is untrusted data, even if the agent
-later reads it. Administrator-written instructions stay in the agent
-definition and are not mixed into this store. Credentials remain in credential
-slots, not memory records. The memory API rejects configured secret patterns
-and oversized content but does not claim to detect every secret.
+Memory is never shared between agents. Two agents serving the same principal
+each keep a separate `principals/<id>/` tree. A delegated child receives none
+of its parent's memory, and a parent receives none of its child's. Information
+moves between agents only through a delegation request, a result, or an
+authorized artifact under ADR-0020. Any shared or cross-agent memory is a
+separate future decision.
 
-Memory is private to its owner and visibility scope by default. Retrieval
-requires the owning agent and a matching conversation, validated workspace,
-or verified principal scope; agent-wide records require that agent's policy.
-A system trigger with no principal does not receive personal records. A
-delegated child receives no parent memory, and a parent receives no child
-memory or inherited human principal scope. Intentional transfer
-uses the bounded delegation request or an authorized artifact reference under
-ADR-0020. Several conversations owned by one agent may access the same memory
-namespace only through agent-wide, same-workspace, or same-principal records.
-Record revisions prevent one run from silently overwriting another.
+Memory specific to one workspace, such as repository conventions, is ordinary
+workspace content (for example `AGENTS.md`) and persists under ADR-0022. It is
+not part of this tree.
 
-### 2. Explicit mutation and retrieval
+The canonical tree lives in a host-owned memory store outside every workspace,
+the runtime database, and the artifact store.
 
-An agent may request create, revise, or delete through a host-side memory
-capability when its definition grants it. The host derives the agent and run
-identity; model arguments cannot choose another namespace or forge source
-pointers. Each mutation is idempotent by source run and action ID. Revisions
-use compare-and-set, so a stale update reports a conflict for the agent to
-resolve. A successful mutation is a durable side effect even if the enclosing
-run later fails; crash recovery does not replay an unknown memory action.
+### 2. Scope is what the host mounts
 
-The model-facing shape is conceptually `remember(text, scope)`,
-`revise_memory(id, expected_revision, text)`,
-`forget_memory(id, expected_revision)`, and `recall_memory(query)`. The host
-may expose fewer operations to a particular agent. Reads return bounded text,
-scope, revision, and provenance; writes return the accepted ID and revision.
-No operation accepts an `agent_id` or arbitrary scope ID argument.
-A run may revise or delete only records in its visible scopes, and policy
-checks any requested widening to workspace or agent-wide scope.
+A run sees only the scopes it is entitled to. The host materializes them into
+the run's hands environment at fixed paths:
 
-Administrators can inspect, revise, pin, or delete records through a separate
-authorized management surface. A pinned record is still data, not a system
-instruction. Deletion removes it from future retrieval and records an audit
-tombstone. A retention policy can later remove old content; deleting a
-conversation or agent requires a defined cascading memory policy before that
-operation is exposed. A run's selected revision set can reconstruct what it
-saw only while those immutable revisions remain retained. After content purge,
-audit keeps IDs and digests without claiming replay of erased text.
+| Run | Agent-wide scope | `principals/<id>/` |
+| --- | --- | --- |
+| Human or scheduled run with a principal | read-only; read-write if that principal is an agent-wide writer | that principal's only, read-write |
+| System run without a principal | read-write only with an agent-wide write grant; otherwise read-only | none |
+| Extraction run (section 6) | as its originating lineage | as its originating lineage |
+| Delegated child | its own agent's tree, as a system run without a principal; never the parent's | none; the parent's principal is not inherited |
 
-The host provides bounded read and search operations scoped to the active
-agent and visible scopes. SQLite records are canonical. A search index or
-embeddings may improve ranking, but are rebuildable projections and cannot
-widen access. Automatic run context selects a bounded set of records according
-to an explicit agent policy (for example pinned records plus recent relevant
-records). The runner
-records the selected IDs and revisions with the run, so a later memory change
-does not rewrite what the model saw. Memory appears as attributed, lower-trust
-context, never as a system or administrator message. Tool output and imported
-text cannot promote themselves into instructions by being remembered.
+The principal comes from ADR-0018's verified `source.principal_id`, never from
+message content or model arguments. Accounts linked to one principal share
+that principal's scope.
 
-The first implementation uses text records only. It enforces a configured
-per-record size, per-agent record count, and per-run injection budget before
-acceptance or hydration. A provider request can omit memory when no retrieval
-policy is configured; the complete conversation remains available by its own
-normal hydration rules.
+The agent definition lists which principals may write agent-wide memory. For a
+single-owner assistant this is usually the owner. Otherwise agent-wide memory
+is read-only in principal runs, so one person's facts cannot be copied into
+memory another person's run will see.
 
-### 3. Capture is deliberate
+Mounting is provider-specific but must keep unmounted scopes unreadable:
 
-There is no automatic copying of every message or tool result into memory.
-An agent or authorized administrator chooses facts worth retaining. Optional
-summarization is a separate, auditable run whose proposed writes pass the
-same policy, provenance, size, and revision checks. Untrusted web pages,
-repositories, and channel messages may inform memory but do not gain higher
-authority through that path.
+- Seatbelt grants only the run's materialized scope directories.
+- E2B uploads the scopes at run start and downloads them at commit.
+- Unsandboxed in-process tools cannot enforce this boundary. A composition
+  using them may enable memory only for an agent with at most one principal,
+  and must report that memory is unscoped.
 
-Memory is for compact reusable knowledge, not task status or a large file
-store. ADR-0021 owns durable work state and wakes; ADR-0020 owns artifact
-bytes and references. Conversation history remains the source for exact
-quotes, prior actions, and tool outcomes.
+### 3. Runs work on a copy; the host commits
 
-## Store and implementation sequence
+Every run receives a private copy of its scopes at a recorded base revision.
+When hands stop cleanly after a completed or failed run, the host compares the
+copy with its base and commits changes for each writable scope atomically:
 
-The store adds `memory_records` with immutable revisions or equivalent
-history, idempotency identities for writes, and a bounded agent-and-scope
-query.
-Run claims persist the memory revision set selected for hydration. Mutation
-events use an agent-scoped audit stream or an authorized management view; they
-are not copied into unrelated conversation histories.
+- If canonical content for any changed file moved since the run's base, the
+  commit for that scope is rejected as a conflict. The run's proposed tree is
+  retained in history for the administrator, and the next activation receives
+  a bounded conflict notice.
+- Changes to read-only scopes are discarded and reported.
+- A cancelled run, or a run whose hands did not stop cleanly, commits nothing.
 
-1. Add versioned records, scoped reads, and management inspection/deletion.
-2. Add host-side agent memory tools and idempotent mutation transitions.
-3. Add bounded hydration and record exact selected revisions per run.
-4. Add optional ranking or summarization only after deterministic retrieval
-   and provenance tests pass.
+A memory commit is independent of the lineage outcome: a failed run may still
+commit what it saved, and a rejected commit does not fail the lineage. With
+ADR-0016's default of one active run per agent, conflicts are rare.
+
+### 4. Validation and limits
+
+Before commit, the host rejects the scope's change set if it contains
+non-regular files, symlinks, paths escaping the scope, non-UTF-8 content, or
+content beyond the configured per-file, per-scope, and file-count limits. The
+host runs configured secret-pattern checks, but does not claim to detect every
+secret. Credentials belong in credential slots, never in memory.
+
+### 5. History, audit, and management
+
+Each accepted commit creates an immutable scope revision stored through the
+same content-addressed `CheckpointStore` backends as ADR-0022, in a separate
+memory namespace. SQLite records the revision ID, parent revision, run ID,
+lineage, changed paths, and digests. Each run records the base revisions it
+received, so the memory it saw can be reconstructed while those revisions are
+retained.
+
+An authorized management surface can list, read, edit, and restore scopes to
+an earlier revision. A restore creates a new revision; it never rewrites
+history. Purging content removes it from future materialization and, subject
+to retention policy, from stored revisions; audit keeps IDs and digests
+without claiming to replay erased text. Deleting an agent or principal needs a
+defined cascade policy before that operation is exposed.
+
+Model-controlled hands never reach the canonical store, other scopes, or the
+management surface.
+
+### 6. Hydration and capture
+
+Each run's context includes the `MEMORY.md` of every mounted scope, bounded by
+a configured byte budget, with its mount path. It is rendered as attributed,
+lower-trust data, never as a system or administrator instruction. The agent
+reads individual memory files with its ordinary file tools. Memory text,
+including text the agent wrote itself, cannot promote itself into
+instructions; administrator instructions stay in the agent definition.
+
+Each agent definition selects a capture policy:
+
+- `explicit` (default): only the agent's own file edits during ordinary runs
+  and administrator edits change memory.
+- `extract`: after a root lineage becomes terminal, the runtime queues one
+  extraction activation for the same agent, idempotent by originating
+  `root_id`. It is a normal finite run with `source.kind = system`, its own
+  lineage, the originating lineage's scopes, and only file tools on its memory
+  mounts. It cannot deliver, delegate, or reach the workspace. Its commit
+  follows sections 3 and 4.
+
+An agent may require review of extraction commits: they are stored as
+proposed revisions, are not materialized, and become current only when an
+authorized reviewer accepts them. A failed extraction is not retried
+automatically and does not affect the originating lineage.
+
+Memory holds compact reusable knowledge. ADR-0021 owns durable task state and
+wakes; ADR-0020 owns transferable files; conversation history remains the
+source for exact quotes, prior actions, and tool outcomes.
+
+## Store changes
+
+The store adds memory scope revisions, per-run base revisions, commit audit
+rows, and review state. Revision content is stored through `CheckpointStore`.
+
+[`docs/persistent-agents-v1.md`](../persistent-agents-v1.md) places this work
+in phase 6, after principals (phase 3) and persistent workspaces (phase 5).
 
 ## Verification requirements
 
 Deterministic tests without provider credentials or network prove:
 
-- two agents cannot read or mutate each other's records through normal tools;
-- one principal's records cannot enter another principal's or an unattributed
-  system run, and conversation-private records do not cross threads;
-- workspace memory follows the validated workspace ID, while widening a
-  conversation record fails without the required grant;
-- a child sees no parent memory by default, including after restart;
-- concurrent updates to one record cannot silently overwrite each other;
-- retrying one accepted memory action writes one revision;
-- a failed run does not undo an acknowledged memory mutation or replay it;
-- deletion removes content from future hydration while preserving an audit
-  tombstone;
-- the recorded revision set reconstructs the memory context seen by a run
-  while those revisions are retained, and does not expose purged content;
-- untrusted memory text is rendered as attributed data rather than trusted
-  instructions; and
-- size, count, and context budgets fail closed.
+- two agents never see each other's memory, including for the same principal
+  and across delegation in either direction;
+- one principal's scope is not materialized into another principal's run or
+  an unattributed system run, and linked accounts share one scope;
+- agent-wide memory is read-only for principals who are not agent-wide
+  writers, and discarded writes are reported;
+- concurrent runs that change the same file produce one commit and one
+  retained conflict, never a silent overwrite;
+- a cancelled or uncleanly stopped run commits nothing, while a failed run's
+  clean commit persists;
+- symlinks, escaping paths, special files, oversized content, and file-count
+  overruns are rejected;
+- recorded base revisions reconstruct what a run saw, and a restore creates a
+  new revision without changing history;
+- `MEMORY.md` is rendered as attributed data within its byte budget;
+- an extraction run runs once per lineage, touches only its memory mounts, and
+  under review does not change materialized memory until accepted; and
+- the unsandboxed composition refuses memory for an agent with more than one
+  principal.
+
+## Alternatives
+
+- **SQLite memory records with dedicated tools:** rejected. They offer
+  precise per-record checks, but are less inspectable, need a bespoke
+  recall/revise API, and ignore how effectively agents already use files.
+  Mount-level scoping and commit audit recover the properties that matter.
+- **One shared directory per agent:** rejected because it leaks between
+  principals.
+- **Memory inside the workspace:** rejected because workspaces may be
+  per-conversation or shared between agents under ADR-0022, and their
+  checkpoints have different retention.
+- **Conversation-scoped memory:** dropped; the conversation transcript already
+  serves that purpose.
 
 ## Consequences and non-goals
 
-An agent can retain useful knowledge across unrelated conversations without
-turning its entire lifetime into one prompt. Explicit writes and provenance
-make memory inspectable and correctable. They also mean an agent may fail to
-remember something unless configured to capture it.
+Memory is plain files the owner can read and correct, and agents use tools
+they already know. Scoping depends on the hands provider enforcing mounts, so
+principal-scoped memory needs Seatbelt or E2B. An `explicit` agent may fail to
+save something; an `extract` agent costs one extra activation per completed
+lineage. Within one principal's scope, nothing stops an agent from writing
+poor or misplaced notes; history and restore keep that correctable.
 
-This ADR does not define shared mutable memory between agents, vector-search
-infrastructure, automatic personality extraction, credential storage, or
-cross-domain knowledge transfer.
+This ADR does not define memory shared between agents, group-conversation
+memory, vector search, embeddings, or cross-domain knowledge transfer.
+Ranking or indexes may be added later only as rebuildable projections that
+cannot widen access.
