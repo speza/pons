@@ -9,9 +9,8 @@ import (
 )
 
 type actionPolicySettings struct {
-	Classifier               string   `json:"classifier,omitempty"`
-	MinSafeConfidence        *float64 `json:"min_safe_confidence,omitempty"`
-	AllowGeneratedConfidence bool     `json:"allow_generated_confidence,omitempty"`
+	Classifier        string   `json:"classifier,omitempty"`
+	MinSafeConfidence *float64 `json:"min_safe_confidence,omitempty"`
 
 	id string
 }
@@ -40,8 +39,7 @@ func (p actionPolicySettings) Requires() []string {
 
 func (p actionPolicySettings) Build(build *BuildContext) error {
 	policy := actionpolicy.Policy{
-		ClassifierID:             p.Classifier,
-		AllowGeneratedConfidence: p.AllowGeneratedConfidence,
+		ClassifierID: p.Classifier,
 	}
 	if p.MinSafeConfidence != nil {
 		policy.MinSafeConfidence = *p.MinSafeConfidence

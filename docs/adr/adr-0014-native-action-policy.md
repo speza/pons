@@ -305,9 +305,9 @@ tool-call-start hook is for preflight decisions and approval.
   `RemoteConfig.Model`. The TypeSafe adapter defaults to `jev-latest` and also
   accepts a model name through `RemoteConfig.Model`. Jev's choice confidence
   is a returned probability.
-  The OpenAI adapter's confidence is generated text, so its safe result
-  requires approval unless the host explicitly enables
-  `AllowGeneratedConfidence`.
+  The OpenAI adapter's confidence is a model-generated estimate rather than a
+  calibrated probability. A valid safe result above the configured threshold
+  allows the call; review and low-confidence results request approval.
 - CLI configuration selects one enabled classifier by registered plugin ID,
   along with its model, key environment variable, timeout, and confidence
   behavior. An interactive CLI approval

@@ -95,18 +95,24 @@ func TestPolicyInvalidAssessmentFallsBack(t *testing.T) {
 	}
 }
 
-func TestGeneratedConfidenceRequiresOptIn(t *testing.T) {
+func TestGeneratedConfidenceAboveThresholdAllows(t *testing.T) {
 	req := pons.ToolCallStartEvent{Action: protocol.Action{Kind: "run"}}
-	classifier := ClassifierFunc(func(context.Context, pons.ToolCallStartEvent) (pons.ActionAssessment, error) {
-		return pons.ActionAssessment{Risk: "safe", Confidence: 0.99}, nil
-	})
 	for _, tt := range []struct {
-		allow bool
-		want  pons.ActionDisposition
-	}{{false, pons.DispositionAsk}, {true, pons.DispositionAllow}} {
-		decision, err := (Policy{Classifiers: []Classifier{classifier}, AllowGeneratedConfidence: tt.allow}).decide(context.Background(), req)
-		if err != nil || decision.Action != tt.want {
-			t.Fatalf("allow=%t decision=%+v error=%v", tt.allow, decision, err)
-		}
+		name        string
+		probability bool
+		want        pons.ActionDisposition
+	}{
+		{"generated estimate", false, pons.DispositionAllow},
+		{"choice probability", true, pons.DispositionAllow},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			classifier := ClassifierFunc(func(context.Context, pons.ToolCallStartEvent) (pons.ActionAssessment, error) {
+				return pons.ActionAssessment{Risk: "safe", Confidence: 0.99, ProbabilityConfidence: tt.probability}, nil
+			})
+			decision, err := (Policy{Classifiers: []Classifier{classifier}}).decide(context.Background(), req)
+			if err != nil || decision.Action != tt.want {
+				t.Fatalf("decision=%+v error=%v", decision, err)
+			}
+		})
 	}
 }

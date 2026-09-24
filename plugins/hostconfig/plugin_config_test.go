@@ -16,7 +16,7 @@ import (
 func TestBuildPluginOptionsSelectsClassifier(t *testing.T) {
 	plugins := pluginSettings{
 		pluginEntryForTest("classifier/typesafe-jev", true, `{"api_key_env":"JEV_KEY"}`),
-		pluginEntryForTest("action_policy", true, `{"classifier":"classifier/typesafe-jev","min_safe_confidence":0.95,"allow_generated_confidence":true}`),
+		pluginEntryForTest("action_policy", true, `{"classifier":"classifier/typesafe-jev","min_safe_confidence":0.95}`),
 		pluginEntryForTest("classifier/openai", true, `{"model":"custom-model","timeout":"5s"}`),
 		pluginEntryForTest("external", true, `{"manifests":["/opt/plugin.json"]}`),
 	}
@@ -36,8 +36,7 @@ func TestBuildPluginOptionsSelectsClassifier(t *testing.T) {
 		t.Fatalf("first host plugin: %s", got)
 	}
 	policy, ok := options.Plugins[1].Host.(actionpolicy.Policy)
-	if !ok || policy.ClassifierID != "classifier/typesafe-jev" || policy.MinSafeConfidence != 0.95 ||
-		!policy.AllowGeneratedConfidence {
+	if !ok || policy.ClassifierID != "classifier/typesafe-jev" || policy.MinSafeConfidence != 0.95 {
 		t.Fatalf("policy plugin: %+v", options.Plugins[1].Host)
 	}
 	core := pons.New()
@@ -79,7 +78,7 @@ func TestBuildCodexClassifierFromProvider(t *testing.T) {
 	}
 	plugins := pluginSettings{
 		pluginEntryForTest("classifier/codex", true, `{"provider_id":"primary","model":"gpt-6-luna"}`),
-		pluginEntryForTest("action_policy", true, `{"classifier":"classifier/codex","allow_generated_confidence":true}`),
+		pluginEntryForTest("action_policy", true, `{"classifier":"classifier/codex"}`),
 	}
 	providers := map[string]llm.Fallback{"primary": {ID: "primary", Provider: "codex"}}
 	options, err := buildPluginOptions(plugins, func(string) string { return "" }, providers)

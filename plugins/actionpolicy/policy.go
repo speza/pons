@@ -36,11 +36,10 @@ func (f ClassifierFunc) Assess(ctx context.Context, req pons.ToolCallStartEvent)
 // order. Unmatched requests pass through classifiers in order. A valid "safe"
 // assessment above MinSafeConfidence is allowed; all others require approval.
 type Policy struct {
-	Rules                    []Rule
-	Classifiers              []Classifier
-	ClassifierID             string  // resolves a classifier capability registered by another plugin
-	MinSafeConfidence        float64 // zero uses 0.9
-	AllowGeneratedConfidence bool    // explicitly trust an LLM's generated confidence
+	Rules             []Rule
+	Classifiers       []Classifier
+	ClassifierID      string  // resolves a classifier capability registered by another plugin
+	MinSafeConfidence float64 // zero uses 0.9
 }
 
 func (p Policy) Setup(c *pons.Core) error {
@@ -112,8 +111,7 @@ func (p Policy) decide(ctx context.Context, req pons.ToolCallStartEvent) (pons.A
 			Assessment: assessment,
 			ReasonCode: "classifier_review",
 		}
-		if assessment.Risk == "safe" && assessment.Confidence >= threshold &&
-			(assessment.ProbabilityConfidence || p.AllowGeneratedConfidence) {
+		if assessment.Risk == "safe" && assessment.Confidence >= threshold {
 			decision.Action = pons.DispositionAllow
 			decision.ReasonCode = "classifier_safe"
 		}

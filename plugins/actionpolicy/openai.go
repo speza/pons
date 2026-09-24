@@ -19,8 +19,8 @@ import (
 	"github.com/samperrin/pons"
 )
 
-// OpenAIClassifier uses the OpenAI Responses API. Its confidence is generated
-// text; Policy asks for approval unless AllowGeneratedConfidence is enabled.
+// OpenAIClassifier uses the OpenAI Responses API. Its confidence is a
+// model-generated estimate rather than a calibrated probability.
 type OpenAIClassifier struct {
 	remoteClient
 	client openai.Client

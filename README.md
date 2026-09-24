@@ -109,9 +109,9 @@ defaults to the `jev-latest` model alias; `RemoteConfig.Model` selects another
 model available to the TypeSafe account. Jev returns a choice
 probability; the OpenAI adapter generates a confidence estimate. The OpenAI
 adapter defaults to `gpt-6-luna`; set `RemoteConfig.Model` to use another
-Responses API model that supports JSON Schema structured outputs. Its `safe`
-result asks for approval by default even above the threshold; a host must set
-`AllowGeneratedConfidence` to use it for automatic allows.
+Responses API model that supports JSON Schema structured outputs. A valid
+`safe` assessment above the confidence threshold is allowed, including when
+the confidence is a model-generated estimate rather than a calibrated probability.
 Classifier failures and uncertain assessments require approval. Built-in tools
 project paths or commands for policy matching; generic tools still expose
 their typed action arguments. Requests also carry the current instruction,
@@ -398,12 +398,13 @@ or credentials:
  "config":{"provider_id":"primary","model":"gpt-6-luna","timeout":"10s"}}
 ```
 
-The default confidence threshold is 0.9. OpenAI and Codex confidence is
-model-generated, so `safe` assessments still ask for approval unless
-`action_policy`'s `config.allow_generated_confidence` is true. With no CLI approval
-handler, those asks are denied. A later user message is included in a fresh
-assessment when the agent retries the action. Changes take effect when the
-server restarts. Project `.pons.json` cannot set `plugins`.
+The default confidence threshold is 0.9. A `safe` assessment at or above it
+allows the call. OpenAI and Codex confidence is model-generated rather than a
+calibrated probability; `review`, low-confidence, and unavailable assessments
+still ask for approval. With no CLI approval handler, those asks are denied. A
+later user message is included in a fresh assessment when the agent retries
+the action. Changes take effect when the server restarts. Project `.pons.json`
+cannot set `plugins`.
 
 The [Git workspace guide](docs/design/git-workspaces.md) has the complete E2B and
 GitHub App config example. Keep credentials in the global file, not in a
