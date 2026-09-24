@@ -150,7 +150,7 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 
 	environmentOptions := configuredEnvironments(opts)
 	if defaultEnvironment(opts) == "none" {
-		logger.Warn("in-process hands are not sandboxed; only seatbelt keeps the agent to its memory directory")
+		logger.Warn("in-process hands are not sandboxed and can reach the whole agent directory; use seatbelt or e2b to limit the agent to its memory directory")
 	}
 
 	runner := &agentRunner{opts: opts, logger: logger, agents: agents}
