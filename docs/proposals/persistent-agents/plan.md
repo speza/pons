@@ -128,8 +128,9 @@ Steps:
 2. **Per-run copy.** Give each run a private copy of the memory directory
    at a recorded base revision, never the canonical directory: a read-write
    Seatbelt grant of the copy, or its plain path in the unsandboxed
-   composition. Refuse memory with E2B until phase 7. `PERSONA.md` stays
-   outside every grant. In the unsandboxed composition unrestricted `bash`
+   composition. Refuse memory with E2B until phase 7. Only the memory copy
+   is granted: `PERSONA.md`, `agent.json`, and `revisions/` stay outside
+   every grant. In the unsandboxed composition unrestricted `bash`
    can still reach the state directory, so these guarantees hold only under
    Seatbelt; the unsandboxed setup is for a trusted owner's development.
 3. **Prompt.** Add harness guidance for keeping memory: one topic per file,
@@ -168,8 +169,9 @@ Tests:
 - A cancelled or uncleanly stopped run leaves canonical memory unchanged.
 - Two concurrent runs that change memory produce one commit and one retained
   conflict, never a silent overwrite.
-- Under Seatbelt, the agent cannot write `PERSONA.md`; only an accepted
-  confirmation changes it, exactly as proposed.
+- Under Seatbelt, the agent cannot write `PERSONA.md`, `agent.json`, or
+  `revisions/`; only an accepted confirmation changes `PERSONA.md`, exactly
+  as proposed.
 - Hydrated `MEMORY.md` is labeled data within its budget.
 
 **Done when (M1):** on a fresh server the owner-named agent asks what the
