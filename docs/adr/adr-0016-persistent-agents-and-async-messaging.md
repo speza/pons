@@ -81,6 +81,12 @@ revision that cannot be resolved fails closed; work never runs under changed
 authority or falls back to the default agent. Disabling an agent stops new
 work, and history remains readable.
 
+The persona lives in a versioned `PERSONA.md` owned by the host, seeded from
+configuration. It changes only when the owner edits it or accepts an exact
+proposal the agent made in the owner's conversation; the agent's file tools
+cannot write it, and learned memory never becomes persona by itself. Each
+accepted change is a new revision for new work.
+
 A definition references provider and credential slots by name. Creating or
 editing an agent never creates, reads, or reveals a secret. The persona is
 trusted administrator input and stays separate from memory under ADR-0019,

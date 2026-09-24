@@ -47,7 +47,7 @@ under ADR-0019).
 
 Retention and garbage collection, directory bundles, provider export and
 materialization interfaces, attachment projection for outbound channels, and
-the detailed verification list are specified when phase 9 of
+the detailed verification list are specified when phase 10 of
 [`docs/persistent-agents-v1.md`](../persistent-agents-v1.md) begins.
 
 ## Consequences and non-goals

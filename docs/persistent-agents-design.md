@@ -67,6 +67,7 @@ time.
 - Shared memory between agents.
 - Exactly-once external side effects; pons records what it cannot know.
 - Replacing the chat apps the owner already uses.
+- Setting up credentials, connectors, or integrations through chat.
 
 ## Who it is for
 
@@ -105,10 +106,12 @@ no use case needs is a candidate to simplify or defer.
 | U9 | **The agent's own computer.** Over months the assistant keeps notes, scripts, and data in its workspace without Git; they survive sandbox loss, and the owner can roll back a bad change. |
 | U10 | **A second agent.** The owner creates another agent without a restart, for example for a household member who wants their own. |
 | U11 | **Inbox triage.** The agent sorts new email in a low-privilege task and drafts replies; nothing is sent until the owner approves. |
+| U12 | **Onboarding by chat.** A new agent asks what to call itself and what the owner wants help with; its name, role, and routines take effect once the owner confirms them. |
 
 ## Your agent and its tasks
 
-The owner gets one agent and names it. It has no predefined role: its
+The owner gets one agent and names it, usually by chatting with it: a new
+agent asks what to call itself, and the owner confirms its proposal. It has no predefined role: its
 persona, preferences, and routines come from the owner's instructions and
 its memory. It keeps one long-lived context, workspace, and memory, which is
 what makes it useful day to day.
@@ -182,6 +185,10 @@ These explain the decisions below and should settle future disputes.
    treated as untrusted.
 8. **Self-hosted, one trust domain.** pons does not pretend to isolate
    mutually untrusted tenants.
+9. **Conversational by default, confirmed for authority.** The owner shapes
+   the agent by talking to it, but anything that changes its identity or
+   permissions takes effect only through an explicit confirmation of the
+   exact change. Learned memory never becomes instruction on its own.
 
 ## Key decisions
 

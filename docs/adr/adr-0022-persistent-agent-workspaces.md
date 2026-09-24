@@ -128,7 +128,7 @@ exclusions, and retention policy. A checkpoint table replaces the single
 current reference with retained history.
 
 [`docs/persistent-agents-v1.md`](../persistent-agents-v1.md) places this work
-in phase 5.
+in phase 6.
 
 ## Verification requirements
 

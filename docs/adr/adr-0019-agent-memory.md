@@ -167,8 +167,10 @@ source for exact quotes, prior actions, and tool outcomes.
 The store adds memory scope revisions, per-run base revisions, commit audit
 rows, and review state. Revision content is stored through `CheckpointStore`.
 
-[`docs/persistent-agents-v1.md`](../persistent-agents-v1.md) places this work
-in phase 6, after principals (phase 3) and persistent workspaces (phase 5).
+[`docs/persistent-agents-v1.md`](../persistent-agents-v1.md) builds this in
+two steps: a single-owner version with local mounts and history in phase 2,
+then principal scopes, per-run copies, E2B, extraction, and consolidation in
+phase 7.
 
 ## Verification requirements
 
