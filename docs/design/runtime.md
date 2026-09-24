@@ -57,15 +57,16 @@ make test-integration
 make test-integration-race
 ```
 
-It builds `cmd/pons` and launches that binary against a local,
-OpenAI-compatible fake provider. The test then uses the real loopback API and
+It builds `cmd/pons` and `cmd/pons-hands` and launches the server, with hands
+under Seatbelt, against a local, OpenAI-compatible fake provider, so it needs
+macOS; on other platforms the targets fail rather than skip. The test then uses the real loopback API and
 SSE stream, persists through SQLite, performs a real `read_file` tool
 round-trip, kills and restarts the server, replays the durable event cursor,
 checks idempotency, and continues the conversation through the compiled CLI.
-It has no API-key or external-network dependency. On macOS, the opt-in
-`make test-integration-seatbelt` target repeats the same flow with a compiled
-`pons-hands` process under Seatbelt. The live model/provider and Seatbelt smoke
-path remains intentionally separate under `make smoke-runtime`.
+It has no API-key or external-network dependency. The default `make test`
+suite covers the same server flow over HTTP on any platform, serving the real
+`pons-hands` tool host over in-memory pipes. The live model/provider and
+Seatbelt smoke path remains intentionally separate under `make smoke-runtime`.
 
 The runtime queues a message arriving during an active run as the next fresh
 burst. It deliberately does not inject later submissions into an active run;

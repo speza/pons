@@ -27,6 +27,9 @@ type syncedDirectory struct {
 	host   string
 	remote string
 	base   dirsync.Tree
+	// baseBytes is the size of the archive copied in; the copy may grow by
+	// up to the workspace limit beyond it, so memory of any size syncs back.
+	baseBytes int64
 }
 
 // syncDirectoriesIn copies each host directory into a fresh sandbox
@@ -60,7 +63,7 @@ func syncDirectoriesIn(ctx context.Context, client *e2bClient, sandbox e2bSandbo
 		}, "/home/user", nil); err != nil {
 			return nil, fmt.Errorf("environment: copy %s into E2B: %w", host, err)
 		}
-		synced = append(synced, syncedDirectory{host: host, remote: remote, base: base})
+		synced = append(synced, syncedDirectory{host: host, remote: remote, base: base, baseBytes: int64(len(archive))})
 	}
 	return synced, nil
 }
@@ -91,17 +94,18 @@ func (s *e2bSession) syncDirectoriesOut() {
 }
 
 func (s *e2bSession) syncDirectoryOut(ctx context.Context, i int, dir syncedDirectory) error {
-	// Links are never synced: drop them from the discarded sandbox copy so a
-	// link pointing outside it cannot reject the whole archive, and flatten
-	// hard links as workspace checkpoints do.
+	// Only regular files are synced: drop links, FIFOs, sockets, and devices
+	// from the discarded sandbox copy so none can reject the whole archive,
+	// and flatten hard links as workspace checkpoints do.
 	out := "/tmp/pons-sync-out-" + strconv.Itoa(i) + ".tar"
 	if _, _, err := s.client.run(ctx, s.sandbox, "/bin/sh", []string{
-		"-c", "find " + dir.remote + " -type l -delete && tar --hard-dereference -cf " + out + " -C " + dir.remote + " .",
+		"-c", "find " + dir.remote + " ! -type f ! -type d -delete && tar --hard-dereference -cf " + out + " -C " + dir.remote + " .",
 	}, "/home/user", nil); err != nil {
 		return err
 	}
+	limit := dir.baseBytes + s.maxWorkspaceBytes
 	archive, err := stageWorkspaceArchive(func(w io.Writer) error {
-		return s.client.download(ctx, s.sandbox, out, w, s.maxWorkspaceBytes)
+		return s.client.download(ctx, s.sandbox, out, w, limit)
 	})
 	if err != nil {
 		return err
@@ -120,7 +124,7 @@ func (s *e2bSession) syncDirectoryOut(ctx context.Context, i int, dir syncedDire
 	if err := os.Mkdir(extracted, 0o700); err != nil {
 		return err
 	}
-	if err := restoreWorkspaceArchive(extracted, &contextReader{ctx: ctx, reader: archive}, s.maxWorkspaceBytes); err != nil {
+	if err := restoreWorkspaceArchive(extracted, &contextReader{ctx: ctx, reader: archive}, limit); err != nil {
 		return err
 	}
 	result, err := dirsync.Read(extracted)

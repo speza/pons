@@ -13,8 +13,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -34,7 +36,7 @@ type fakeSyncEnvd struct {
 
 var (
 	extractCommand = regexp.MustCompile(`tar -xf (\S+) -C (\S+)`)
-	packCommand    = regexp.MustCompile(`find (\S+) -type l -delete && tar --hard-dereference -cf (\S+) -C \S+ \.`)
+	packCommand    = regexp.MustCompile(`find (\S+) ! -type f ! -type d -delete && tar --hard-dereference -cf (\S+) -C \S+ \.`)
 )
 
 func (f *fakeSyncEnvd) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +77,7 @@ func (f *fakeSyncEnvd) run(command string, args []string) error {
 		if match := packCommand.FindStringSubmatch(args[1]); match != nil {
 			dir := f.local(match[1])
 			if err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
-				if err == nil && entry.Type()&fs.ModeSymlink != 0 {
+				if err == nil && !entry.Type().IsRegular() && !entry.IsDir() {
 					return os.Remove(path)
 				}
 				return err
@@ -138,6 +140,9 @@ func TestSyncedDirectoryRoundTripsOnlyTheRunsChanges(t *testing.T) {
 	}
 	write(filepath.Join(memory, "MEMORY.md"), "- [Tea](tea.md)\n")
 	write(filepath.Join(memory, "tea.md"), "green\n")
+	// Memory larger than the workspace limit still syncs back: the limit
+	// bounds growth beyond what was copied in.
+	write(filepath.Join(memory, "archive.md"), strings.Repeat("x", 8<<10))
 
 	synced, err := syncDirectoriesIn(context.Background(), client, sandbox, []string{memory})
 	if err != nil {
@@ -157,12 +162,15 @@ func TestSyncedDirectoryRoundTripsOnlyTheRunsChanges(t *testing.T) {
 	if err := os.Symlink("/etc/passwd", filepath.Join(remote, "passwd.md")); err != nil {
 		t.Fatal(err)
 	}
+	if err := syscall.Mkfifo(filepath.Join(remote, "notes.pipe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	write(filepath.Join(remote, "coffee.md"), "flat white\n")
 	write(filepath.Join(memory, "tea.md"), "oolong\n")
 
 	var reported []error
 	session := &e2bSession{
-		client: client, sandbox: sandbox, synced: synced, maxWorkspaceBytes: 1 << 20,
+		client: client, sandbox: sandbox, synced: synced, maxWorkspaceBytes: 4 << 10,
 		onError: func(err error) { reported = append(reported, err) },
 	}
 	session.syncDirectoriesOut()
@@ -178,8 +186,10 @@ func TestSyncedDirectoryRoundTripsOnlyTheRunsChanges(t *testing.T) {
 			t.Fatalf("%s = %q, %v; want %q", name, data, err, want)
 		}
 	}
-	if _, err := os.Lstat(filepath.Join(memory, "passwd.md")); !os.IsNotExist(err) {
-		t.Fatalf("a sandbox link was synced back: %v", err)
+	for _, name := range []string{"passwd.md", "notes.pipe"} {
+		if _, err := os.Lstat(filepath.Join(memory, name)); !os.IsNotExist(err) {
+			t.Fatalf("sandbox special file %s was synced back: %v", name, err)
+		}
 	}
 }
 

@@ -156,6 +156,7 @@ type Brain struct {
 	turns       []Turn
 	pending     []Result
 	seenMessage string // last message folded into context
+	network     string // hands network policy shown in <env>; empty omits it
 	logf        func(string, ...any)
 }
 
@@ -569,6 +570,9 @@ func (b *Brain) userPrompt(obs protocol.Observation) string {
 		platform = runtime.GOOS + "/" + runtime.GOARCH
 	}
 	fmt.Fprintf(&sb, "os: %s\n", platform)
+	if b.network != "" {
+		fmt.Fprintf(&sb, "network: %s\n", b.network)
+	}
 	fmt.Fprintf(&sb, "date: %s\n", now.Format("2006-01-02"))
 	sb.WriteString("</env>\n\n")
 	if b.cfg.Memory != nil {
@@ -612,8 +616,9 @@ func stringify(in map[string]any) json.RawMessage {
 // next instruction as the new user turn. Hydration and compaction interplay
 // for free: if the seeded context exceeds the budget, the next planning
 // call compacts it.
-func (b *Brain) Seed(turns []Turn, message, workspace, platform string) {
+func (b *Brain) Seed(turns []Turn, message, workspace, platform, network string) {
 	b.pending = nil
+	b.network = network
 	b.turns = append(append([]Turn(nil), turns...), Turn{
 		Role: "user", Blocks: []Block{Text{Value: b.userPrompt(protocol.Observation{
 			Message: message, Workspace: workspace, Platform: platform, Now: time.Now(),

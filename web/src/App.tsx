@@ -202,7 +202,7 @@ function App() {
         const environments = options.environments;
         const defaultEnvironment = environments.includes(options.default_environment)
           ? options.default_environment
-          : environments[0];
+          : (environments[0] ?? "");
         setRuntimeOptions({ agent: options.agent, environments, default_environment: defaultEnvironment });
         setNewEnvironment(defaultEnvironment);
         setNewSource(defaultEnvironment === "e2b" ? "git" : "workspace");

@@ -355,7 +355,7 @@ func TestMemoryIsHydratedAsLabeledData(t *testing.T) {
 	if strings.Contains(plain.systemPrompt(), "<memory_rules>") {
 		t.Fatal("memory rules present without memory")
 	}
-	if strings.Contains(plain.userPrompt(protocol.Observation{Message: "hi"}), "<memory") {
+	if prompt := plain.userPrompt(protocol.Observation{Message: "hi"}); strings.Contains(prompt, "<memory") || strings.Contains(prompt, "network:") {
 		t.Fatal("memory block present without memory")
 	}
 
@@ -385,5 +385,14 @@ func TestMemoryIsHydratedAsLabeledData(t *testing.T) {
 	}
 	if !strings.HasSuffix(prompt, "</memory>\n\nwhat do I drink?") {
 		t.Fatalf("instruction does not follow the memory block:\n%s", prompt)
+	}
+}
+
+func TestSeedShowsHandsNetworkPolicy(t *testing.T) {
+	b := &Brain{}
+	b.Seed(nil, "install deps", "/workspace", "darwin/arm64", "disabled")
+	prompt := b.turns[0].Blocks[0].(Text).Value
+	if !strings.Contains(prompt, "cwd: /workspace\nos: darwin/arm64\nnetwork: disabled\n") {
+		t.Fatalf("env block:\n%s", prompt)
 	}
 }

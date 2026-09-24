@@ -320,7 +320,7 @@ it.
 ```sh
 make check       # format, tests, vet, and golangci-lint
 make test-race   # race-enabled tests
-make test-integration
+make test-integration  # compiled server with hands under Seatbelt (macOS)
 ```
 
 Install the local lint tool once if needed with `make install-tools`.

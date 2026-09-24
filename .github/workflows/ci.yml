@@ -51,7 +51,7 @@ jobs:
           cache: true
 
       - name: Integration tests under Seatbelt
-        run: make test-integration-seatbelt
+        run: make test-integration
 
       - name: Integration race tests
         run: make test-integration-race

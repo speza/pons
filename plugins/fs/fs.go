@@ -82,14 +82,14 @@ func (p *FS) Setup(c *pons.Core) error {
 	path := pons.ToolParam{Name: "path", Type: "string", Description: "File path (relative to the workspace root, or an absolute path you have access to)", Required: true}
 	if err := c.AddTool(KindRead, pons.ToolDef{
 		Handler:     p.readFile,
-		Description: "Read a file inside the workspace and return its full content.",
+		Description: "Read a file and return its full content.",
 		Params:      []pons.ToolParam{path},
 	}); err != nil {
 		return err
 	}
 	if err := c.AddTool(KindWrite, pons.ToolDef{
 		Handler:     p.writeFile,
-		Description: "Create or overwrite a file inside the workspace. Parent dirs are created as needed.",
+		Description: "Create or overwrite a file. Parent dirs are created as needed.",
 		Params: []pons.ToolParam{path,
 			{Name: "content", Type: "string", Description: "Full file content to write", Required: true}},
 	}); err != nil {
@@ -97,7 +97,7 @@ func (p *FS) Setup(c *pons.Core) error {
 	}
 	return c.AddTool(KindList, pons.ToolDef{
 		Handler:     p.listDir,
-		Description: "List a directory inside the workspace. Directories have a trailing slash.",
+		Description: "List a directory. Directories have a trailing slash.",
 		Params:      []pons.ToolParam{path},
 	})
 }

@@ -148,6 +148,14 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 		"agent_revision", agent.Revision(), "agent_dir", agents.Dir(agent.ID))
 
 	environmentOptions := configuredEnvironments(opts)
+	network := opts.EnvironmentSpec.Network
+	if network == "" {
+		network = environment.NetworkDisabled
+	}
+	logger.Info("hands sandbox ready", "sandbox", opts.Sandbox, "network", network)
+	if network == environment.NetworkDisabled {
+		logger.Info("hands have no network access; use -sandbox-network to allow it")
+	}
 
 	runner := &agentRunner{opts: opts, logger: logger, agents: agents}
 	backgroundErrors := make(chan error, 1)
@@ -683,7 +691,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}
 	plugins := []pons.Plugin{environment.Proxy(session)}
 
-	brain.Seed(turns, request.Text, core.Workspace, core.Platform)
+	brain.Seed(turns, request.Text, core.Workspace, core.Platform, effectiveNetwork)
 	plugins = append(plugins, brain)
 	if err := core.Use(plugins...); err != nil {
 		return result, err
