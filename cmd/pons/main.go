@@ -225,6 +225,7 @@ func main() {
 	}
 
 	brainConfig := llm.Config{
+		ID:           primary.ID,
 		Provider:     primary.Provider,
 		Model:        primary.Model,
 		BaseURL:      primary.BaseURL,
@@ -264,7 +265,7 @@ func main() {
 	serverLogger.Info("runtime state selected", "state_dir", statePath)
 	serverOpts := serverOptions{
 		Address: *runtimeAddress, StateDir: statePath, WorkspaceRoot: root, ClientWorkspace: conversationOptions.Workspace,
-		MaxConcurrent: *runtimeConcurrency, MaxTurns: *maxTurns, Brain: brainConfig,
+		MaxConcurrent: *runtimeConcurrency, MaxTurns: *maxTurns, Brain: brainConfig, ProviderSlot: primary.ID,
 		FSReadBytes: *fsReadBytes, BashTimeout: *bashTimeout, BashMaxLines: *bashMaxLines, BashMaxBytes: *bashMaxBytes,
 		PluginPaths: pluginPaths, PluginPath: *pluginPath, PluginMaxResultBytes: *pluginMaxResultBytes, Debug: *debug,
 		Sandbox: *sandbox, E2BTemplate: *e2bTemplate, E2BHandsPath: *e2bHandsPath,

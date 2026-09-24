@@ -1,5 +1,11 @@
+export interface AgentSummary {
+  id: string;
+  name?: string;
+}
+
 export interface Conversation {
   conversation_id: string;
+  agent_id: string;
   workspace: string;
   environment?: string;
   git_repository?: string;
@@ -8,6 +14,7 @@ export interface Conversation {
 }
 
 export interface RuntimeOptions {
+  agent: AgentSummary;
   environments: string[];
   default_environment: string;
 }
@@ -52,6 +59,7 @@ export interface Run {
   id: string;
   conversation_id: string;
   inbound_message_id: string;
+  agent_revision: string;
   status: string;
   error?: string;
   started_at: string;
@@ -74,6 +82,7 @@ export interface Submission {
   id: string;
   conversation_id: string;
   message_id: string;
+  agent_revision: string;
   status: string;
   error?: string;
   accepted_at: string;
@@ -81,6 +90,7 @@ export interface Submission {
 
 export interface ConversationView {
   conversation: Conversation;
+  agent: AgentSummary;
   messages: Message[];
   submissions?: Submission[];
   active_run?: Run;

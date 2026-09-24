@@ -210,3 +210,28 @@ func TestHealth(t *testing.T) {
 		t.Fatalf("status = %d, body = %q", recorder.Code, data)
 	}
 }
+
+func TestHandlerExposesAgentReadOnly(t *testing.T) {
+	agent := ponsruntime.AgentSummary{ID: "default", Name: "Ada"}
+	runtime := &fakeRuntime{view: ponsruntime.ConversationView{
+		Conversation: ponsruntime.Conversation{ID: "conversation-1", AgentID: "default"},
+		Agent:        agent,
+	}}
+	handler := HandlerWithOptions(runtime, HandlerOptions{Agent: agent})
+
+	for path, want := range map[string]string{
+		"/v1/options":                      `"agent":{"id":"default","name":"Ada"}`,
+		"/v1/conversations/conversation-1": `"agent":{"id":"default","name":"Ada"}`,
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), want) {
+			t.Fatalf("GET %s = %d %s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/options", strings.NewReader(`{"agent":{"name":"x"}}`)))
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /v1/options = %d", recorder.Code)
+	}
+}

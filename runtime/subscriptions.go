@@ -36,7 +36,15 @@ func (m *Manager) View(ctx context.Context, conversationID string) (Conversation
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return m.store.View(ctx, conversationID)
+	view, err := m.store.View(ctx, conversationID)
+	if err != nil {
+		return ConversationView{}, err
+	}
+	view.Agent = AgentSummary{ID: view.Conversation.AgentID}
+	if view.Agent.ID == m.cfg.Agent.ID {
+		view.Agent = m.cfg.Agent.Summary()
+	}
+	return view, nil
 }
 
 // Subscribe loads catch-up events and registers the live subscriber under one

@@ -41,12 +41,31 @@ func TestSystemPromptContract(t *testing.T) {
 	}
 }
 
-func TestSystemPromptFramesAdditionalInstructions(t *testing.T) {
-	b := &Brain{cfg: Config{SystemExtra: "Prefer table-driven tests."}}
-	prompt := b.systemPrompt()
-	want := "<additional_instructions>\nPrefer table-driven tests.\n</additional_instructions>\n"
-	if !strings.HasSuffix(prompt, want) {
-		t.Fatalf("additional instructions not framed at end of system prompt:\n%s", prompt)
+func TestSystemPromptUsesPersonaAndKeepsHarnessRules(t *testing.T) {
+	neutral := (&Brain{}).systemPrompt()
+	persona := (&Brain{cfg: Config{Persona: "You are Ada.\n\nKeep answers short."}}).systemPrompt()
+
+	if !strings.HasPrefix(neutral, "<persona>\n"+defaultPersona+"\n</persona>\n") {
+		t.Fatalf("empty persona did not use the neutral default:\n%s", neutral)
+	}
+	if !strings.HasPrefix(persona, "<persona>\nYou are Ada.\n\nKeep answers short.\n</persona>\n") {
+		t.Fatalf("persona not framed at start of system prompt:\n%s", persona)
+	}
+	if strings.Contains(persona, defaultPersona) {
+		t.Fatal("configured persona still includes the neutral default")
+	}
+	for _, prompt := range []string{neutral, persona} {
+		if strings.Contains(prompt, "expert coding agent") {
+			t.Error("system prompt kept the fixed coding identity")
+		}
+		if !strings.HasSuffix(prompt, harnessPrompt) {
+			t.Error("system prompt dropped harness rules")
+		}
+	}
+	for _, section := range []string{"<harness>", "<working_principles>", "<tool_discipline>", "<verification>", "<final_response>"} {
+		if !strings.Contains(harnessPrompt, section) {
+			t.Errorf("harness rules missing %s", section)
+		}
 	}
 }
 

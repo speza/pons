@@ -55,7 +55,19 @@ func (m *Manager) dispatch() {
 func (c *liveConversation) work(ctx context.Context, cancel context.CancelFunc, claim *ClaimedRun) {
 	defer c.manager.wg.Done()
 	defer c.manager.releaseSlot(true)
-	result, runErr := c.execute(ctx, claim.Message, claim.History, claim.Run)
+	var result RunResult
+	// A revision that cannot be resolved never falls back to the current
+	// definition: the run would execute under changed authority.
+	agent, runErr := c.manager.cfg.AgentRevisions.AgentRevision(ctx, claim.Conversation.AgentID, claim.Run.AgentRevision)
+	if runErr == nil && (agent.ID != claim.Conversation.AgentID || agent.Revision() != claim.Run.AgentRevision) {
+		runErr = errors.New("resolved definition does not match")
+	}
+	if runErr != nil {
+		runErr = fmt.Errorf("runtime: agent revision %q of agent %q is unavailable: %w",
+			claim.Run.AgentRevision, claim.Conversation.AgentID, runErr)
+	} else {
+		result, runErr = c.execute(ctx, agent, claim.Message, claim.History, claim.Run)
+	}
 	cancel()
 
 	c.mu.Lock()
@@ -85,12 +97,14 @@ func (c *liveConversation) work(ctx context.Context, cancel context.CancelFunc, 
 
 func (c *liveConversation) execute(
 	ctx context.Context,
+	agent AgentDefinition,
 	message InboundMessage,
 	history []Message,
 	run Run,
 ) (RunResult, error) {
 	m := c.manager
 	return m.cfg.Runner.Run(ctx, RunRequest{
+		Agent:              agent,
 		ConversationID:     c.conversation.ID,
 		RunID:              run.ID,
 		InboundMessageID:   message.ID,

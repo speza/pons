@@ -21,6 +21,7 @@ import {
   submitMessage,
 } from "./api";
 import type {
+  AgentSummary,
   Conversation,
   ConversationView,
   Message,
@@ -161,6 +162,7 @@ function App() {
   const setupLogRef = useRef<HTMLDetailsElement | null>(null);
   const shouldFollowChat = useRef(true);
   const [runtimeOptions, setRuntimeOptions] = useState<RuntimeOptions>({
+    agent: { id: "default" },
     environments: ["none"],
     default_environment: "none",
   });
@@ -201,7 +203,7 @@ function App() {
         const defaultEnvironment = environments.includes(options.default_environment)
           ? options.default_environment
           : environments[0];
-        setRuntimeOptions({ environments, default_environment: defaultEnvironment });
+        setRuntimeOptions({ agent: options.agent, environments, default_environment: defaultEnvironment });
         setNewEnvironment(defaultEnvironment);
         setNewSource(defaultEnvironment === "e2b" ? "git" : "workspace");
       })
@@ -471,6 +473,9 @@ function App() {
           <div>
             <p className="eyebrow">local agent runtime</p>
             <h1>pons</h1>
+            <p className="agent-identity" title={`Agent ID: ${runtimeOptions.agent.id}`}>
+              Agent · {agentName(runtimeOptions.agent)}
+            </p>
           </div>
           <span className={`status-dot status-dot--${connection}`} title={statusLabel} aria-label={statusLabel} />
         </div>
@@ -621,7 +626,9 @@ function App() {
       <main className="main-panel">
         <header className="conversation-header">
           <div>
-            <p className="eyebrow">conversation</p>
+            <p className="eyebrow">
+              {activeConversation ? `conversation with ${agentName(view?.agent ?? runtimeOptions.agent)}` : "conversation"}
+            </p>
             <h2>{activeConversation ? `Conversation ${shortId(activeConversation.conversation_id)}` : "Welcome to pons"}</h2>
           </div>
           <div className="conversation-header-meta">
@@ -677,13 +684,14 @@ function App() {
                 <div className="empty-state empty-state--compact">
                   <div className="empty-mark" aria-hidden="true">✦</div>
                   <h3>What should we work on?</h3>
-                  <p className="muted">Ask pons to inspect, change, or explain something in the workspace.</p>
+                  <p className="muted">Ask {agentName(view?.agent ?? runtimeOptions.agent)} to inspect, change, or explain something in the workspace.</p>
                 </div>
               )}
               {visibleMessages.map((message) => (
                 <Fragment key={message.id}>
                   <MessageBubble
                     message={message}
+                    agentName={agentName(view?.agent ?? runtimeOptions.agent)}
                     toolProgress={toolProgress}
                     toolCallsByKey={toolCallsByKey}
                     toolResultsByKey={toolResultsByKey}
@@ -718,7 +726,7 @@ function App() {
             <form className="composer" onSubmit={handleSubmit}>
               <textarea
                 aria-label="Message pons"
-                placeholder="Ask pons to do something…"
+                placeholder={`Ask ${agentName(view?.agent ?? runtimeOptions.agent)} to do something…`}
                 value={composer}
                 onChange={(event) => setComposer(event.target.value)}
                 onKeyDown={handleComposerKeyDown}
@@ -768,10 +776,15 @@ function EnvironmentSetupLog({ entries, active, elementRef }: {
   );
 }
 
+function agentName(agent?: AgentSummary): string {
+  return agent?.name || agent?.id || "pons";
+}
+
 function MessageBubble({
-  message, toolProgress, toolCallsByKey, toolResultsByKey, failure,
+  message, agentName, toolProgress, toolCallsByKey, toolResultsByKey, failure,
 }: {
   message: Message;
+  agentName: string;
   toolProgress: Record<string, string>;
   toolCallsByKey: Map<string, ToolCall>;
   toolResultsByKey: Map<string, ToolResult>;
@@ -780,10 +793,10 @@ function MessageBubble({
   const role = message.role === "user" ? "user" : message.role === "tool" ? "tool" : "assistant";
   return (
     <article className={`message message--${role}`}>
-      <div className="message-avatar">{role === "user" ? "Y" : role === "tool" ? "↳" : "P"}</div>
+      <div className="message-avatar">{role === "user" ? "Y" : role === "tool" ? "↳" : agentName.charAt(0).toUpperCase()}</div>
       <div className="message-body">
         <div className="message-label">
-          {role === "user" ? "You" : role === "tool" ? "Tool result" : "pons"}
+          {role === "user" ? "You" : role === "tool" ? "Tool result" : agentName}
           {!message.complete && <span className="muted"> · incomplete</span>}
         </div>
         <div className="message-content">

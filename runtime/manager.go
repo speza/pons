@@ -13,6 +13,12 @@ import (
 var ErrClosed = errors.New("runtime: manager is closed")
 
 type Config struct {
+	// Agent is the current definition of the server's agent; new
+	// conversations and submissions use it. AgentRevisions must already
+	// resolve its revision, and resolves the revision of each claimed run.
+	Agent          AgentDefinition
+	AgentRevisions AgentRevisions
+
 	Store               Store
 	Runner              Runner
 	PrepareConversation func(ConversationOptions) (ConversationOptions, error)
@@ -30,11 +36,12 @@ type Config struct {
 // Store remains authoritative for conversations, runnable work, ownership,
 // and durable event order; Manager's memory is only a live acceleration layer.
 type Manager struct {
-	cfg    Config
-	store  Store
-	ctx    context.Context
-	cancel context.CancelFunc
-	wake   chan struct{}
+	cfg      Config
+	store    Store
+	revision string
+	ctx      context.Context
+	cancel   context.CancelFunc
+	wake     chan struct{}
 	// mu protects convs, active, and closed. It is never held across store calls
 	// or while acquiring a liveConversation mutex.
 	mu     sync.Mutex
@@ -51,6 +58,15 @@ func New(cfg Config) (*Manager, error) {
 	if cfg.Runner == nil {
 		return nil, errors.New("runtime: runner is required")
 	}
+	if err := cfg.Agent.Validate(); err != nil {
+		return nil, err
+	}
+	if cfg.AgentRevisions == nil {
+		return nil, errors.New("runtime: agent revisions are required")
+	}
+	if _, err := cfg.AgentRevisions.AgentRevision(context.Background(), cfg.Agent.ID, cfg.Agent.Revision()); err != nil {
+		return nil, fmt.Errorf("runtime: current agent revision is not recorded: %w", err)
+	}
 
 	if cfg.MaxConcurrent <= 0 {
 		cfg.MaxConcurrent = 4
@@ -65,7 +81,7 @@ func New(cfg Config) (*Manager, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
-		cfg: cfg, store: cfg.Store, ctx: ctx, cancel: cancel,
+		cfg: cfg, store: cfg.Store, revision: cfg.Agent.Revision(), ctx: ctx, cancel: cancel,
 		wake: make(chan struct{}, 1), convs: make(map[string]*liveConversation),
 	}
 	// The scheduler remains in the wait group for the Manager's whole open
@@ -101,6 +117,7 @@ func (m *Manager) CreateConversation(ctx context.Context, selected ConversationO
 	}
 	value := Conversation{
 		ID:                 NewID(),
+		AgentID:            m.cfg.Agent.ID,
 		Workspace:          selected.Workspace,
 		GitRepository:      selected.GitRepository,
 		GitRevision:        selected.GitRevision,
@@ -136,6 +153,11 @@ func (m *Manager) environment(requested string) (string, error) {
 	return "", fmt.Errorf("%w: %q is not configured", ErrInvalidEnvironment, requested)
 }
 
+// Agent returns the read-only identity of the server's current agent.
+func (m *Manager) Agent() AgentSummary {
+	return m.cfg.Agent.Summary()
+}
+
 // Conversations returns the durable conversations without hydrating live
 // delivery state for dormant conversations.
 func (m *Manager) Conversations(ctx context.Context) ([]Conversation, error) {
@@ -158,7 +180,11 @@ func (m *Manager) Submit(ctx context.Context, conversationID, key string, parts 
 		return AcceptedMessage{}, err
 	}
 	c.mu.Lock()
-	accepted, events, err := m.store.Accept(ctx, conversationID, key, parts)
+	if c.conversation.AgentID != m.cfg.Agent.ID {
+		c.mu.Unlock()
+		return AcceptedMessage{}, fmt.Errorf("runtime: conversation agent %q is not configured", c.conversation.AgentID)
+	}
+	accepted, events, err := m.store.Accept(ctx, conversationID, key, m.revision, parts)
 	if err != nil {
 		c.mu.Unlock()
 		return AcceptedMessage{}, err

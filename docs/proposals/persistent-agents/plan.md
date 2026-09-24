@@ -48,7 +48,7 @@ phase 1.
 
 | Milestone | Phases | Demonstration |
 | --- | --- | --- |
-| M1 An agent that knows you | 1–2 | On a fresh server, the agent asks what to call itself, the owner names it and confirms, and in a new conversation the next day it remembers the owner's preferences. |
+| M1 An agent that knows you | 1–2 | On a fresh server, the owner-named agent asks what the owner wants help with, the owner confirms its proposed instructions, and in a new conversation the next day it remembers the owner's preferences. |
 | M2 Reachable and proactive | 3–5 | The owner chats with their agent on Telegram, and a morning brief arrives or explicitly does not, across restarts. |
 | M3 Long-lived | 6–8 | The agent's files survive sandbox replacement, household members' memory stays private, and routines set up by chat keep running. |
 | M4 Tasks | 9–11 | The agent starts a coding task from a phone, receives its result and files, and resumes after a durable approval. |
@@ -58,54 +58,58 @@ phase 1.
 
 **Use cases:** all (foundation). **ADRs:** ADR-0016 sections 1–3, minimally.
 
-Create the one agent automatically, give its identity a home in
-`PERSONA.md`, and record which agent revision every conversation and run
-used. There is no API for creating agents; the server always has exactly
+Create the one agent automatically, give it a directory the owner edits,
+and record which agent revision every conversation and run used. There is no API for creating agents; the server always has exactly
 one.
 
 Steps:
 
 1. **Default agent.** On first start, `pons serve` creates the default agent
-   (`id: "default"`) and its directory under the state directory:
-   `agents/default/PERSONA.md`. An optional `agent` block in
-   `cmd/pons/config.go` settings (`name`, `instructions`) seeds the persona;
-   without it the persona starts empty. Configuration only seeds: once
-   `PERSONA.md` exists, it is the source of truth.
+   (`id: "default"`) as a directory under the state directory, the one place
+   the owner manages it: `agents/default/agent.json` (name, provider slot,
+   model, max turns; empty fields use server defaults) and
+   `agents/default/PERSONA.md` (free-form instructions, used verbatim).
+   Existing files are never overwritten, and a malformed `agent.json` stops
+   startup. The name is a structured field, never parsed from the persona.
+   Host configuration keeps providers, credentials, and sandboxes and has no
+   agent block.
 2. **Definition and fingerprint.** Add `AgentDefinition` in `runtime/` with
-   the non-secret fields a run depends on: ID, persona text, provider slot
-   ID, model, max turns, and configured plugin paths. `Revision()` returns a
-   SHA-256 of its canonical JSON. Credentials never enter the definition.
+   the non-secret fields a run depends on: ID, name, persona text, provider
+   slot ID, model, max turns, and configured plugin paths. `Revision()`
+   returns a SHA-256 of its canonical JSON. Credentials never enter the definition.
 3. **Prompt identity.** Split `plugins/brain/llm/system_prompt.txt` into the
    harness rules and an identity section. Today it opens with "You are an
-   expert coding agent"; the identity becomes the persona, falling back to a
-   neutral default when the persona is empty. Keep every harness rule.
-4. **Storage.** Bump `currentSchemaVersion` in `runtime/sqlite/store.go`. Add
-   an `agent_revisions` table (agent ID, revision, definition JSON, created
-   time), `conversations.agent_id`, and `agent_revision` on submissions and
-   runs. At startup, record the current revision if it is new.
+   expert coding agent"; the identity becomes the name and persona, falling
+   back to a neutral default when both are empty. Keep every harness rule.
+4. **Storage.** At startup, write the resolved definition as a write-once
+   snapshot, `agents/default/revisions/<revision>.json`, if it is new.
+   Bump `currentSchemaVersion` in `runtime/sqlite/store.go` and add
+   `conversations.agent_id` and `agent_revision` on submissions and runs;
+   SQLite records only which agent and revision work used, never
+   definitions.
 5. **Claims and runs.** `Accept` records the current revision on the
-   submission. `ClaimRunnable` loads that revision's definition into
-   `ClaimedRun`, and `RunRequest` gains an `Agent` field, so a submission
+   submission. When a run is claimed, the manager resolves that revision's
+   snapshot and passes it as a new `RunRequest.Agent`, so a submission
    queued before a persona change still runs under the revision it was
-   accepted with. An unknown revision fails the run closed.
+   accepted with. A missing or tampered snapshot fails the run closed.
 6. **Visibility.** Include the agent's ID and name in `ConversationView` and
    `GET /v1/options` (read-only); show the name in the CLI renderer and the
    web UI.
 
 Tests:
 
-- The default agent and `PERSONA.md` are created once; configuration seeds
-  but never overwrites an existing persona.
-- The fingerprint is deterministic and changes with the persona but not
-  with credentials.
+- The agent directory is created once and never overwritten; malformed
+  `agent.json` fails loudly.
+- The fingerprint is deterministic and changes with the name and persona
+  but not with credentials.
 - A submission accepted before a persona change runs under its original
   revision after restart.
 - The system prompt uses the persona, or the neutral default, and keeps
   every harness rule.
 
-**Done when:** a fresh server has a default agent, editing `PERSONA.md` and
-restarting changes how it introduces itself, and every run records the
-revision it used.
+**Done when:** a fresh server has a default agent, editing its `agent.json`
+or `PERSONA.md` and restarting changes how it introduces itself, and every
+run records the revision it used.
 
 ## Phase 2: Memory and persona v0
 
@@ -150,10 +154,12 @@ Steps:
    `propose_persona(text)`. Until phase 4 adds principals, every native
    conversation belongs to the owner; afterwards the tool is offered only in
    the owner's conversations. It creates a confirmation; accepting it
-   writes `PERSONA.md`, which yields a new agent revision for new work.
+   writes `PERSONA.md`, which yields a new agent revision for new work. The
+   proposal covers instructions only; the agent's name stays owner-set in
+   `agent.json` and is never proposed by the agent.
 7. **Onboarding.** When `PERSONA.md` is empty, the prompt tells the agent to
-   introduce itself as new and ask what to call itself and what the owner
-   wants help with.
+   introduce itself as new, by its name when it has one, and ask
+   what the owner wants help with.
 
 Tests:
 
@@ -166,9 +172,10 @@ Tests:
   confirmation changes it, exactly as proposed.
 - Hydrated `MEMORY.md` is labeled data within its budget.
 
-**Done when (M1):** on a fresh server the agent asks for a name, the owner
-answers and confirms the proposal, and the next day, in a new conversation,
-it uses that name and remembers what the owner told it.
+**Done when (M1):** on a fresh server the owner-named agent asks what the
+owner wants help with, the owner confirms its proposed instructions, and the
+next day, in a new conversation, it follows them and remembers what the owner
+told it.
 
 ## Phase 3: Lineages and explicit outcomes
 
@@ -448,7 +455,7 @@ a restart, and runs exactly once after approval.
 
 **Use cases:** U10. **ADRs:** ADR-0016 section 2.
 
-- Store agent definitions as managed resources, seeded from configuration.
+- Each agent is another directory under `agents/`, managed as files.
 - Add `pons agents list|create|edit|disable` and a web UI view.
 - Compose the brain, tools, and environment per agent, and route
   conversations and bindings to a chosen agent.

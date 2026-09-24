@@ -245,9 +245,50 @@ GitHub App config example. Keep credentials in the global file, not in a
 repository's `.pons.json`. Client commands select the repository and revision
 per conversation.
 
+### Agent
+
+Each server has one agent, `default`, kept as files in the runtime state
+directory (`~/.pons/runtime/server/agents/default/` by default). The server
+creates the directory on first start and logs its path; edit the files and
+restart the server to change the agent.
+
+- `agent.json` holds its settings. Empty fields use the server's defaults:
+  the default provider slot, its model, and `max_turns`.
+
+  ```json
+  {
+    "name": "Ada",
+    "provider": "",
+    "model": "",
+    "max_turns": 0
+  }
+  ```
+
+  `provider` names a configured provider slot. A malformed file stops the
+  server from starting.
+- `PERSONA.md` holds free-form instructions, used verbatim.
+
+An agent without a name says so when asked, rather than using the model's own
+name.
+
+The agent's name appears in `GET /v1/options`, conversation snapshots, the
+CLI, and the web UI. Provider settings and credentials stay in
+`~/.pons/config.json` and `~/.pons/auth.json`; the agent refers to a slot only
+by its `id`.
+
+Each start records an agent revision: a SHA-256 fingerprint of the name,
+persona, provider slot ID, model, maximum turns, and plugin paths, never
+credentials. The server writes it once to `revisions/<revision>.json` in the
+agent directory. Every submission and run records the revision it was
+accepted under, so work queued before an edit still runs under the old
+revision. Work whose revision snapshot is missing or altered fails rather
+than running under the current one.
+
 Codex credentials are stored with restrictive permissions in
-`~/.pons/auth.json`. Multiple named credentials and provider slots are
-supported.
+`~/.pons/auth.json`. A Codex slot in the `providers` list uses the credential
+saved under its `id` with `-login -as <id>`; a bare `-login` saves the one used
+by an unnamed provider. With a single saved credential, every Codex slot uses
+it.
 
 ## Development
 

@@ -24,6 +24,7 @@ import (
 	"github.com/samperrin/pons/plugins/external"
 	"github.com/samperrin/pons/protocol"
 	ponsruntime "github.com/samperrin/pons/runtime"
+	"github.com/samperrin/pons/runtime/agentdir"
 )
 
 type recordingEnvironment struct {
@@ -119,6 +120,7 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 		requestNumber++
 		inboundID := fmt.Sprintf("inbound-%d", requestNumber)
 		return ponsruntime.RunRequest{
+			Agent:          ponsruntime.AgentDefinition{ID: ponsruntime.DefaultAgentID, Model: "test", MaxTurns: 3},
 			ConversationID: "conversation-1", InboundMessageID: inboundID,
 			RunID: fmt.Sprintf("run-%d", requestNumber), Text: text,
 			GitRepository: "https://github.com/acme/a.git", GitRevision: strings.Repeat("a", 40),
@@ -597,5 +599,183 @@ func TestBundledCLIUsesRuntimeServerPath(t *testing.T) {
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("provider requests = %d, want 1", requests.Load())
+	}
+}
+
+func TestDefaultAgentResolvesDirectoryAndExcludesCredentials(t *testing.T) {
+	stateDir := t.TempDir()
+	agents, err := agentdir.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := serverOptions{
+		StateDir: stateDir, MaxTurns: 7, ProviderSlot: "primary", PluginPaths: []string{"/plugins/a.json"},
+		Brain: llm.Config{
+			Provider: "openai", Model: "m", APIKey: "secret-one",
+			Fallbacks: []llm.Fallback{{ID: "backup", Provider: "anthropic", Model: "backup-model", APIKey: "secret-two"}},
+		},
+	}
+	fresh, err := defaultAgent(opts, agents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.ID != ponsruntime.DefaultAgentID || fresh.Name != "" || fresh.Persona != "" || fresh.Model != "m" ||
+		fresh.MaxTurns != 7 || fresh.ProviderSlot != "primary" || !slices.Equal(fresh.PluginPaths, opts.PluginPaths) {
+		t.Fatalf("fresh agent = %+v", fresh)
+	}
+	if _, err := agents.AgentRevision(context.Background(), fresh.ID, fresh.Revision()); err != nil {
+		t.Fatalf("fresh revision not recorded: %v", err)
+	}
+
+	dir := agents.Dir(ponsruntime.DefaultAgentID)
+	write(t, filepath.Join(dir, "agent.json"), `{"name":"Ada","provider":"backup","max_turns":4}`)
+	write(t, filepath.Join(dir, "PERSONA.md"), "# Not a name\n\nBe brief.\n")
+	agent, err := defaultAgent(opts, agents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.Name != "Ada" || agent.Persona != "# Not a name\n\nBe brief." || agent.ProviderSlot != "backup" ||
+		agent.Model != "backup-model" || agent.MaxTurns != 4 {
+		t.Fatalf("configured agent = %+v", agent)
+	}
+	encoded, err := json.Marshal(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "secret") {
+		t.Fatalf("definition contains credentials: %s", encoded)
+	}
+
+	rotated := opts
+	rotated.Brain.APIKey = "rotated"
+	rotated.Brain.Fallbacks = []llm.Fallback{{ID: "backup", Provider: "anthropic", Model: "backup-model", APIKey: "rotated"}}
+	again, err := defaultAgent(rotated, agents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Revision() != agent.Revision() {
+		t.Fatal("credential change altered the agent revision")
+	}
+
+	write(t, filepath.Join(dir, "agent.json"), `{"provider":"retired"}`)
+	if _, err := defaultAgent(opts, agents); err == nil || !strings.Contains(err.Error(), `"retired"`) {
+		t.Fatalf("unknown provider slot err = %v", err)
+	}
+}
+
+func TestAgentRunnerSelectsRevisionProviderSlot(t *testing.T) {
+	runner := &agentRunner{opts: serverOptions{
+		ProviderSlot: "primary",
+		Brain: llm.Config{
+			Provider: "openai", Model: "m", APIKey: "one",
+			Fallbacks: []llm.Fallback{
+				{ID: "first", Provider: "codex"},
+				{ID: "backup", Provider: "anthropic", Model: "backup-model", APIKey: "two"},
+			},
+		},
+	}}
+	config, err := runner.brainConfig(ponsruntime.AgentDefinition{
+		ID: "default", Name: "Ada", ProviderSlot: "backup", Model: "pinned",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.ID != "backup" || config.Provider != "anthropic" || config.APIKey != "two" || config.Model != "pinned" ||
+		config.Persona != "Your name is Ada." {
+		t.Fatalf("brain config = %+v", config)
+	}
+	var chain []string
+	for _, fallback := range config.Fallbacks {
+		chain = append(chain, fallback.ID)
+	}
+	if !slices.Equal(chain, []string{"primary", "first"}) || config.Fallbacks[0].APIKey != "one" {
+		t.Fatalf("fallback chain = %v", config.Fallbacks)
+	}
+	if _, err := runner.brainConfig(ponsruntime.AgentDefinition{ID: "default", ProviderSlot: "retired"}); err == nil ||
+		!strings.Contains(err.Error(), `"retired"`) {
+		t.Fatalf("unconfigured slot err = %v", err)
+	}
+}
+
+func TestPersonaPrompt(t *testing.T) {
+	for _, test := range []struct {
+		name, persona, want string
+	}{
+		{"", "", unnamedIdentity},
+		{"Ada", "", "Your name is Ada."},
+		{"Ada", "Be brief.", "Your name is Ada.\n\nBe brief."},
+		{"", "Be brief.", unnamedIdentity + "\n\nBe brief."},
+		{"", "# Grace\nBe brief.", unnamedIdentity + "\n\n# Grace\nBe brief."},
+	} {
+		agent := ponsruntime.AgentDefinition{Name: test.name, Persona: test.persona}
+		if got := personaPrompt(agent); got != test.want {
+			t.Errorf("personaPrompt(%q, %q) = %q, want %q", test.name, test.persona, got, test.want)
+		}
+	}
+}
+
+func TestEditedPersonaChangesIdentityAfterRestart(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		prompts []string
+	)
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		for _, message := range body.Messages {
+			if message.Role == "system" {
+				prompts = append(prompts, message.Content)
+			}
+		}
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"c","object":"chat.completion","created":0,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hi","refusal":null},"finish_reason":"stop"}]}`)
+	}))
+	defer provider.Close()
+
+	stateDir := t.TempDir()
+	run := func() {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err := runBundled(ctx, newServerLogger(io.Discard, false), serverOptions{
+			StateDir: stateDir, WorkspaceRoot: os.TempDir(), ClientWorkspace: t.TempDir(), MaxTurns: 3, MaxConcurrent: 1,
+			Brain: llm.Config{Provider: "openai", Model: "test", APIKey: "test", BaseURL: provider.URL + "/v1"},
+		}, "", "", "who are you?", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	run()
+	dir := filepath.Join(stateDir, "agents", "default")
+	if data, err := os.ReadFile(filepath.Join(dir, "PERSONA.md")); err != nil || len(data) != 0 {
+		t.Fatalf("fresh persona = %q, %v", data, err)
+	}
+	write(t, filepath.Join(dir, "agent.json"), `{"name":"Ada"}`)
+	write(t, filepath.Join(dir, "PERSONA.md"), "Introduce yourself by name.\n")
+	run()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(prompts) != 2 {
+		t.Fatalf("system prompts = %d, want 2", len(prompts))
+	}
+	if !strings.HasPrefix(prompts[0], "<persona>\n"+unnamedIdentity+"\n</persona>") {
+		t.Fatalf("fresh agent prompt:\n%s", prompts[0])
+	}
+	if !strings.HasPrefix(prompts[1], "<persona>\nYour name is Ada.\n\nIntroduce yourself by name.\n</persona>") {
+		t.Fatalf("edited agent prompt:\n%s", prompts[1])
+	}
+	for _, prompt := range prompts {
+		if !strings.Contains(prompt, "<harness>") {
+			t.Fatalf("unexpected prompt:\n%s", prompt)
+		}
 	}
 }

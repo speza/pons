@@ -30,8 +30,9 @@ type Runtime interface {
 }
 
 type HandlerOptions struct {
-	Environments       []string `json:"environments"`
-	DefaultEnvironment string   `json:"default_environment"`
+	Agent              ponsruntime.AgentSummary `json:"agent"`
+	Environments       []string                 `json:"environments"`
+	DefaultEnvironment string                   `json:"default_environment"`
 }
 
 // Handler exposes the runtime v1 loopback HTTP API.

@@ -120,13 +120,14 @@ func (f *failoverClient) Complete(ctx context.Context, system string, turns []Tu
 
 // Config tunes the brain.
 type Config struct {
-	Provider    string // "anthropic", "openai", "codex" (ChatGPT subscription), "openai-responses"
-	Model       string // provider-specific; defaults per provider
-	APIKey      string // falls back to ANTHROPIC_API_KEY / OPENAI_API_KEY
-	BaseURL     string // override the provider endpoint
-	MaxTokens   int    // default 4096
-	SystemExtra string // appended to the system prompt
-	Logger      *log.Logger
+	ID        string // primary slot's stable name, as in Fallback.ID; empty = "primary"
+	Provider  string // "anthropic", "openai", "codex" (ChatGPT subscription), "openai-responses"
+	Model     string // provider-specific; defaults per provider
+	APIKey    string // falls back to ANTHROPIC_API_KEY / OPENAI_API_KEY
+	BaseURL   string // override the provider endpoint
+	MaxTokens int    // default 4096
+	Persona   string // the agent's identity; empty uses a neutral default
+	Logger    *log.Logger
 
 	// Compaction: when the conversation (estimate) exceeds CompactChars,
 	// older turns are summarized into one user message, keeping the last
@@ -168,9 +169,13 @@ func New(cfg Config) (*Brain, error) {
 		b.logf = func(string, ...any) {}
 	}
 
+	primaryID := cfg.ID
+	if primaryID == "" {
+		primaryID = "primary"
+	}
 	slots := make([]Fallback, 0, 1+len(cfg.Fallbacks))
 	slots = append(slots, Fallback{
-		ID:       "primary",
+		ID:       primaryID,
 		Provider: provider,
 		Model:    cfg.Model,
 		BaseURL:  cfg.BaseURL,

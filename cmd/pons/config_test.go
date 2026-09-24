@@ -105,3 +105,11 @@ func TestLoadSettingsRejectsReadableE2BKey(t *testing.T) {
 		t.Fatal("expected insecure config permissions to be rejected")
 	}
 }
+
+func TestLoadSettingsRejectsAgentBlock(t *testing.T) {
+	ws := t.TempDir()
+	write(t, filepath.Join(ws, ".pons.json"), `{"agent":{"name":"Ada"}}`)
+	if _, err := loadSettings(t.TempDir(), ws); err == nil {
+		t.Fatal("agent settings accepted in config; they belong in the agent directory")
+	}
+}
