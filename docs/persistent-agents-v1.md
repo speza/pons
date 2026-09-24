@@ -1,7 +1,8 @@
 # Persistent agents v1 implementation plan
 
 **Status:** Proposed; no phase implemented
-**Related:** [ADR-0016](adr/adr-0016-persistent-agents-and-async-messaging.md),
+**Related:** [design doc](persistent-agents-design.md),
+[ADR-0016](adr/adr-0016-persistent-agents-and-async-messaging.md),
 [ADR-0017](adr/adr-0017-one-runtime-one-trust-domain.md),
 [ADR-0018](adr/adr-0018-agent-triggers-and-delivery.md),
 [ADR-0019](adr/adr-0019-agent-memory.md),
@@ -15,64 +16,11 @@ self-hosted runtime for persistent agents. The ADRs own the contracts; this
 plan owns sequencing, scope, and exit criteria. When the two disagree, fix the
 ADR first.
 
-## Goal
+## Scope
 
-One pons server, run by its owner, hosts any number of long-lived agents
-that the owner creates and edits at runtime. There are no agent kinds: every
-agent is the same object with its own persona, tools, workspace policy,
-memory, schedules, and channels. Every activation remains a finite
-`Core.Run`; nothing runs while an agent is idle.
-
-Two typical configurations guide the design:
-
-- a **chief of staff**: a personal assistant reachable from chat, which helps
-  with day-to-day work, runs scheduled checks, messages the owner
-  proactively, and orchestrates other agents; and
-- **coding and research agents**, with the same web access and memory, which
-  take delegated or scheduled tasks and keep each problem's context separate.
-
-## Built-in agents
-
-pons starts with built-in agent configurations. Owners can later create their
-own (phase 11), starting from these as presets. Either way the runtime only
-sees the resulting definition values.
-
-| Setting | Chief of staff | Coding agent |
-| --- | --- | --- |
-| Persona | Owner-written personality and instructions | Owner-written coding instructions |
-| Tools | File, shell, web, memory | File, shell, web, memory, Git |
-| Workspace (ADR-0022) | `agent`: one long-lived computer | `per_conversation`, or `shared(<repo>)` for one persistent workspace per codebase |
-| Memory capture (ADR-0019) | `extract` | `explicit` |
-| Can delegate | Yes, to allowed agents | No, by default |
-
-The main difference is context isolation, not capability. A coding agent
-keeps codebase knowledge in the workspace (for example `AGENTS.md`) and
-general preferences in its agent-wide memory, so switching codebases does not
-pollute its context. A persistent coding agent is the same preset with a
-`shared(<repo>)` workspace.
-
-The runtime serves one trusted administrative domain under ADR-0017: an owner,
-household, or small team. It is not a public or multi-tenant bot platform.
-Open public ingress, moderation, anonymous-user isolation, and fleet scale are
-out of scope.
-
-## Use cases
-
-These scenarios justify the design. Each phase cites the use cases it serves;
-a contract no use case needs is a candidate to simplify or defer.
-
-| ID | Use case | Needs |
-| --- | --- | --- |
-| U1 | **Morning brief.** At 07:00 the assistant summarizes the owner's day to their chat channel, or stays silent when there is nothing worth sending. | schedules, delivery, memory, `no_update` |
-| U2 | **Chat from anywhere.** The owner messages the assistant from phone or web; it remembers preferences across both. | bindings, principal linking, memory extraction |
-| U3 | **Reminders.** "Remind me Friday to call X." | work items, `wait_until`, detached-work grant |
-| U4 | **Watch for something.** "Tell me when PR #12 merges; give up after a week." | work items, `wait_for` with deadline, event ingress |
-| U5 | **Hand off coding from a phone.** The assistant delegates to a coding agent in E2B and replies with the result. | delegation, hands eligibility |
-| U6 | **Approve from a phone.** A coding agent wants to push; the owner approves in chat hours later. | durable approvals, ADR-0014 |
-| U7 | **Research report.** A research agent produces a file which comes back to the owner. | artifacts, outbound attachments |
-| U8 | **Household.** Two people share one assistant; each person's memory stays private. | principals, principal-scoped memory |
-| U9 | **The agent's own computer.** Over months the assistant keeps notes, scripts, and data in its workspace without Git; they survive VM loss, and the owner can roll back a bad change. | agent workspaces, checkpoints, retention, restore |
-| U10 | **Create an agent.** The owner creates a new agent with its own persona from the web UI or CLI, for example a coding agent that reviews a repository every night, without restarting the server. | managed definitions, revisions, schedules |
+The [design doc](persistent-agents-design.md) defines the goals, non-goals,
+use cases (U1–U10), built-in agents, and design principles. This plan cites
+those use cases per phase.
 
 ## Ordering principle
 
