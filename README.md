@@ -279,7 +279,9 @@ Runs are granted only `memory/`, never the rest of the agent directory. Under
 reach anything the server can. E2B runs have no memory yet.
 
 An agent without a name says so when asked, rather than using the model's own
-name.
+name. While `PERSONA.md` is empty, the agent introduces itself as new and asks
+what you want help with. It saves your answers to its memory, and follows them
+in later conversations. Only you change `PERSONA.md`.
 
 The agent's name appears in `GET /v1/options`, conversation snapshots, the
 CLI, and the web UI. Provider settings and credentials stay in

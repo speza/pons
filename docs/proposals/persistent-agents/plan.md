@@ -1,6 +1,6 @@
 # Persistent agents implementation plan
 
-**Status:** Proposed; no phase implemented
+**Status:** Proposed; phases 1 and 2 implemented
 **Related:** [design doc](design.md),
 [ADR-0016](../../adr/adr-0016-persistent-agents-and-async-messaging.md),
 [ADR-0017](../../adr/adr-0017-one-runtime-one-trust-domain.md),
@@ -48,7 +48,7 @@ phase 1.
 
 | Milestone | Phases | Demonstration |
 | --- | --- | --- |
-| M1 An agent that knows you | 1–2 | On a fresh server, the owner-named agent asks what the owner wants help with, the owner confirms its proposed instructions, and in a new conversation the next day it remembers the owner's preferences. |
+| M1 An agent that knows you | 1–2 | On a fresh server, the owner-named agent asks what the owner wants help with, and in a new conversation the next day it remembers the owner's preferences. |
 | M2 Reachable and proactive | 3–5 | The owner chats with their agent on Telegram, and a morning brief arrives or explicitly does not, across restarts. |
 | M3 Long-lived | 6–8 | The agent's files survive sandbox replacement, household members' memory stays private, and routines set up by chat keep running. |
 | M4 Tasks | 9–11 | The agent starts a coding task from a phone, receives its result and files, and resumes after a durable approval. |
@@ -116,8 +116,8 @@ run records the revision it used.
 **Use cases:** U2, U12. **ADRs:** ADR-0019 (single-principal subset);
 ADR-0016 section 2.
 
-Let the agent maintain its own memory and propose changes to its own
-persona, for one owner, locally. Per-person scopes, extraction, and E2B come
+Let the agent maintain its own memory and learn how its owner wants it to
+work, for one owner, locally. Per-person scopes, extraction, and E2B come
 in phase 7.
 
 Steps:
@@ -146,37 +146,34 @@ Steps:
    corrections directly; curation moves to a background memory agent in
    phase 7. Concurrent runs may both edit memory; with one agent and one
    active run per conversation, the last write wins.
-5. **Confirmations.** Add a `confirmations` table (ID, kind, exact payload,
-   status, requesting run, decided by, timestamps) and a small confirmation
-   primitive: pending items appear in the conversation view; the owner
-   accepts or rejects one through `pons confirm <id>` or a web UI button,
-   both using a new loopback route. As with ADR-0016's task eligibility,
-   hands must not be able to reach that route, which Seatbelt's network
-   denial provides.
-6. **Persona proposals.** Add a host-tool plugin, registered through `Core`
-   with a run-scoped callback instead of store access, and its first tool,
-   `propose_persona(text)`. Until phase 4 adds principals, every native
-   conversation belongs to the owner; afterwards the tool is offered only in
-   the owner's conversations. It creates a confirmation; accepting it
-   writes `PERSONA.md`, which yields a new agent revision for new work. The
-   proposal covers instructions only; the agent's name stays owner-set in
-   `agent.json` and is never proposed by the agent.
-7. **Onboarding.** When `PERSONA.md` is empty, the prompt tells the agent to
-   introduce itself as new, by its name when it has one, and ask
-   what the owner wants help with.
+5. **Owner-written persona.** `PERSONA.md` stays owner-written; the agent is
+   never granted it. What the agent learns about how its owner wants it to
+   work goes to memory, which it follows as the owner's recorded preferences
+   but which cannot override the persona or harness rules.
+6. **Onboarding.** When `PERSONA.md` is empty, the prompt tells the agent to
+   introduce itself as new, by its name when it has one, ask what the owner
+   wants help with, and save what it learns to memory.
+
+Deferred: persona proposals (a `propose_persona` host tool whose exact text
+takes effect only when the owner accepts it) need an approval system, which
+does not exist yet and will be designed separately. Until then the owner
+edits `PERSONA.md` directly, and nothing the agent does changes its standing
+instructions.
 
 Tests:
 
 - The agent's memory edits persist across conversations and restarts.
-- Under Seatbelt, the agent cannot write `PERSONA.md`, `agent.json`, or
-  `revisions/`; only an accepted confirmation changes `PERSONA.md`, exactly
-  as proposed.
+- Under Seatbelt, the agent can write its memory directory but not
+  `PERSONA.md`, `agent.json`, or `revisions/`.
 - Hydrated `MEMORY.md` is labeled data within its budget.
+- An agent with an empty `PERSONA.md` is prompted to introduce itself and
+  ask what the owner wants help with; a written persona replaces that
+  prompt.
 
-**Done when (M1):** on a fresh server the owner-named agent asks what the
-owner wants help with, the owner confirms its proposed instructions, and the
-next day, in a new conversation, it follows them and remembers what the owner
-told it.
+**Done when (M1):** on a fresh server the owner-named agent introduces itself
+and asks what the owner wants help with, and the next day, in a new
+conversation, it follows the preferences the owner gave it and remembers what
+the owner told it.
 
 ## Phase 3: Lineages and explicit outcomes
 
@@ -203,9 +200,10 @@ Steps:
 4. **Staged decisions.** Add a `run_decisions` table (run ID, type, revision,
    payload) and a store operation that commits a lineage's latest successful
    root run's decisions inside the terminal transaction.
-5. **Host tools.** Add `complete_no_update` to the host-tool plugin (created
-   by whichever of phases 2 and 3 lands first),
-   offered only when the submission's source kind is `system`.
+5. **Host tools.** Add a host-tool plugin, registered through `Core` with a
+   run-scoped callback instead of store access, and its first tool,
+   `complete_no_update`, offered only when the submission's source kind is
+   `system`.
 6. **Events and API.** Emit `lineage.updated`; include lineage status in
    `ConversationView`; add `GET /v1/conversations/{id}/lineages/{root_id}`
    and `POST .../cancel`.
@@ -257,7 +255,7 @@ Steps:
    the update ID gives stable event identity. The bot token lives in the
    credential store. Replies use `sendMessage`; `sendChatAction` provides a
    transient typing indicator while a run is active.
-7. **Confirmations in chat.** Deliver phase 2 confirmations as Telegram
+7. **Confirmations in chat.** Deliver approval-system confirmations as Telegram
    inline buttons; only the owner's verified account can accept them.
 8. **Conversation windowing.** A Telegram chat is one conversation that never
    ends. Hydrate a bounded window: recent messages in full and a summary of
@@ -278,8 +276,8 @@ Tests:
 - Telegram tests that need a token stay outside the default suite.
 
 **Done when:** the owner messages their agent on Telegram and receives a
-durable reply, including after a server restart mid-run, and confirms a
-persona change with a button.
+durable reply, including after a server restart mid-run, and, once the
+approval system exists, confirms a persona change with a button.
 
 ## Phase 5: Schedules and budgets
 
@@ -395,7 +393,7 @@ Steps:
    `wait_for` deadline passes.
 4. **Exclusion.** At most one active lineage per item; bounded pending wakes.
 5. **Routines by chat.** "Every morning at 7, send me a brief" becomes a
-   recurring work item the agent proposes through a phase 2 confirmation,
+   recurring work item the agent proposes through an approval-system confirmation,
    running on the phase 5 engine.
 
 Tests:
@@ -444,7 +442,7 @@ first; requires ADR-0014's preflight authorization stage.
 
 - Persist pending approvals and paused turns, releasing workers and
   workspaces.
-- Extend phase 2 and 4 confirmations to exact tool calls, delivered to
+- Extend the approval system's confirmations to exact tool calls, delivered to
   Telegram.
 - Resume the exact persisted action after revalidation.
 

@@ -681,7 +681,7 @@ func TestAgentRunnerSelectsRevisionProviderSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 	if config.ID != "backup" || config.Provider != "anthropic" || config.APIKey != "two" || config.Model != "pinned" ||
-		config.Persona != "Your name is Ada." {
+		!strings.HasPrefix(config.Persona, "Your name is Ada.") {
 		t.Fatalf("brain config = %+v", config)
 	}
 	var chain []string
@@ -701,8 +701,8 @@ func TestPersonaPrompt(t *testing.T) {
 	for _, test := range []struct {
 		name, persona, want string
 	}{
-		{"", "", unnamedIdentity},
-		{"Ada", "", "Your name is Ada."},
+		{"", "", unnamedIdentity + "\n\n" + fmt.Sprintf(onboarding, "introduce yourself")},
+		{"Ada", "", "Your name is Ada.\n\n" + fmt.Sprintf(onboarding, "introduce yourself as Ada")},
 		{"Ada", "Be brief.", "Your name is Ada.\n\nBe brief."},
 		{"", "Be brief.", unnamedIdentity + "\n\nBe brief."},
 		{"", "# Grace\nBe brief.", unnamedIdentity + "\n\n# Grace\nBe brief."},
@@ -767,10 +767,12 @@ func TestEditedPersonaChangesIdentityAfterRestart(t *testing.T) {
 	if len(prompts) != 2 {
 		t.Fatalf("system prompts = %d, want 2", len(prompts))
 	}
-	if !strings.HasPrefix(prompts[0], "<persona>\n"+unnamedIdentity+"\n</persona>") {
+	if !strings.HasPrefix(prompts[0], "<persona>\n"+unnamedIdentity+"\n\nYou are new:") ||
+		!strings.Contains(prompts[0], "ask what they would like help with") {
 		t.Fatalf("fresh agent prompt:\n%s", prompts[0])
 	}
-	if !strings.HasPrefix(prompts[1], "<persona>\nYour name is Ada.\n\nIntroduce yourself by name.\n</persona>") {
+	if !strings.HasPrefix(prompts[1], "<persona>\nYour name is Ada.\n\nIntroduce yourself by name.\n</persona>") ||
+		strings.Contains(prompts[1], "You are new") {
 		t.Fatalf("edited agent prompt:\n%s", prompts[1])
 	}
 	for _, prompt := range prompts {

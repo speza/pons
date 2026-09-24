@@ -352,14 +352,24 @@ const unnamedIdentity = "Your owner has not named you yet. If asked your name, s
 
 func personaPrompt(agent ponsruntime.AgentDefinition) string {
 	identity := unnamedIdentity
+	introduce := "introduce yourself"
 	if agent.Name != "" {
 		identity = "Your name is " + agent.Name + "."
+		introduce = "introduce yourself as " + agent.Name
 	}
 	if agent.Persona == "" {
-		return identity
+		return identity + "\n\n" + fmt.Sprintf(onboarding, introduce)
 	}
 	return identity + "\n\n" + agent.Persona
 }
+
+// onboarding stands in for an empty PERSONA.md. The owner shapes a new agent
+// by talking to it; what the agent learns goes to memory, while PERSONA.md
+// stays owner-written.
+const onboarding = "You are new: your owner has not written standing instructions for you yet. " +
+	"At the start of a conversation, briefly %s, say that you are new, and ask what they would like " +
+	"help with; then help with whatever they ask. Save what you learn about how they want you to " +
+	"work in your memory."
 
 func loopbackRequestOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
