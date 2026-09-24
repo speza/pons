@@ -46,22 +46,43 @@ Idle agents consume no worker. `Core` remains the finite
 `respond -> execute -> interpret` kernel and does not own identity, routing,
 scheduling, or persistence.
 
-### 2. Static agent directory and revisions
+### 2. One agent shape, managed definitions, and revisions
 
-The composing application supplies a static agent directory. Each definition
-contains a stable non-secret ID and display name, instructions, a provider
-slot, capabilities, workspace and environment policy, authorization policy,
-allowed delegation recipients, and run limits. One definition is the default,
-preserving the single-agent experience. Provider credentials stay in the
-credential store and are referenced by named slots.
+There are no agent kinds. Every agent has the same definition shape: a stable
+non-secret ID, a persona (display name and administrator-written
+instructions), a provider slot, tools and capability grants, workspace and
+environment policy, memory capture policy, authorization policy, allowed
+delegation recipients, and run limits. A "chief of staff" assistant and a
+coding agent differ only in these values. The runtime never branches on what
+kind of agent something is.
 
-Each definition has a deterministic, non-secret revision fingerprint.
-Submissions and runs record it. Work whose revision cannot be resolved after a
-restart fails closed; it never runs under changed authority or falls back to
-the default agent. History remains readable if a definition is removed.
+The main practical difference between agents is context isolation, expressed
+through workspace policy under ADR-0022: an orchestrating assistant keeps one
+long-lived workspace, while a coding agent usually starts clean per task or
+keeps one workspace per codebase. Presets that pre-fill common combinations
+are a client and documentation convenience, not a runtime concept.
+
+Definitions are managed runtime resources stored in SQLite. An authorized
+administrator creates, edits, and disables agents through the management API,
+CLI, or web UI without restarting the server; a configuration file may seed
+definitions on first start. One definition is the default, preserving the
+single-agent experience. Models cannot create or edit agent definitions.
+
+Each edit creates an immutable revision with a deterministic, non-secret
+fingerprint. Submissions and runs record the revision they started under and
+keep it until they finish; new submissions use the current revision. A
+revision that cannot be resolved fails closed; work never runs under changed
+authority or falls back to the default agent. Disabling an agent stops new
+work, and history remains readable.
+
+A definition references provider and credential slots by name. Creating or
+editing an agent never creates, reads, or reveals a secret. The persona is
+trusted administrator input and stays separate from memory under ADR-0019,
+which is always rendered as data.
 
 The runtime directory exposes only identity, routing, scheduling, and policy
-facts. Application composition constructs brains, tools, and environments.
+facts. Application composition constructs brains, tools, and environments from
+the resolved revision.
 
 ### 3. Conversation ownership and workspaces
 
@@ -271,16 +292,18 @@ Conversation creation accepts an optional `agent_id`; omission selects the
 default. Views expose ownership, source attribution, a conversation's
 delegations, and lineage status; `delegation.updated` is emitted on the
 parent's cursor. The API adds delegation and lineage cancellation and a
-lineage status read. Agent listing, remote authentication, and mutable agent
-definitions are separate decisions.
+lineage status read. The management surface adds agent create, edit,
+disable, and list under section 2. Remote authentication is a separate
+decision.
 
 ## Store changes
 
 The store exposes domain transitions, not generic queue CRUD: create a
 delegation with its child and submission, finish a child while routing its
-result, cancel a delegation or lineage, and end a lineage. Conversations,
-submissions, and runs gain agent, revision, workspace, and envelope fields,
-and the store adds `delegations` and `lineages`. The SQLite schema version
+result, cancel a delegation or lineage, and end a lineage. The store adds
+`agents` with immutable revisions, `delegations`, and `lineages`;
+conversations, submissions, and runs gain agent, revision, workspace, and
+envelope fields. The SQLite schema version
 increases; old databases may need recreation under the pre-compatibility
 policy.
 
@@ -294,6 +317,9 @@ Deterministic tests, without provider credentials or network, prove:
 
 - ownership selects the non-default agent, and different definitions produce
   different composition through the same `Core`;
+- an agent created or edited at runtime serves new work without a restart,
+  in-flight work keeps its starting revision, and no model-facing tool can
+  create or edit a definition;
 - an unresolvable revision fails closed, and workspace IDs reject conflicting
   mappings and path aliases;
 - an empty or exhausted run cannot complete a lineage or delegation, and an
@@ -323,7 +349,7 @@ no current use case needs it and it concentrates most of the lifecycle
 complexity.
 
 This ADR does not introduce shared transcripts, addressing existing
-conversations, agent-to-agent chat, dynamic agent creation or discovery,
+conversations, agent-to-agent chat, model-driven agent creation or discovery,
 broadcasts, priorities, workflow DAGs, or exactly-once external effects.
 
 ## Consequences
@@ -333,14 +359,13 @@ agents, extending existing queueing, persistence, recovery, and events rather
 than adding a service. Idle agents stay cheap, and private children with
 recipient-owned authority reduce leakage.
 
-Agents must write self-contained requests. Static definition changes require
-a restart, and the generic tool crash window can still report an accepted
+Agents must write self-contained requests. Definition edits apply to new work
+only, and the generic tool crash window can still report an accepted
 delegation's receipt as outcome unknown.
 
 ## Deferred questions
 
 - Which use case, if any, justifies delegation deeper than one level?
-- Should definitions become mutable API resources with retained revisions?
 - How should token and cost budgets compose with retries and provider
   failover?
 

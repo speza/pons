@@ -17,15 +17,38 @@ ADR first.
 
 ## Goal
 
-One pons server, run by its owner, hosts several long-lived agents:
+One pons server, run by its owner, hosts any number of long-lived agents
+that the owner creates and edits at runtime. There are no agent kinds: every
+agent is the same object with its own persona, tools, workspace policy,
+memory, schedules, and channels. Every activation remains a finite
+`Core.Run`; nothing runs while an agent is idle.
 
-- a **personal assistant** reachable from a chat channel, which remembers the
-  owner, runs scheduled checks, and messages the owner proactively; and
-- **coding and research agents** which accept delegated tasks, work in their
-  own workspaces, and return results.
+Two typical configurations guide the design:
 
-Agents differ in configuration, not in their execution loop. Every activation
-remains a finite `Core.Run`; nothing runs while an agent is idle.
+- a **chief of staff**: a personal assistant reachable from chat, which helps
+  with day-to-day work, runs scheduled checks, messages the owner
+  proactively, and orchestrates other agents; and
+- **coding and research agents**, with the same web access and memory, which
+  take delegated or scheduled tasks and keep each problem's context separate.
+
+## Agent presets
+
+Presets pre-fill a new agent's definition. They are client conveniences; the
+runtime only sees the resulting values.
+
+| Setting | Chief of staff | Coding agent |
+| --- | --- | --- |
+| Persona | Owner-written personality and instructions | Owner-written coding instructions |
+| Tools | File, shell, web, memory | File, shell, web, memory, Git |
+| Workspace (ADR-0022) | `agent`: one long-lived computer | `per_conversation`, or `shared(<repo>)` for one persistent workspace per codebase |
+| Memory capture (ADR-0019) | `extract` | `explicit` |
+| Can delegate | Yes, to allowed agents | No, by default |
+
+The main difference is context isolation, not capability. A coding agent
+keeps codebase knowledge in the workspace (for example `AGENTS.md`) and
+general preferences in its agent-wide memory, so switching codebases does not
+pollute its context. A persistent coding agent is the same preset with a
+`shared(<repo>)` workspace.
 
 The runtime serves one trusted administrative domain under ADR-0017: an owner,
 household, or small team. It is not a public or multi-tenant bot platform.
@@ -48,6 +71,7 @@ a contract no use case needs is a candidate to simplify or defer.
 | U7 | **Research report.** A research agent produces a file which comes back to the owner. | artifacts, outbound attachments |
 | U8 | **Household.** Two people share one assistant; each person's memory stays private. | principals, principal-scoped memory |
 | U9 | **The agent's own computer.** Over months the assistant keeps notes, scripts, and data in its workspace without Git; they survive VM loss, and the owner can roll back a bad change. | agent workspaces, checkpoints, retention, restore |
+| U10 | **Create an agent.** The owner creates a new agent with its own persona from the web UI or CLI, for example a coding agent that reviews a repository every night, without restarting the server. | managed definitions, revisions, schedules |
 
 ## Ordering principle
 
@@ -84,15 +108,18 @@ assistant and delegation tracks can proceed in parallel.
 
 ## Phase 1: Agent identity and composition
 
-**Use cases:** all.
+**Use cases:** all; U10.
 
 **ADRs:** ADR-0016 sections 1–3; ADR-0022 section 1.
 
-- Add a static agent directory to `pons serve` configuration with one default
-  agent. Each definition has an ID, display name, instructions, provider slot,
-  capabilities, workspace policy, and limits.
-- Compute a revision fingerprint per definition; record it on submissions and
-  runs. Fail closed on an unresolvable revision.
+- Store agent definitions in SQLite with immutable revisions, seeded from
+  configuration on first start. Each definition has an ID, persona, provider
+  slot, tools, workspace policy, memory capture policy, and limits; there is
+  no agent kind.
+- Add management create, edit, disable, and list through the API and CLI.
+  New work uses the current revision; runs keep the revision they started
+  with. Fail closed on an unresolvable revision.
+- Ship the chief-of-staff and coding-agent presets as client-side defaults.
 - Persist `agent_id`, `workspace_id`, and parent delegation columns on
   conversations. Carry agent and workspace identity through claims.
 - Replace the use of conversation ID as `environment.Spec.WorkspaceID` with
@@ -102,9 +129,10 @@ assistant and delegation tracks can proceed in parallel.
 - Accept an optional `agent_id` on conversation creation; expose ownership in
   views and the web UI.
 
-**Done when:** two scripted agents with different tools and instructions run
-through the same `Core`, workspace aliases are rejected, and restart with a
-removed definition fails that agent's queued work closed.
+**Done when:** an agent created through the CLI serves a conversation without
+a restart, two agents with different tools and personas run through the same
+`Core`, an edit leaves in-flight work on its original revision, and workspace
+aliases are rejected.
 
 ## Phase 2: Submission envelope, lineage, and explicit outcomes
 
@@ -302,8 +330,7 @@ and an expired approval yields one denied result.
 - Multimodal message parts; artifacts cover files.
 - Memory shared between agents.
 - Streaming partial responses to external channels.
-- Mutable agent definitions through the API, dynamic agent creation, and
-  distributed workers.
+- Agents created by models, and distributed workers.
 
 ## Open questions
 
