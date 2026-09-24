@@ -535,7 +535,7 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 		for i := range run {
 			a := run[i]
 			decision, action, err := c.evaluateToolCallStart(ctx, ToolCallStartEvent{
-				Turn: turn, Message: message, Workspace: c.Workspace,
+				Turn: turn, Message: obs.Message, Workspace: c.Workspace,
 				Platform: c.Platform, Environment: c.ActionEnvironment,
 				Action: a, Tool: c.toolSpec(a.Kind), RecentContext: boundedActionContext(recentContext),
 			}, denials)

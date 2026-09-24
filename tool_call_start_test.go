@@ -390,3 +390,67 @@ func TestRepeatedDenialSkipsApproval(t *testing.T) {
 		t.Fatalf("circuit breaker result: %s", got)
 	}
 }
+
+func TestPreflightUsesTurnStartInstruction(t *testing.T) {
+	core := New()
+	setBrain(t, core, &continueBrain{fakeBrain{turns: [][]protocol.Action{
+		{{ID: "one", Kind: "run", Args: json.RawMessage(`{}`)}},
+		{Finish("done")},
+	}}})
+	if err := core.AddTool("run", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+		return protocol.ToolResult{OK: true}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var seen string
+	if err := core.AddHooks(Hooks{
+		OnAgentTurnStart: func(_ context.Context, event *AgentTurnStartEvent) error {
+			event.Observation.Message = "revised instruction"
+			return nil
+		},
+		OnToolCallStart: func(_ context.Context, event *ToolCallStartEvent) error {
+			seen = event.Message
+			return nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.Run(context.Background(), "original instruction"); err != nil {
+		t.Fatal(err)
+	}
+	if seen != "revised instruction" {
+		t.Fatalf("preflight instruction = %q", seen)
+	}
+}
+
+func TestPreflightRejectsNonObjectArgumentUpdates(t *testing.T) {
+	for _, updated := range []string{`[]`, `"scalar"`, `null`} {
+		t.Run(updated, func(t *testing.T) {
+			core := New()
+			setBrain(t, core, &continueBrain{fakeBrain{turns: [][]protocol.Action{
+				{{ID: "one", Kind: "run", Args: json.RawMessage(`{}`)}},
+				{Finish("done")},
+			}}})
+			called := false
+			if err := core.AddTool("run", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+				called = true
+				return protocol.ToolResult{OK: true}, nil
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := core.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, event *ToolCallStartEvent) error {
+				event.Decision = ActionDecision{Action: DispositionAllow, UpdatedArgs: json.RawMessage(updated)}
+				return nil
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			result, err := core.Run(context.Background(), "task")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if called || len(result.History) == 0 || result.History[0].Results[0].OK {
+				t.Fatalf("non-object update executed: called=%v result=%+v", called, result)
+			}
+		})
+	}
+}

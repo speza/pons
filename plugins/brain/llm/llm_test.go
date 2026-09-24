@@ -91,6 +91,22 @@ func newBrain(t *testing.T, c Client) *Brain {
 	return b
 }
 
+func TestSeededInstructionCanBeReplacedBeforeFirstResponse(t *testing.T) {
+	fake := &fakeClient{responses: []Turn{{Role: "assistant", Blocks: []Block{Text{Value: "done"}}}}}
+	brain := newBrain(t, fake)
+	brain.Seed([]Turn{{Role: "user", Blocks: []Block{Text{Value: "earlier context"}}}}, "original instruction", "/w", "")
+	if _, err := brain.Respond(context.Background(), protocol.Observation{Message: "revised instruction", Workspace: "/w"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.seen) != 1 || len(fake.seen[0]) != 2 {
+		t.Fatalf("seeded turns: %+v", fake.seen)
+	}
+	text, ok := fake.seen[0][1].Blocks[0].(Text)
+	if !ok || !strings.Contains(text.Value, "revised instruction") || strings.Contains(text.Value, "original instruction") {
+		t.Fatalf("first instruction was not replaced: %+v", fake.seen[0][1])
+	}
+}
+
 func TestBrainMapsToolUseToActions(t *testing.T) {
 	fake := &fakeClient{responses: []Turn{
 		{Role: "assistant", Blocks: []Block{

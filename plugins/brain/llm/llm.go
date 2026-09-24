@@ -166,15 +166,16 @@ var errEventPersistence = errors.New("llm: persist event")
 // process and is not safe for concurrent use: drive one Core.Run at a
 // time (the interactive CLI does this).
 type Brain struct {
-	cfg         Config
-	model       string
-	client      Client
-	core        *pons.Core
-	turns       []Turn
-	pending     []Result
-	seenMessage string // last message folded into context
-	hands       Hands  // what the seeded run's hands see; shown in <env>
-	logf        func(string, ...any)
+	cfg           Config
+	model         string
+	client        Client
+	core          *pons.Core
+	turns         []Turn
+	pending       []Result
+	seenMessage   string // last message folded into context
+	seededPending bool   // first response may replace the seed after an agent-start hook
+	hands         Hands  // what the seeded run's hands see; shown in <env>
+	logf          func(string, ...any)
 }
 
 // New creates the brain plugin (installed with pons.Core.Use).
@@ -363,6 +364,17 @@ func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.Ass
 	if len(b.turns) == 0 {
 		// First turn: the goal as the opening user message.
 		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: b.userPrompt(obs)}}})
+	} else if b.seededPending && obs.Message != b.seenMessage {
+		// Agent-start hooks can replace the new instruction before the
+		// first model call. Keep the memory block while replacing the seed.
+		blocks := b.turns[len(b.turns)-1].Blocks
+		if len(blocks) > 0 && isMemoryBlock(blocks[0]) {
+			blocks = blocks[:1]
+		} else {
+			blocks = nil
+		}
+		blocks = append(blocks, Text{Value: b.userPrompt(obs)})
+		b.turns[len(b.turns)-1] = Turn{Role: "user", Blocks: blocks}
 	} else if obs.Message != "" && obs.Message != b.seenMessage {
 		// A new instruction arrived (interactive follow-up, resumed run
 		// with a fresh goal): append it with a fresh <env> block. This is
@@ -371,6 +383,7 @@ func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.Ass
 		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: b.userPrompt(obs)}}})
 	}
 	b.seenMessage = obs.Message
+	b.seededPending = false
 
 	if b.shouldCompact() {
 		if err := b.compact(ctx, obs.Turn); err != nil {
@@ -692,6 +705,7 @@ func (b *Brain) Seed(turns []Turn, message string, hands Hands) error {
 	})})
 	b.turns = append(append([]Turn(nil), turns...), Turn{Role: "user", Blocks: blocks})
 	b.seenMessage = message
+	b.seededPending = true
 	return nil
 }
 

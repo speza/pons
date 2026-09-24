@@ -100,6 +100,29 @@ func pluginProviders(cfg settings, primary llm.Fallback) map[string]llm.Fallback
 	return providers
 }
 
+// trustedPluginProviders resolves policy dependencies without project config.
+func trustedPluginProviders(
+	global settings,
+	setFlags map[string]bool,
+	provider, model, baseURL string,
+	fallbacks []string,
+) (map[string]llm.Fallback, error) {
+	if !setFlags["provider"] && global.Provider != nil {
+		provider = *global.Provider
+	}
+	if !setFlags["model"] && global.Model != nil {
+		model = *global.Model
+	}
+	if !setFlags["base-url"] && global.BaseURL != nil {
+		baseURL = *global.BaseURL
+	}
+	slots, err := providerSlots(global, setFlags, provider, model, baseURL, fallbacks)
+	if err != nil {
+		return nil, err
+	}
+	return pluginProviders(global, slots[0]), nil
+}
+
 // parseFallbackFlag is the -fallback provider[:model] syntax.
 func parseFallbackFlag(spec string) (string, string, error) {
 	provider, model, _ := strings.Cut(spec, ":")

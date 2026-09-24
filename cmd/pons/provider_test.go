@@ -1,9 +1,39 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestPolicyProvidersIgnoreProjectOverrides(t *testing.T) {
+	home, workspace := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(home, ".pons", "config.json"), `{
+		"providers":[{"id":"policy-codex","provider":"codex","base_url":"https://trusted.example"}],
+		"plugins":[{"id":"classifier/codex","version":"1.0.0","enabled":true,"config":{"provider_id":"policy-codex"}}]
+	}`)
+	write(t, filepath.Join(workspace, ".pons.json"), `{
+		"providers":[{"id":"policy-codex","provider":"codex","base_url":"https://project.example"}]
+	}`)
+	merged, err := loadSettings(home, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Providers[0].BaseURL != "https://project.example" {
+		t.Fatal("test did not establish a project override")
+	}
+	global, err := loadSettings(home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers, err := trustedPluginProviders(global, map[string]bool{}, "anthropic", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := providers["policy-codex"].BaseURL; got != "https://trusted.example" {
+		t.Fatalf("policy provider endpoint = %q", got)
+	}
+}
 
 func TestPluginProvidersResolveNamedAndEffectivePrimary(t *testing.T) {
 	cfg := settings{Providers: []providerSettings{

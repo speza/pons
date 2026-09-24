@@ -312,6 +312,9 @@ tool-call-start hook is for preflight decisions and approval.
   along with its model, key environment variable, timeout, and confidence
   behavior. An interactive CLI approval
   handler and per-action concurrency limits remain open.
+- Subscription-backed classifier provider slots resolve from global host
+  configuration and explicit CLI flags, so project settings cannot redirect
+  policy requests or credentials.
 - The global `plugins` list gives each plugin a registered `id`, a checked
   semver config/API `version`, `enabled`, and plugin-owned `config`. Duplicate
   IDs and unsupported versions fail startup. Enabled plugins declare provided

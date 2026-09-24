@@ -46,6 +46,6 @@ func (p actionPolicySettings) Build(build *BuildContext) error {
 	if p.MinSafeConfidence != nil {
 		policy.MinSafeConfidence = *p.MinSafeConfidence
 	}
-	build.hostPlugins = append(build.hostPlugins, policy)
+	build.AddHostPlugin(policy)
 	return nil
 }

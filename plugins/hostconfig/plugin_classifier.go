@@ -66,7 +66,7 @@ func (c codexClassifierSettings) Build(build *BuildContext) error {
 	if err != nil {
 		return err
 	}
-	build.hostPlugins = append(build.hostPlugins, actionpolicy.ClassifierPlugin{
+	build.AddHostPlugin(actionpolicy.ClassifierPlugin{
 		ID: c.id, Classifier: classifier,
 	})
 	return nil
@@ -143,7 +143,7 @@ func (c classifierPluginSettings) Build(build *BuildContext) error {
 	if err != nil {
 		return err
 	}
-	build.hostPlugins = append(build.hostPlugins, actionpolicy.ClassifierPlugin{
+	build.AddHostPlugin(actionpolicy.ClassifierPlugin{
 		ID: c.id, Classifier: classifier,
 	})
 	return nil

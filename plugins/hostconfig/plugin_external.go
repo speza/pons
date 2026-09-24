@@ -34,6 +34,8 @@ func (p externalPluginSettings) Provides() []string { return nil }
 func (p externalPluginSettings) Requires() []string { return nil }
 
 func (p externalPluginSettings) Build(build *BuildContext) error {
-	build.manifests = append(build.manifests, p.Manifests...)
+	for _, manifest := range p.Manifests {
+		build.AddManifest(manifest)
+	}
 	return nil
 }

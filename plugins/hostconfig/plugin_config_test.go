@@ -29,20 +29,19 @@ func TestBuildPluginOptionsSelectsClassifier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(options.HostPlugins) != 3 || len(options.Manifests) != 1 ||
-		options.Manifests[0] != "/opt/plugin.json" {
+	if len(options.Plugins) != 4 || options.Plugins[3].Manifest != "/opt/plugin.json" {
 		t.Fatalf("unexpected plugin options: %+v", options)
 	}
-	if got := reflect.TypeOf(options.HostPlugins[0]).String(); got != "actionpolicy.ClassifierPlugin" {
+	if got := reflect.TypeOf(options.Plugins[0].Host).String(); got != "actionpolicy.ClassifierPlugin" {
 		t.Fatalf("first host plugin: %s", got)
 	}
-	policy, ok := options.HostPlugins[1].(actionpolicy.Policy)
+	policy, ok := options.Plugins[1].Host.(actionpolicy.Policy)
 	if !ok || policy.ClassifierID != "classifier/typesafe-jev" || policy.MinSafeConfidence != 0.95 ||
 		!policy.AllowGeneratedConfidence {
-		t.Fatalf("policy plugin: %+v", options.HostPlugins[1])
+		t.Fatalf("policy plugin: %+v", options.Plugins[1].Host)
 	}
 	core := pons.New()
-	if err := core.Use(options.HostPlugins...); err != nil {
+	if err := core.Use(options.Plugins[0].Host, options.Plugins[1].Host, options.Plugins[2].Host); err != nil {
 		t.Fatalf("register configured plugins: %v", err)
 	}
 	if _, ok := core.Capability(actionpolicy.ClassifierCapability("classifier/typesafe-jev")); !ok {
@@ -56,7 +55,7 @@ func TestBuildPluginOptionsDisabledAndMissingKey(t *testing.T) {
 		pluginEntryForTest("action_policy", false, `{"classifier":"classifier/openai"}`),
 	}
 	options, err := buildPluginOptions(plugins, func(string) string { return "" }, nil)
-	if err != nil || len(options.HostPlugins) != 0 {
+	if err != nil || len(options.Plugins) != 0 {
 		t.Fatalf("disabled policy = %+v, %v", options, err)
 	}
 
@@ -88,7 +87,7 @@ func TestBuildCodexClassifierFromProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	core := pons.New()
-	if err := core.Use(options.HostPlugins...); err != nil {
+	if err := core.Use(options.Plugins[0].Host, options.Plugins[1].Host); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := core.Capability(actionpolicy.ClassifierCapability("classifier/codex")); !ok {
@@ -151,10 +150,10 @@ func TestInstalledExternalPluginResolvesByID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(options.Manifests) != 1 || options.Manifests[0] != path {
-		t.Fatalf("installed plugin paths: %+v", options.Manifests)
+	if len(options.Plugins) != 1 || options.Plugins[0].Manifest != path {
+		t.Fatalf("installed plugin paths: %+v", options.Plugins)
 	}
-	if string(options.Configs[path]) != `{"threshold":0.9}` {
-		t.Fatalf("installed plugin config: %s", options.Configs[path])
+	if string(options.Plugins[0].Config) != `{"threshold":0.9}` {
+		t.Fatalf("installed plugin config: %s", options.Plugins[0].Config)
 	}
 }

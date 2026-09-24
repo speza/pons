@@ -85,11 +85,9 @@ func (r *Registry) Register(id, version string, factory Factory) error {
 }
 
 type BuildContext struct {
-	getenv      func(string) string
-	providers   map[string]llm.Fallback
-	hostPlugins []pons.Plugin
-	manifests   []string
-	configs     map[string]json.RawMessage
+	getenv    func(string) string
+	providers map[string]llm.Fallback
+	plugins   []BuiltPlugin
 }
 
 func (b *BuildContext) Getenv(name string) string { return b.getenv(name) }
@@ -98,27 +96,26 @@ func (b *BuildContext) Provider(id string) (llm.Fallback, bool) {
 	return provider, ok
 }
 func (b *BuildContext) AddHostPlugin(plugin pons.Plugin) {
-	b.hostPlugins = append(b.hostPlugins, plugin)
+	b.plugins = append(b.plugins, BuiltPlugin{Host: plugin})
 }
 func (b *BuildContext) AddManifest(path string) {
-	b.manifests = append(b.manifests, path)
+	b.plugins = append(b.plugins, BuiltPlugin{Manifest: path})
 }
 func (b *BuildContext) AddManifestConfig(path string, config json.RawMessage) {
-	b.AddManifest(path)
-	if b.configs == nil {
-		b.configs = make(map[string]json.RawMessage)
-	}
-	b.configs[path] = append(json.RawMessage(nil), config...)
+	b.plugins = append(b.plugins, BuiltPlugin{Manifest: path, Config: append(json.RawMessage(nil), config...)})
 }
 
-type pluginOptions struct {
-	HostPlugins []pons.Plugin
-	Manifests   []string
-	Configs     map[string]json.RawMessage
+// BuiltPlugin is one enabled registration in dependency-resolved config order.
+// Exactly one of Host and Manifest is populated.
+type BuiltPlugin struct {
+	Host     pons.Plugin
+	Manifest string
+	Config   json.RawMessage
 }
 
-// Options are the trusted host plugins and external hands manifests to load.
-type Options = pluginOptions
+type Options struct {
+	Plugins []BuiltPlugin
+}
 
 func decodePluginObject[T any](id string, raw json.RawMessage) (T, error) {
 	var config T
@@ -238,20 +235,20 @@ func (r *Registry) Decode(raw Settings) error {
 	return err
 }
 
-// buildPluginOptions resolves trusted host plugins once at startup. Core.Use
-// applies their capabilities afresh for each run.
+// Build resolves plugin registrations once at startup in dependency order.
+// Runtime applies their capabilities to each new Core in that order.
 func (r *Registry) Build(raw Settings, getenv func(string) string, providers map[string]llm.Fallback) (Options, error) {
 	plugins, err := r.decodePluginConfigs(raw)
 	if err != nil {
-		return pluginOptions{}, err
+		return Options{}, err
 	}
 	build := &BuildContext{getenv: getenv, providers: providers}
 	for _, plugin := range plugins {
 		if err := plugin.Build(build); err != nil {
-			return pluginOptions{}, fmt.Errorf("config plugins.%s: %w", plugin.ID(), err)
+			return Options{}, fmt.Errorf("config plugins.%s: %w", plugin.ID(), err)
 		}
 	}
-	return pluginOptions{HostPlugins: build.hostPlugins, Manifests: build.manifests, Configs: build.configs}, nil
+	return Options{Plugins: build.plugins}, nil
 }
 
 // Build resolves enabled plugins against the trusted host's providers and environment.

@@ -389,7 +389,9 @@ from this section of the file; the default names are `TYPESAFE_API_KEY` and
 existing Codex provider slot and its Pons login. For a top-level
 `"provider": "codex"`, use `"provider_id": "primary"`; with named providers,
 use the matching `providers[].id`. Its `model` and `timeout` can be set
-independently of the brain:
+independently of the brain. Classifier provider settings come from the global
+config and explicit CLI flags; project `.pons.json` cannot change its endpoint
+or credentials:
 
 ```json
 {"id":"classifier/codex","version":"1.0.0","enabled":true,

@@ -250,7 +250,9 @@ func (c *Core) evaluateToolCallStart(ctx context.Context, req ToolCallStartEvent
 				return nil, req.Action, err
 			}
 			if len(candidate.UpdatedArgs) > 0 && candidate.Action != DispositionDeny && decision.Action != DispositionDeny {
-				if !json.Valid(candidate.UpdatedArgs) {
+				updated := bytes.TrimSpace(candidate.UpdatedArgs)
+				_, argsErr := protocol.ObjectArgs(updated)
+				if len(updated) == 0 || updated[0] != '{' || argsErr != nil {
 					candidate = ActionDecision{Action: DispositionDeny, ReasonCode: "invalid_tool_call_update"}
 				} else if !bytes.Equal(req.Action.Args, candidate.UpdatedArgs) {
 					req.Action.Args = slices.Clone(candidate.UpdatedArgs)
