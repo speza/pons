@@ -104,26 +104,57 @@ no use case needs is a candidate to simplify or defer.
 | U8 | **Household.** Two people share one assistant; each person's memory stays private. |
 | U9 | **The agent's own computer.** Over months the assistant keeps notes, scripts, and data in its workspace without Git; they survive sandbox loss, and the owner can roll back a bad change. |
 | U10 | **Create an agent.** The owner creates a new agent with its own persona, for example a coding agent that reviews a repository every night. |
+| U11 | **Inbox triage.** An inbox agent sorts new email and drafts replies; nothing is sent until the owner approves. |
 
 ## Agents
 
 An agent is one kind of object with a persona, tools, workspace, memory,
-schedules, and channels. There are no agent types. pons ships built-in
-configurations first; owners create their own later.
+schedules, and channels. There are no agent types; the agents below are
+example configurations. pons ships the first two built in, and owners can
+create the rest, or their own, later.
 
-| | Chief of staff | Coding agent |
-| --- | --- | --- |
-| Role | Day-to-day help and orchestration | Focused work on one problem or codebase |
-| Context | One long-lived workspace and memory | Clean per task, or one workspace per codebase |
-| Tools | File, shell, web, memory | File, shell, web, memory, Git |
-| Memory | Learns from conversations | Saves what it decides to |
-| Delegates | Yes | No, by default |
+| Agent | Role | Context | Triggers | Notes |
+| --- | --- | --- | --- | --- |
+| **Chief of staff** (built in, default) | Day-to-day help; orchestrates other agents | One long-lived workspace; learns from conversations | Chat, schedules, events | The only agent that delegates by default |
+| **Coding agent** (built in) | Focused work on one problem or codebase | Clean per task, or one workspace per codebase | Delegated, chat, schedules | Web and memory like any agent; codebase knowledge lives in the repository |
+| **Research agent** | Investigates a question and returns a report | Clean per question | Delegated, schedules | Returns files as artifacts (U7) |
+| **Inbox agent** | Triages email and drafts replies | Its own mailbox context | New-mail events, schedules | Reads untrusted content all day, so it holds few privileges and never sends without approval (U11) |
+| **Watchdog** | Watches servers or CI and alerts only when something is wrong | Its own, kept out of the chief of staff | Webhooks, frequent schedules | Mostly `no_update`; needs cost limits |
 
-The real difference between them is context isolation, not capability. An
+Something becomes its own agent only when it needs different credentials or
+trust, an isolated memory or context, a different workspace, or a trigger
+pattern that would clutter another agent. Otherwise it is a tool or skill of
+an existing agent. Calendar, writing help, and quick lookups are tools of the
+chief of staff, not agents.
+
+The real difference between agents is context isolation, not capability. An
 assistant benefits from accumulating context about the owner's life. A coding
 agent working on unrelated problems or codebases is harmed by it. A
 persistent coding agent is the same configuration with one workspace per
 codebase.
+
+## Prior art
+
+Two hosted products launched in 2026 take the same broad shape.
+
+- [Grok Bot](https://x.ai/news/designing-grok-bot) (xAI) gives each account
+  many named bots. Memory and routines belong to each bot; tools and skills
+  live at the account level. Bots run on cloud computers, trigger from
+  schedules and events, save demonstrated workflows as rerunnable skills, and
+  can message each other, share group chats, and hand off tasks.
+- [Muse](https://about.fb.com/news/2026/09/introducing-muse-personal-ai-agent/)
+  (Meta) is one agent per person on a dedicated VM holding the agent and its
+  data. A separate Sentinel agent approves every outbound action. Muse works
+  after the app closes, asks before sensitive actions, keeps an audit trail,
+  and lets people grant each app read or send access separately.
+
+pons adopts the persistent identity, the agent's own computer, per-agent
+memory, schedules and events, background work, and approvals. It differs by
+being self-hosted with owner-chosen models, by using private one-level
+delegation instead of peer messaging and shared computers, and by keeping
+household members' memory apart. The open questions below cover the ideas
+still to adopt: account-level integrations, skills, and checks on every
+outbound action.
 
 ## Design principles
 
@@ -240,3 +271,13 @@ Each decision is summarized here; its ADR holds the contract.
 - Do agents need token or cost budgets before M2?
 - Is serialized handling acceptable for the chief of staff, or does it need
   a second, conversation-scoped lane for quick replies?
+- **Integrations.** How does the owner connect apps such as email, GitHub, or
+  Home Assistant once, and grant each agent a scoped subset (for example read
+  but not send)? This likely needs its own ADR before U11.
+- **Skills.** Should an agent save a repeatable workflow as a file in its
+  workspace or memory and rerun it on a schedule, as Grok Bot does?
+- **Outbound checks.** Should ADR-0014's classifier check every outbound
+  action (side-effecting tool calls, delivery, delegation), like Muse's
+  Sentinel, rather than only individual tool calls?
+- **Agents together in one thread.** Once delegation works, should the owner
+  be able to talk to several agents in one conversation?
