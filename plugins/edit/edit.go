@@ -87,7 +87,7 @@ func (p *Edit) Setup(c *pons.Core) error {
 		Handler:     p.apply,
 		Description: "Edit a single file by applying SEARCH/REPLACE patch blocks. Every SEARCH text must match a unique region of the file (exact match; trailing whitespace and unicode quotes are normalized as a fallback). Do not include large unchanged regions.",
 		Params: []pons.ToolParam{
-			{Name: "path", Type: "string", Description: "File to edit (relative to the workspace root, or absolute within it)", Required: true},
+			{Name: "path", Type: "string", Description: "File to edit (relative to the workspace root, or an absolute path you have access to)", Required: true},
 			{Name: "patch", Type: "string", Description: "One or more blocks: '<<<<<<< SEARCH' / old text / '=======' / new text / '>>>>>>> REPLACE'", Required: true},
 		},
 	})

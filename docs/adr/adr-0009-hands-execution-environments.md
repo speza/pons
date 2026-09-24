@@ -56,6 +56,10 @@ registers the tool host's discovered catalog as proxy tools in `Core`.
 Individual tools are not independently sandboxed in v1. A single environment
 provides the workspace and process context shared by the hands in one active
 agent burst. The brain and its conversation remain outside the environment.
+Inside it, file tools resolve relative paths in the workspace but accept any
+absolute path, as `bash` already can: the environment alone decides what is
+reachable, including host directories it grants beyond the workspace, such
+as an agent's memory.
 
 ### 3. `tool_provider/v1` remains the communication contract
 

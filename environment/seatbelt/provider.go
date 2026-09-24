@@ -68,9 +68,6 @@ func (p Provider) Start(ctx context.Context, spec environment.Spec) (environment
 	}
 
 	command = append(command, "--workspace", workspace)
-	for _, path := range readWrite {
-		command = append(command, "--read-write", path)
-	}
 	args := []string{"-p", profile, "--"}
 	args = append(args, command...)
 	manifest := external.Manifest{

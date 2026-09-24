@@ -185,10 +185,9 @@ func TestSyncedDirectoryRoundTripsOnlyTheRunsChanges(t *testing.T) {
 
 // startWithMemory runs Provider.Start against the fake envd with one synced
 // memory directory, serving hands in-process.
-func startWithMemory(t *testing.T, failSyncUpload bool) (*fakeSyncEnvd, string, *atomic.Pointer[[]string], *atomic.Int32, environment.HandsSession, error) {
+func startWithMemory(t *testing.T, failSyncUpload bool) (*fakeSyncEnvd, string, *atomic.Int32, environment.HandsSession, error) {
 	t.Helper()
 	envd := &fakeSyncEnvd{t: t, root: t.TempDir(), files: map[string][]byte{}}
-	var handsArgs atomic.Pointer[[]string]
 	var deletes atomic.Int32
 	var input atomic.Pointer[io.PipeWriter]
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -233,7 +232,6 @@ func startWithMemory(t *testing.T, failSyncUpload bool) (*fakeSyncEnvd, string, 
 				envd.ServeHTTP(w, r)
 				return
 			}
-			handsArgs.Store(&request.Process.Args)
 			w.Header().Set("Content-Type", "application/connect+json")
 			inR, inW := io.Pipe()
 			outR, outW := io.Pipe()
@@ -283,19 +281,16 @@ func startWithMemory(t *testing.T, failSyncUpload bool) (*fakeSyncEnvd, string, 
 		WorkspaceID: "workspace", WorkspacePath: t.TempDir(), RunID: "run",
 		Command: []string{defaultE2BHandsPath}, ReadWrite: []string{memory},
 	})
-	return envd, memory, &handsArgs, &deletes, session, err
+	return envd, memory, &deletes, session, err
 }
 
-func TestStartSyncsMemoryAndGrantsItToHands(t *testing.T) {
-	envd, memory, handsArgs, _, session, err := startWithMemory(t, false)
+func TestStartSyncsMemoryIntoTheSandbox(t *testing.T) {
+	envd, memory, _, session, err := startWithMemory(t, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := session.Metadata().ReadWrite; len(got) != 1 || got[0] != "/home/user/.pons/memory" {
 		t.Fatalf("metadata read-write = %v", got)
-	}
-	if args := handsArgs.Load(); args == nil || flagValue(*args, "--read-write") != "/home/user/.pons/memory" {
-		t.Fatalf("hands args = %v", args)
 	}
 	remote := envd.local("/home/user/.pons/memory")
 	if data, err := os.ReadFile(filepath.Join(remote, "MEMORY.md")); err != nil || string(data) != "- tea\n" {
@@ -313,7 +308,7 @@ func TestStartSyncsMemoryAndGrantsItToHands(t *testing.T) {
 }
 
 func TestStartDeletesSandboxWhenMemorySyncFails(t *testing.T) {
-	_, _, _, deletes, session, err := startWithMemory(t, true)
+	_, _, deletes, session, err := startWithMemory(t, true)
 	if err == nil {
 		_ = session.Close()
 		t.Fatal("start succeeded without syncing memory")

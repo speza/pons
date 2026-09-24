@@ -217,9 +217,6 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 	}
 	remoteArgs := append([]string(nil), args...)
 	remoteArgs = append(remoteArgs, "--workspace", defaultE2BWorkspace)
-	for _, dir := range synced {
-		remoteArgs = append(remoteArgs, "--read-write", dir.remote)
-	}
 	manifest := external.Manifest{
 		ManifestVersion: external.ManifestVersion,
 		Name:            "pons.hands",

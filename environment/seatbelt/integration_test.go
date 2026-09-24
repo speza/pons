@@ -19,7 +19,6 @@ func TestMain(m *testing.M) {
 		workspace := argumentValue(os.Args[1:], "--workspace")
 		host, err := toolhost.New(toolhost.Config{
 			Workspace:   workspace,
-			ReadWrite:   argumentValues(os.Args[1:], "--read-write"),
 			BashTimeout: 10,
 		})
 		if err == nil {
@@ -51,16 +50,6 @@ func argumentValue(args []string, name string) string {
 		}
 	}
 	return ""
-}
-
-func argumentValues(args []string, name string) []string {
-	var values []string
-	for i := range len(args) - 1 {
-		if args[i] == name {
-			values = append(values, args[i+1])
-		}
-	}
-	return values
 }
 
 func TestSeatbeltIntegration(t *testing.T) {

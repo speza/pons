@@ -37,9 +37,8 @@ func main() {
 	pluginPath := flag.String("plugin-path", "", "PATH supplied to nested external providers")
 	pluginMaxResultBytes := flag.Int("plugin-max-result-bytes", 0, "nested external result byte cap")
 	maxConcurrency := flag.Int("max-concurrency", 0, "maximum concurrent tool calls; 0 = host-bounded")
-	var manifests, readWrite stringsFlag
+	var manifests stringsFlag
 	flag.Var(&manifests, "plugin", "explicit nested external provider manifest (repeatable)")
-	flag.Var(&readWrite, "read-write", "additional directory file tools may address by absolute path (repeatable)")
 	flag.Parse()
 
 	if *workspace == "" {
@@ -51,7 +50,6 @@ func main() {
 
 	host, err := toolhost.New(toolhost.Config{
 		Workspace:           *workspace,
-		ReadWrite:           readWrite,
 		FSReadBytes:         *fsReadBytes,
 		BashTimeout:         *bashTimeout,
 		BashMaxLines:        *bashMaxLines,

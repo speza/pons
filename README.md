@@ -201,8 +201,8 @@ E2B can run the same hands protocol in a remote Linux sandbox. Build the
 template (requires `E2B_API_KEY` and Node/npm), then configure the server
 as shown in the [Git workspace guide](docs/design/git-workspaces.md). Rebuild
 it whenever you upgrade pons: the template's `pons-hands` must match the
-server, and a template built before agent memory rejects the `--read-write`
-flag, so every E2B run fails until it is rebuilt.
+server. With a template built before agent memory, the agent's file tools
+cannot reach its memory directory in the sandbox.
 
 ```sh
 make e2b-template

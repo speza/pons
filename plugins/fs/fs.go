@@ -77,7 +77,7 @@ func New(cfg Config) (*FS, error) {
 
 // Setup registers the three filesystem tools.
 func (p *FS) Setup(c *pons.Core) error {
-	path := pons.ToolParam{Name: "path", Type: "string", Description: "File path (relative to the workspace root, or absolute within it)", Required: true}
+	path := pons.ToolParam{Name: "path", Type: "string", Description: "File path (relative to the workspace root, or an absolute path you have access to)", Required: true}
 	if err := c.AddTool(KindRead, pons.ToolDef{
 		Handler:     p.readFile,
 		Description: "Read a file inside the workspace and return its full content.",

@@ -54,6 +54,8 @@ type WorkspacePlan struct {
 // source. ReadWrite grants further host directories, such as the agent's
 // memory: local providers grant them in place, and remote providers copy them
 // in at start and apply the run's changes back when the session closes.
+// Hands file tools accept any absolute path, so the grant is the
+// environment's alone.
 // Command[0] must be an absolute pons-hands executable path.
 // Environment is a clean, explicit list of KEY=VALUE entries; the parent
 // environment is never inherited.
