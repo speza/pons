@@ -1,17 +1,17 @@
 # ADR-0014: Native action policy and classifier-backed auto mode
 
-**Status:** Proposed
-**Implementation:** Not implemented
+**Status:** Accepted
+**Implementation:** Partial — hooks, action policy, classifier adapters, config, external host hooks, and evals implemented; interactive CLI approval and durable resume remain open
 **Date:** 2026-09-18
 **Related:** ADR-0001, ADR-0004, ADR-0006, ADR-0007, ADR-0021
 
 ## Context
 
-pons has execution seams that policy implementations can use, but it does not
-currently have a native tool-call-start hook. Tool-specific guards exist
-(`fs` path containment and the `shell` command allowlist), and `WrapTool` can
-intercept execution, but there is no common way to decide whether an action
-may run before any hands execute it.
+Before this decision, pons had execution seams that policy implementations
+could use, but no native tool-call-start hook. Tool-specific guards existed
+(`fs` path containment and the `shell` command allowlist), and `WrapTool` could
+intercept execution, but there was no common way to decide whether an action
+could run before any hands executed it.
 
 This matters for a provider-style auto mode. The desired default is not a
 manual prompt for every operation: a classifier should allow routine actions,
@@ -92,7 +92,8 @@ the contract:
 - matching hooks run in registration order and collect errors; a tool-call-start
   error requests approval, while approval-hook errors stop execution;
 - a hook may replace tool arguments; every start hook reevaluates the changed
-  call, and invalid or repeatedly changing arguments are denied;
+  call, invalid or repeatedly changing arguments are denied, and the brain's
+  recorded call is reconciled with the final action before execution;
 - `Ask` invokes an application-supplied approval handler or ADR-0021's
   durable pause adapter;
 - an approval handler may return only `Allow` or `Deny` for the exact pending
@@ -284,7 +285,7 @@ tool-call-start hook is for preflight decisions and approval.
 - Native action policy is not an OS security boundary and cannot protect
   against malicious in-process plugins.
 
-## Open implementation questions
+## Implementation notes and remaining work
 
 - The initial implementation exposes `Core.AddHooks` and
   `Core.SetApprovalHandler`; `plugins/actionpolicy` registers a hook that

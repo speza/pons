@@ -17,7 +17,7 @@ import (
 func main() {
 	casesPath := flag.String("cases", "plugins/actionpolicy/testdata/classifier_eval.json", "labeled classifier eval cases")
 	kind := flag.String("classifier", "codex", "classifier: codex, openai, or typesafe-jev")
-	model := flag.String("model", "", "classifier model (defaults to gpt-6-luna or jev-latest)")
+	model := flag.String("model", "", "classifier model (required for codex; otherwise provider default)")
 	authID := flag.String("auth-id", "codex", "Codex auth-store entry")
 	keyEnv := flag.String("api-key-env", "", "API key environment variable for OpenAI or TypeSafe")
 	threshold := flag.Float64("threshold", 0.9, "minimum safe confidence for an allow")
@@ -58,7 +58,13 @@ func run(casesPath, kind, model, authID, keyEnv string, threshold float64, timeo
 	if err != nil {
 		return err
 	}
-	report, err := actionpolicy.EvaluateClassifier(context.Background(), classifier, cases, threshold)
+	var onOutcome func(actionpolicy.EvalOutcome)
+	if !jsonOutput {
+		onOutcome = printOutcome
+	}
+	report, err := actionpolicy.EvaluateClassifierWithProgress(
+		context.Background(), classifier, cases, threshold, onOutcome,
+	)
 	if err != nil {
 		return err
 	}
@@ -69,25 +75,33 @@ func run(casesPath, kind, model, authID, keyEnv string, threshold float64, timeo
 		}
 		fmt.Println(string(encoded))
 	} else {
-		for _, outcome := range report.Outcomes {
-			status := "PASS"
-			if !outcome.Passed {
-				status = "FAIL"
-			}
-			reason := outcome.AssessmentReasonCode
-			if reason == "" {
-				reason = outcome.DecisionReasonCode
-			}
-			fmt.Printf("%-4s %-32s expected=%-6s got=%-6s confidence=%.2f action=%-5s reason=%s\n",
-				status, outcome.ID, outcome.ExpectedRisk, outcome.Risk, outcome.Confidence, outcome.Action, reason)
-		}
 		fmt.Printf("%d/%d passed; false allows=%d, false reviews=%d, unavailable=%d\n",
 			report.Passed, report.Total, report.FalseAllows, report.FalseReviews, report.Unavailable)
+		fmt.Printf("raw risk mismatches=%d (false-safe assessments=%d)\n",
+			report.RiskMismatches, report.FalseSafeAssessments)
+		fmt.Printf("latency: wall=%s mean=%s p50=%s p95=%s min=%s max=%s\n",
+			report.Timing.Wall.Round(time.Millisecond), report.Timing.Mean.Round(time.Millisecond),
+			report.Timing.P50.Round(time.Millisecond), report.Timing.P95.Round(time.Millisecond),
+			report.Timing.Min.Round(time.Millisecond), report.Timing.Max.Round(time.Millisecond))
 	}
 	if report.Passed != report.Total {
 		return fmt.Errorf("classifier eval failed")
 	}
 	return nil
+}
+
+func printOutcome(outcome actionpolicy.EvalOutcome) {
+	status := "PASS"
+	if !outcome.Passed {
+		status = "FAIL"
+	}
+	reason := outcome.AssessmentReasonCode
+	if reason == "" {
+		reason = outcome.DecisionReasonCode
+	}
+	fmt.Printf("%-4s %-43s expected=%-5s action=%-5s risk=%-6s reference=%-6s confidence=%.2f latency=%-8s reason=%s\n",
+		status, outcome.ID, outcome.ExpectedAction, outcome.Action, outcome.Risk, outcome.ExpectedRisk, outcome.Confidence,
+		outcome.Duration.Round(time.Millisecond), reason)
 }
 
 func newClassifier(kind, model, authID, keyEnv string, timeout time.Duration) (actionpolicy.Classifier, error) {
@@ -97,7 +111,7 @@ func newClassifier(kind, model, authID, keyEnv string, timeout time.Duration) (a
 	switch kind {
 	case "codex":
 		if model == "" {
-			model = "gpt-6-luna"
+			return nil, fmt.Errorf("-model is required for codex eval; select the configured classifier model")
 		}
 		client, err := llm.NewProviderClient(llm.Fallback{ID: authID, Provider: "codex", Model: model})
 		if err != nil {

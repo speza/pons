@@ -44,6 +44,14 @@ type ControlPort interface {
 	Close(ctx context.Context) error
 }
 
+// AssistantResponseReconciler lets a stateful brain record the final tool
+// calls after response hooks and tool-call-start hooks have changed them.
+// Core calls it before executing hands so the brain's next turn reflects
+// the action that actually ran.
+type AssistantResponseReconciler interface {
+	ReconcileAssistantResponse(AssistantResponse) error
+}
+
 type AssistantPartType string
 
 const (
@@ -564,6 +572,11 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 					if parts[i].Type == AssistantPartToolCall {
 						parts[i].Action = byID[parts[i].Action.ID]
 					}
+				}
+			}
+			if reconciler, ok := brain.(AssistantResponseReconciler); ok {
+				if err := reconciler.ReconcileAssistantResponse(AssistantResponse{Parts: parts, Actions: run}); err != nil {
+					return result, fmt.Errorf("reconcile assistant response (turn %d): %w", turn, err)
 				}
 			}
 			if err := c.emit(Event{Type: EventAssistantResponse, Turn: turn, Actions: slices.Clone(run), Parts: parts}); err != nil {

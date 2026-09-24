@@ -168,6 +168,99 @@ func TestBrainMapsToolUseToActions(t *testing.T) {
 	}
 }
 
+func TestCoreReconcilesPolicyRewrittenToolCallInBrainHistory(t *testing.T) {
+	fake := &fakeClient{responses: []Turn{
+		{Role: "assistant", Blocks: []Block{
+			Raw{Item: json.RawMessage(`{"type":"reasoning","id":"r1"}`)},
+			ToolUse{ID: "call_1", Name: "write_file", Input: map[string]any{"path": "original.txt"}},
+		}},
+		{Role: "assistant", Blocks: []Block{Text{Value: "done"}}},
+	}}
+	core := pons.New()
+	brain := newBrain(t, fake)
+	if err := core.Use(brain); err != nil {
+		t.Fatal(err)
+	}
+	var executed string
+	if err := core.AddTool("write_file", pons.ToolDef{Handler: func(_ context.Context, action protocol.Action) (protocol.ToolResult, error) {
+		path, err := protocol.StringArg(action.Args, "path")
+		executed = path
+		return protocol.ToolResult{OK: err == nil, Output: "written"}, err
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.AddHooks(pons.Hooks{OnToolCallStart: func(_ context.Context, event *pons.ToolCallStartEvent) error {
+		path, err := protocol.StringArg(event.Action.Args, "path")
+		if err != nil {
+			return err
+		}
+		if path == "original.txt" {
+			event.Decision.UpdatedArgs = protocol.MustArgsJSON(map[string]string{"path": "approved.txt"})
+		}
+		return nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.Run(context.Background(), "write the approved file"); err != nil {
+		t.Fatal(err)
+	}
+	if executed != "approved.txt" {
+		t.Fatalf("executed path = %q", executed)
+	}
+	if len(fake.seen) != 2 || len(fake.seen[1]) < 2 {
+		t.Fatalf("provider turns: %+v", fake.seen)
+	}
+	blocks := fake.seen[1][1].Blocks
+	if len(blocks) != 2 {
+		t.Fatalf("assistant blocks: %+v", blocks)
+	}
+	if _, ok := blocks[0].(Raw); !ok {
+		t.Fatalf("reasoning block lost: %+v", blocks)
+	}
+	call, ok := blocks[1].(ToolUse)
+	if !ok || call.ID != "call_1" || call.Input["path"] != "approved.txt" {
+		t.Fatalf("provider saw stale tool call: %+v", blocks[1])
+	}
+}
+
+func TestCoreReconcilesAssistantResponseHookIdentity(t *testing.T) {
+	fake := &fakeClient{responses: []Turn{
+		{Role: "assistant", Blocks: []Block{ToolUse{ID: "original", Name: "old_tool", Input: map[string]any{}}}},
+		{Role: "assistant", Blocks: []Block{Text{Value: "done"}}},
+	}}
+	core := pons.New()
+	if err := core.Use(newBrain(t, fake)); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.AddTool("new_tool", pons.ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+		return protocol.ToolResult{OK: true, Output: "done"}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.AddHooks(pons.Hooks{OnAssistantResponse: func(_ context.Context, event *pons.AssistantResponseEvent) error {
+		if event.Turn != 1 {
+			return nil
+		}
+		action := protocol.Action{ID: "changed", Kind: "new_tool", Args: json.RawMessage(`{}`)}
+		event.Response.Actions = []protocol.Action{action}
+		event.Response.Parts = []pons.AssistantPart{{Type: pons.AssistantPartToolCall, Action: action}}
+		return nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.Run(context.Background(), "task"); err != nil {
+		t.Fatal(err)
+	}
+	call, ok := fake.seen[1][1].Blocks[0].(ToolUse)
+	if !ok || call.ID != "changed" || call.Name != "new_tool" {
+		t.Fatalf("provider saw stale tool call: %+v", fake.seen[1][1].Blocks)
+	}
+	result, ok := fake.seen[1][2].Blocks[0].(Result)
+	if !ok || result.ToolUseID != "changed" {
+		t.Fatalf("provider saw mismatched tool result: %+v", fake.seen[1][2].Blocks)
+	}
+}
+
 func TestPendingResultsDoNotDropFollowUp(t *testing.T) {
 	fake := &fakeClient{responses: []Turn{
 		{Role: "assistant", Blocks: []Block{ToolUse{ID: "c1", Name: "ping", Input: map[string]any{}}}},

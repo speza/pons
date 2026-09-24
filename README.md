@@ -76,6 +76,10 @@ Pending work does not proceed when a hook phase returns an error. Tool-call-star
 errors instead request approval; the remaining start hooks still run, and a
 hard deny wins.
 
+Stateful brains can implement `AssistantResponseReconciler` to record the
+final calls after response and preflight hooks change them; the built-in LLM
+brain does this before hands execute.
+
 ### Action policy
 
 An application can install the built-in policy plugin with
@@ -130,10 +134,14 @@ on the execution environment's isolation policy.
 
 ### Classifier evals
 
-The labeled [classifier cases](plugins/actionpolicy/testdata/classifier_eval.json)
-cover routine reads and edits, ambiguous destinations, an exact approval
-follow-up, secret access, destructive commands, and instructions planted in
-tool results. Run them against a live classifier explicitly:
+The [classifier cases](plugins/actionpolicy/testdata/classifier_eval.json)
+label the expected policy action (`allow` or `ask`) and a separate reference
+risk (`safe` or `review`). A low-confidence `safe` can pass the action check by
+asking for approval, while still counting as a raw risk mismatch. The cases
+cover routine reads and edits, multi-step work, ambiguous destinations, an
+exact approval follow-up, changed or revoked approval, secret access,
+destructive commands, and instructions planted in tool results. Run them
+against a live classifier explicitly:
 
 ```sh
 go run ./cmd/pons-eval -classifier codex -auth-id codex -model gpt-6-luna
@@ -141,14 +149,25 @@ go run ./cmd/pons-eval -classifier openai -model gpt-6-luna
 go run ./cmd/pons-eval -classifier typesafe-jev -model jev-latest
 ```
 
-The Codex run uses the named Pons login; the others use `OPENAI_API_KEY` or
-`TYPESAFE_API_KEY`. Use `-case confirmed_push_after_refusal` for one case,
+The Codex run uses the named Pons login and requires `-model` so it cannot
+silently evaluate a different model from the configured plugin. The others use
+`OPENAI_API_KEY` or `TYPESAFE_API_KEY`. Use
+`-case confirmed_push_destination` for one case,
 `-threshold` to test another policy threshold, or `-json` for a report that can
 be saved and compared. `make eval-classifier EVAL_ARGS='-classifier codex'`
 is a shorthand. The command sends synthetic case data to the selected provider
 but never executes the proposed tools. It exits nonzero on a mismatch and
-reports false allows separately; these are the cases to inspect first. Live
-calls are never part of `make check`.
+reports false allows separately; these are the cases to inspect first. Text
+output prints each case and its latency as it completes, then wall time, mean,
+p50, p95, minimum, and maximum decision latency. `-json` includes timing in
+nanoseconds without progress output. These timings exclude classifier setup and
+`go run` compilation; cases run sequentially. Live calls are never part of
+`make check`.
+
+These hand-written cases are smoke tests, not an independent measure of live
+agent reliability; several were refined after inspecting Jev results. Evaluate
+held-out conversation traces and repeated runs before choosing a production
+confidence threshold.
 
 ## Quick start
 

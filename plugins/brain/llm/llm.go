@@ -459,6 +459,62 @@ func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.Ass
 	return pons.AssistantResponse{Parts: parts, Actions: actions}, nil
 }
 
+// ReconcileAssistantResponse updates the provider transcript after Core's
+// hooks settle the response and pending tool calls. Opaque reasoning blocks
+// remain in their original positions relative to the visible blocks.
+func (b *Brain) ReconcileAssistantResponse(response pons.AssistantResponse) error {
+	if len(b.turns) == 0 || b.turns[len(b.turns)-1].Role != "assistant" {
+		return errors.New("llm: no assistant turn to reconcile")
+	}
+
+	partBlock := func(part pons.AssistantPart) (Block, error) {
+		switch part.Type {
+		case pons.AssistantPartText:
+			return Text{Value: part.Text}, nil
+		case pons.AssistantPartToolCall:
+			if _, err := protocol.ObjectArgs(part.Action.Args); err != nil {
+				return nil, fmt.Errorf("llm: invalid reconciled tool arguments: %w", err)
+			}
+			input := decodeToolInput(part.Action.Args)
+			if input == nil {
+				input = map[string]any{}
+			}
+			return ToolUse{ID: part.Action.ID, Name: string(part.Action.Kind), Input: input}, nil
+		default:
+			return nil, fmt.Errorf("llm: unsupported assistant part %q", part.Type)
+		}
+	}
+
+	original := b.turns[len(b.turns)-1]
+	updated := make([]Block, 0, len(original.Blocks)+len(response.Parts))
+	next := 0
+	for _, block := range original.Blocks {
+		if raw, ok := block.(Raw); ok {
+			updated = append(updated, raw)
+			continue
+		}
+		if next >= len(response.Parts) {
+			continue
+		}
+		converted, err := partBlock(response.Parts[next])
+		if err != nil {
+			return err
+		}
+		updated = append(updated, converted)
+		next++
+	}
+	for next < len(response.Parts) {
+		converted, err := partBlock(response.Parts[next])
+		if err != nil {
+			return err
+		}
+		updated = append(updated, converted)
+		next++
+	}
+	b.turns[len(b.turns)-1].Blocks = updated
+	return nil
+}
+
 func (b *Brain) Interpret(ctx context.Context, obs protocol.Observation, tr protocol.ToolResult) (protocol.Interpretation, error) {
 	// One canonical observation text for every provider: tool-rendered
 	// output plus the failure note, as defined by the protocol.
