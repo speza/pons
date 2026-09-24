@@ -101,8 +101,7 @@ func (p Policy) decide(ctx context.Context, req pons.ToolCallStartEvent) (pons.A
 	}
 	for _, classifier := range p.Classifiers {
 		assessment, err := classifier.Assess(ctx, req)
-		if err != nil || math.IsNaN(assessment.Confidence) ||
-			assessment.Confidence < 0 || assessment.Confidence > 1 || assessment.Risk == "" {
+		if err != nil || !validAssessment(assessment) {
 			if ctx.Err() != nil {
 				break
 			}

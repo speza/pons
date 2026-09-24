@@ -600,6 +600,7 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 		}
 		wg.Wait()
 
+		var toolHookErrors []error
 		for i := range run {
 			a, tr := run[i], results[i]
 			if !approved[i] {
@@ -607,7 +608,7 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 				if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *ToolCallDeniedEvent) error {
 					return h.OnToolCallDenied
 				}, &denied); err != nil {
-					return result, fmt.Errorf("tool call denied: %w", err)
+					toolHookErrors = append(toolHookErrors, fmt.Errorf("tool call denied: %w", err))
 				}
 				results[i] = denied.Result
 				results[i].ActionID, results[i].Kind, results[i].OK = a.ID, string(a.Kind), false
@@ -622,7 +623,7 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 				if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *ToolCallErrorEvent) error {
 					return h.OnToolCallError
 				}, &failure); err != nil {
-					return result, fmt.Errorf("tool call error: %w", err)
+					toolHookErrors = append(toolHookErrors, fmt.Errorf("tool call error: %w", err))
 				}
 				tr = failure.Result
 			}
@@ -630,7 +631,7 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 			if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *ToolCallEndEvent) error {
 				return h.OnToolCallEnd
 			}, &completed); err != nil {
-				return result, fmt.Errorf("tool call end: %w", err)
+				toolHookErrors = append(toolHookErrors, fmt.Errorf("tool call end: %w", err))
 			}
 			results[i] = completed.Result
 			results[i].ActionID, results[i].Kind = a.ID, string(a.Kind)
@@ -638,6 +639,9 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 				return result, fmt.Errorf("event action_end: %w", err)
 			}
 			c.logf("[step %d] ← %s ok=%v err=%q", step, a.Kind, tr.OK, tr.Error)
+		}
+		if err := errors.Join(toolHookErrors...); err != nil {
+			return result, err
 		}
 
 		stepLog := protocol.StepLog{Step: step, Actions: actions, Results: results}

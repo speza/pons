@@ -77,6 +77,24 @@ func TestPolicyClassifierFailureAndUncertaintyAsk(t *testing.T) {
 	}
 }
 
+func TestPolicyInvalidAssessmentFallsBack(t *testing.T) {
+	req := pons.ToolCallStartEvent{Action: protocol.Action{Kind: "run"}}
+	called := false
+	policy := Policy{Classifiers: []Classifier{
+		ClassifierFunc(func(context.Context, pons.ToolCallStartEvent) (pons.ActionAssessment, error) {
+			return pons.ActionAssessment{Risk: "unknown", Confidence: 0.99}, nil
+		}),
+		ClassifierFunc(func(context.Context, pons.ToolCallStartEvent) (pons.ActionAssessment, error) {
+			called = true
+			return pons.ActionAssessment{Risk: "safe", Confidence: 0.95, ProbabilityConfidence: true}, nil
+		}),
+	}}
+	decision, err := policy.decide(context.Background(), req)
+	if err != nil || !called || decision.Action != pons.DispositionAllow {
+		t.Fatalf("decision=%+v fallback called=%t error=%v", decision, called, err)
+	}
+}
+
 func TestGeneratedConfidenceRequiresOptIn(t *testing.T) {
 	req := pons.ToolCallStartEvent{Action: protocol.Action{Kind: "run"}}
 	classifier := ClassifierFunc(func(context.Context, pons.ToolCallStartEvent) (pons.ActionAssessment, error) {

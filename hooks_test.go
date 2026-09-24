@@ -191,6 +191,60 @@ func TestTypedHooksCanStopRun(t *testing.T) {
 	}
 }
 
+func TestToolHookErrorsStillReportAllFinishedCalls(t *testing.T) {
+	for _, phase := range []string{"end", "error", "denied"} {
+		t.Run(phase, func(t *testing.T) {
+			c := New()
+			setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{
+				{ID: "first", Kind: "ping"},
+				{ID: "second", Kind: "ping"},
+			}}})
+			if err := c.AddTool("ping", ToolDef{Handler: func(_ context.Context, action protocol.Action) (protocol.ToolResult, error) {
+				return protocol.ToolResult{OK: action.ID == "second"}, nil
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			hookErr := errors.New("post-execution hook failed")
+			hooks := Hooks{}
+			switch phase {
+			case "end":
+				hooks.OnToolCallEnd = func(_ context.Context, event *ToolCallEndEvent) error {
+					if event.Action.ID == "first" {
+						return hookErr
+					}
+					return nil
+				}
+			case "error":
+				hooks.OnToolCallError = func(context.Context, *ToolCallErrorEvent) error { return hookErr }
+			case "denied":
+				hooks.OnToolCallStart = func(_ context.Context, event *ToolCallStartEvent) error {
+					if event.Action.ID == "first" {
+						event.Decision.Action = DispositionDeny
+					}
+					return nil
+				}
+				hooks.OnToolCallDenied = func(context.Context, *ToolCallDeniedEvent) error { return hookErr }
+			}
+			if err := c.AddHooks(hooks); err != nil {
+				t.Fatal(err)
+			}
+			var reported []string
+			c.OnEvent(func(event Event) {
+				if event.Type == EventActionEnd || event.Type == EventActionDenied {
+					reported = append(reported, event.Action.ID)
+				}
+			})
+			_, err := c.Run(context.Background(), "task")
+			if !errors.Is(err, hookErr) {
+				t.Fatalf("run error = %v, want hook error", err)
+			}
+			if !reflect.DeepEqual(reported, []string{"first", "second"}) {
+				t.Fatalf("reported calls = %v", reported)
+			}
+		})
+	}
+}
+
 func TestToolCallUpdateIsRecheckedBeforeExecution(t *testing.T) {
 	c := New()
 	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{{Kind: "ping", Args: protocol.MustArgsJSON(map[string]string{"value": "original"})}}}})
