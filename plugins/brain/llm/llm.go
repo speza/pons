@@ -156,7 +156,7 @@ type Brain struct {
 	turns       []Turn
 	pending     []Result
 	seenMessage string // last message folded into context
-	network     string // hands network policy shown in <env>; empty omits it
+	hands       Hands  // what the seeded run's hands see; shown in <env>
 	logf        func(string, ...any)
 }
 
@@ -338,13 +338,13 @@ func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.Ass
 	}
 	if len(b.turns) == 0 {
 		// First turn: the goal as the opening user message.
-		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: b.userPrompt(obs)}}})
+		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: b.userPrompt(obs, "")}}})
 	} else if obs.Message != "" && obs.Message != b.seenMessage {
 		// A new instruction arrived (interactive follow-up, resumed run
 		// with a fresh goal): append it with a fresh <env> block. This is
 		// intentionally independent of pending results: an instruction
 		// arriving after an exhausted run must not be discarded.
-		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: b.userPrompt(obs)}}})
+		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: b.userPrompt(obs, "")}}})
 	}
 	b.seenMessage = obs.Message
 
@@ -555,9 +555,9 @@ func truncText(s string, n int) string {
 
 // userPrompt renders a new instruction with the environment the brain is
 // working in: the jailed workspace (the model is blind to everything not
-// stated here), the platform, and the date, followed by the memory index when
-// the run has memory.
-func (b *Brain) userPrompt(obs protocol.Observation) string {
+// stated here), the platform, the hands' network policy, and the date,
+// followed by context such as the memory index.
+func (b *Brain) userPrompt(obs protocol.Observation, context string) string {
 	now := obs.Now
 	if now.IsZero() {
 		now = time.Now()
@@ -570,13 +570,13 @@ func (b *Brain) userPrompt(obs protocol.Observation) string {
 		platform = runtime.GOOS + "/" + runtime.GOARCH
 	}
 	fmt.Fprintf(&sb, "os: %s\n", platform)
-	if b.network != "" {
-		fmt.Fprintf(&sb, "network: %s\n", b.network)
+	if b.hands.Network != "" {
+		fmt.Fprintf(&sb, "network: %s\n", b.hands.Network)
 	}
 	fmt.Fprintf(&sb, "date: %s\n", now.Format("2006-01-02"))
 	sb.WriteString("</env>\n\n")
-	if b.cfg.Memory != nil {
-		sb.WriteString(b.cfg.Memory.render())
+	if context != "" {
+		sb.WriteString(context)
 		sb.WriteString("\n")
 	}
 	sb.WriteString(obs.Message)
@@ -612,17 +612,31 @@ func stringify(in map[string]any) json.RawMessage {
 	return b
 }
 
+// Hands is what a run's hands report once their environment starts.
+type Hands struct {
+	Workspace string
+	Platform  string
+	Network   string
+	// MemoryPath is where the hands see the memory directory; it is used
+	// only when Config.Memory is set.
+	MemoryPath string
+}
+
 // Seed installs a hydrated conversation as the brain's context and the
-// next instruction as the new user turn. Hydration and compaction interplay
-// for free: if the seeded context exceeds the budget, the next planning
-// call compacts it.
-func (b *Brain) Seed(turns []Turn, message, workspace, platform, network string) {
+// next instruction as the new user turn, with the memory index once per run.
+// Hydration and compaction interplay for free: if the seeded context exceeds
+// the budget, the next planning call compacts it.
+func (b *Brain) Seed(turns []Turn, message string, hands Hands) {
 	b.pending = nil
-	b.network = network
+	b.hands = hands
+	context := ""
+	if b.cfg.Memory != nil {
+		context = b.cfg.Memory.render(hands.MemoryPath)
+	}
 	b.turns = append(append([]Turn(nil), turns...), Turn{
 		Role: "user", Blocks: []Block{Text{Value: b.userPrompt(protocol.Observation{
-			Message: message, Workspace: workspace, Platform: platform, Now: time.Now(),
-		})}},
+			Message: message, Workspace: hands.Workspace, Platform: hands.Platform, Now: time.Now(),
+		}, context)}},
 	})
 	b.seenMessage = message
 }

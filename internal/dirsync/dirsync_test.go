@@ -47,7 +47,7 @@ func TestRoundTripAppliesOnlyTheRunsChanges(t *testing.T) {
 	delete(remote, "old.md")
 	writeTestFile(t, filepath.Join(host, "tea.md"), "oolong\n")
 
-	changed, err := Apply(host, base, remote)
+	changed, err := Apply(host, base.Digests(), remote)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestApplyStaysInsideDirectory(t *testing.T) {
 	if err := os.Symlink(parent, filepath.Join(host, "up")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Apply(host, Tree{}, Tree{"up/PERSONA.md": []byte("agent")}); err == nil {
+	if _, err := Apply(host, nil, Tree{"up/PERSONA.md": []byte("agent")}); err == nil {
 		t.Fatal("write through a symlink escaped the directory")
 	}
 	if _, err := os.Stat(filepath.Join(parent, "PERSONA.md")); !os.IsNotExist(err) {

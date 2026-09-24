@@ -39,9 +39,9 @@ func List(path string) protocol.Action {
 
 // FS is the filesystem tool plugin.
 type FS struct {
-	root       string // resolved jail root
-	unconfined bool
-	cfg        Config
+	root    string // resolved jail root
+	resolve func(root, path string) (string, error)
+	cfg     Config
 }
 
 // Config tunes the plugin.
@@ -74,7 +74,7 @@ func New(cfg Config) (*FS, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fs: %w", err)
 	}
-	return &FS{root: root, unconfined: cfg.Unconfined, cfg: cfg}, nil
+	return &FS{root: root, resolve: jail.Resolver(cfg.Unconfined), cfg: cfg}, nil
 }
 
 // Setup registers the three filesystem tools.
@@ -105,10 +105,7 @@ func (p *FS) Setup(c *pons.Core) error {
 // resolvePath is the jail: it returns the canonical, root-relative path
 // that the operation must use after the containment check.
 func (p *FS) resolvePath(path string) (string, error) {
-	if p.unconfined {
-		return jail.ResolvePathUnconfined(p.root, path)
-	}
-	return jail.ResolvePath(p.root, path)
+	return p.resolve(p.root, path)
 }
 
 func (p *FS) readFile(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {

@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/samperrin/pons/environment"
-	"github.com/samperrin/pons/plugins/external/sdk"
 )
 
 func TestCanceledRunStillCheckpointsSession(t *testing.T) {
@@ -130,28 +129,19 @@ func testSessionCheckpoint(t *testing.T, fault string) {
 			}
 			_, _ = w.Write(*body)
 		case r.URL.Path == "/process.Process/SendInput":
-			var payload struct{ Input struct{ Stdin string } }
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				t.Error(err)
-				return
-			}
-			body, err := base64.StdEncoding.DecodeString(payload.Input.Stdin)
-			if err == nil {
-				_, err = input.Load().Write(body)
-			}
-			if err != nil {
+			if err := forwardInput(r, &input); err != nil {
 				t.Error(err)
 				w.WriteHeader(http.StatusInternalServerError)
 			}
 		case r.URL.Path == "/process.Process/Start":
 			body, _ := io.ReadAll(r.Body)
-			var request struct{ Process struct{ Cmd string } }
-			if len(body) < 5 || json.Unmarshal(body[5:], &request) != nil {
+			request, ok := decodeStart(body)
+			if !ok {
 				t.Error("invalid Start frame")
 				return
 			}
-			w.Header().Set("Content-Type", "application/connect+json")
 			if request.Process.Cmd != defaultE2BHandsPath {
+				w.Header().Set("Content-Type", "application/connect+json")
 				if request.Process.Cmd == "/bin/tar" {
 					archive, err := archiveWorkspace(remote, 1<<20)
 					if err != nil {
@@ -160,34 +150,10 @@ func testSessionCheckpoint(t *testing.T, fault string) {
 					}
 					checkpoint.Store(&archive)
 				}
-				_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"end": map[string]string{"status": "exit status 0"}}})
+				writeEnd(w)
 				return
 			}
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			input.Store(inW)
-			defer inW.Close()
-			defer outR.Close()
-			go func() {
-				serveErr := (sdk.Server{Name: "pons.hands", Version: "test"}).Serve(r.Context(), inR, outW)
-				_ = outW.CloseWithError(serveErr)
-			}()
-			_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"start": map[string]int{"pid": 42}}})
-			w.(http.Flusher).Flush()
-			buffer := make([]byte, 4096)
-			for {
-				n, err := outR.Read(buffer)
-				if n > 0 {
-					_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"data": map[string]string{"stdout": base64.StdEncoding.EncodeToString(buffer[:n])}}})
-					w.(http.Flusher).Flush()
-				}
-				if err != nil {
-					if errors.Is(err, io.EOF) {
-						_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"end": map[string]string{"status": "exit status 0"}}})
-					}
-					return
-				}
-			}
+			serveHands(w, r, &input)
 		default:
 			http.NotFound(w, r)
 		}
@@ -645,7 +611,7 @@ func TestCanceledStartupStopsTransport(t *testing.T) {
 				}
 				return
 			}
-			_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"end": map[string]string{"status": "exit status 0"}}})
+			writeEnd(w)
 		default:
 			w.WriteHeader(http.StatusOK)
 		}

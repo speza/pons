@@ -211,18 +211,18 @@ func TestAgentRunnerSelectsConversationEnvironment(t *testing.T) {
 	runner := &agentRunner{opts: serverOptions{Sandbox: "seatbelt", Environment: provider}}
 
 	for _, requested := range []string{"", "seatbelt"} {
-		selected, _, name, err := runner.executionEnvironment(requested)
-		if err != nil || selected != provider || name != "seatbelt" {
-			t.Fatalf("selection %q = provider %v, name %q, err %v", requested, selected, name, err)
+		selected, _, err := runner.executionEnvironment(requested)
+		if err != nil || selected != provider {
+			t.Fatalf("selection %q = provider %v, err %v", requested, selected, err)
 		}
 	}
-	// There is no in-process fallback.
-	for _, requested := range []string{"none", "e2b", "unknown"} {
-		if _, _, _, err := runner.executionEnvironment(requested); err == nil {
+	// A conversation recorded under another environment never runs elsewhere.
+	for _, requested := range []string{"none", "e2b"} {
+		if _, _, err := runner.executionEnvironment(requested); err == nil {
 			t.Fatalf("environment %q unexpectedly accepted", requested)
 		}
 	}
-	if _, _, _, err := (&agentRunner{}).executionEnvironment(""); err == nil {
+	if _, _, err := (&agentRunner{}).executionEnvironment(""); err == nil {
 		t.Fatal("runner without an environment unexpectedly accepted")
 	}
 }

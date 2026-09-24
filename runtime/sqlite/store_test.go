@@ -180,7 +180,7 @@ func TestConversationsAreReturnedNewestFirst(t *testing.T) {
 
 	ctx := context.Background()
 	old := ponsruntime.Conversation{
-		ID: "old", AgentID: testAgent.ID, Workspace: "/old", Environment: "none",
+		ID: "old", AgentID: testAgent.ID, Workspace: "/old", Environment: "seatbelt",
 		CreatedAt: time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC),
 	}
 	newest := ponsruntime.Conversation{
@@ -200,7 +200,7 @@ func TestConversationsAreReturnedNewestFirst(t *testing.T) {
 	if len(conversations) != 2 || conversations[0].ID != newest.ID || conversations[1].ID != old.ID {
 		t.Fatalf("conversations = %+v", conversations)
 	}
-	if conversations[0].Environment != "e2b" || conversations[1].Environment != "none" {
+	if conversations[0].Environment != "e2b" || conversations[1].Environment != "seatbelt" {
 		t.Fatalf("conversation environments = %+v", conversations)
 	}
 }

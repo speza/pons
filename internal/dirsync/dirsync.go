@@ -8,6 +8,7 @@ package dirsync
 import (
 	"archive/tar"
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -21,6 +22,19 @@ import (
 
 // Tree maps slash-separated relative paths to regular file contents.
 type Tree map[string][]byte
+
+// Digests maps each path of a snapshot to its content's SHA-256. It is what
+// Apply compares against, so callers need not keep the snapshot itself.
+type Digests map[string][sha256.Size]byte
+
+// Digests summarizes the tree for a later Apply.
+func (t Tree) Digests() Digests {
+	digests := make(Digests, len(t))
+	for name, data := range t {
+		digests[name] = sha256.Sum256(data)
+	}
+	return digests
+}
 
 // Read snapshots dir's regular files. Symlinks and special files are
 // skipped: they are never synced, so a remote copy cannot smuggle one back.
@@ -79,7 +93,7 @@ func Archive(tree Tree) ([]byte, error) {
 // changed are written and files removed are deleted. Files the run did not
 // touch are left as they are now, even if they changed since base. It returns
 // the changed paths.
-func Apply(dir string, base, result Tree) ([]string, error) {
+func Apply(dir string, base Digests, result Tree) ([]string, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, fmt.Errorf("dirsync: %w", err)
@@ -89,7 +103,7 @@ func Apply(dir string, base, result Tree) ([]string, error) {
 	var changed []string
 	for _, name := range slices.Sorted(maps.Keys(result)) {
 		data := result[name]
-		if previous, ok := base[name]; ok && bytes.Equal(previous, data) {
+		if previous, ok := base[name]; ok && previous == sha256.Sum256(data) {
 			continue
 		}
 		if !safeName(name) {

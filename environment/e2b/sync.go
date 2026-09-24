@@ -26,7 +26,7 @@ var unsafeSyncName = regexp.MustCompile(`[^A-Za-z0-9._-]`)
 type syncedDirectory struct {
 	host   string
 	remote string
-	base   dirsync.Tree
+	base   dirsync.Digests
 	// baseBytes is the size of the archive copied in; the copy may grow by
 	// up to the workspace limit beyond it, so memory of any size syncs back.
 	baseBytes int64
@@ -63,7 +63,7 @@ func syncDirectoriesIn(ctx context.Context, client *e2bClient, sandbox e2bSandbo
 		}, "/home/user", nil); err != nil {
 			return nil, fmt.Errorf("environment: copy %s into E2B: %w", host, err)
 		}
-		synced = append(synced, syncedDirectory{host: host, remote: remote, base: base, baseBytes: int64(len(archive))})
+		synced = append(synced, syncedDirectory{host: host, remote: remote, base: base.Digests(), baseBytes: int64(len(archive))})
 	}
 	return synced, nil
 }

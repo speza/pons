@@ -197,12 +197,7 @@ func TestRemoteRunsGetMemoryAtTheSandboxPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(agents.Dir("default"), "memory"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(agents.Dir("default"), "memory", "MEMORY.md"), []byte("- tea\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	write(t, filepath.Join(agents.Dir("default"), "memory", "MEMORY.md"), "- tea\n")
 	execution := remoteMemoryEnvironment{specs: make(chan environment.Spec, 1)}
 	runner := &agentRunner{opts: serverOptions{
 		MaxTurns: 2, Sandbox: "e2b", Environment: execution,

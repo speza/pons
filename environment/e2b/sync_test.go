@@ -3,9 +3,6 @@ package e2b
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/json"
-	"errors"
 	"io"
 	"io/fs"
 	"net/http"
@@ -21,7 +18,6 @@ import (
 	"time"
 
 	"github.com/samperrin/pons/environment"
-	"github.com/samperrin/pons/plugins/external/sdk"
 )
 
 // fakeSyncEnvd emulates the envd file and process calls sync uses, keeping
@@ -50,13 +46,8 @@ func (f *fakeSyncEnvd) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(f.files[r.URL.Query().Get("path")])
 	case r.URL.Path == "/process.Process/Start":
 		body, _ := io.ReadAll(r.Body)
-		var request struct {
-			Process struct {
-				Cmd  string
-				Args []string
-			}
-		}
-		if len(body) < 5 || json.Unmarshal(body[5:], &request) != nil {
+		request, ok := decodeStart(body)
+		if !ok {
 			f.t.Error("invalid Start frame")
 			return
 		}
@@ -64,7 +55,7 @@ func (f *fakeSyncEnvd) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.t.Error(err)
 		}
 		w.Header().Set("Content-Type", "application/connect+json")
-		_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"end": map[string]string{"status": "exit status 0"}}})
+		writeEnd(w)
 	default:
 		http.NotFound(w, r)
 	}
@@ -213,27 +204,14 @@ func startWithMemory(t *testing.T, failSyncUpload bool) (*fakeSyncEnvd, string, 
 		case failSyncUpload && r.URL.Path == "/files" && r.URL.Query().Get("path") == "/tmp/pons-sync-0.tar":
 			http.Error(w, "upload unavailable", http.StatusServiceUnavailable)
 		case r.URL.Path == "/process.Process/SendInput":
-			var payload struct{ Input struct{ Stdin string } }
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			if err := forwardInput(r, &input); err != nil {
 				t.Error(err)
-				return
-			}
-			body, err := base64.StdEncoding.DecodeString(payload.Input.Stdin)
-			if err == nil {
-				_, err = input.Load().Write(body)
-			}
-			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 			}
 		case r.URL.Path == "/process.Process/Start":
 			body, _ := io.ReadAll(r.Body)
-			var request struct {
-				Process struct {
-					Cmd  string
-					Args []string
-				}
-			}
-			if len(body) < 5 || json.Unmarshal(body[5:], &request) != nil {
+			request, ok := decodeStart(body)
+			if !ok {
 				t.Error("invalid Start frame")
 				return
 			}
@@ -242,32 +220,7 @@ func startWithMemory(t *testing.T, failSyncUpload bool) (*fakeSyncEnvd, string, 
 				envd.ServeHTTP(w, r)
 				return
 			}
-			w.Header().Set("Content-Type", "application/connect+json")
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			input.Store(inW)
-			defer inW.Close()
-			defer outR.Close()
-			go func() {
-				serveErr := (sdk.Server{Name: "pons.hands", Version: "test"}).Serve(r.Context(), inR, outW)
-				_ = outW.CloseWithError(serveErr)
-			}()
-			_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"start": map[string]int{"pid": 42}}})
-			w.(http.Flusher).Flush()
-			buffer := make([]byte, 4096)
-			for {
-				n, err := outR.Read(buffer)
-				if n > 0 {
-					_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"data": map[string]string{"stdout": base64.StdEncoding.EncodeToString(buffer[:n])}}})
-					w.(http.Flusher).Flush()
-				}
-				if err != nil {
-					if errors.Is(err, io.EOF) {
-						_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"end": map[string]string{"status": "exit status 0"}}})
-					}
-					return
-				}
-			}
+			serveHands(w, r, &input)
 		default:
 			envd.ServeHTTP(w, r)
 		}

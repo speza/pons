@@ -91,11 +91,11 @@ func TestValidateSpecKeepsReadWriteAlignedAndRejectsOverlap(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := environment.Spec{WorkspacePath: workspace, Command: []string{command}, ReadWrite: []string{memory, memory}}
-	if _, _, _, readWrite, _, err := validateSpec(spec); err != nil || len(readWrite) != 2 {
-		t.Fatalf("read-write = %v, %v", readWrite, err)
+	if valid, err := validateSpec(spec); err != nil || len(valid.readWrite) != 2 {
+		t.Fatalf("read-write = %v, %v", valid.readWrite, err)
 	}
 	spec.ReadOnly = []string{memory}
-	if _, _, _, _, _, err := validateSpec(spec); err == nil || !strings.Contains(err.Error(), "both read-only and read-write") {
+	if _, err := validateSpec(spec); err == nil || !strings.Contains(err.Error(), "both read-only and read-write") {
 		t.Fatalf("overlap error = %v", err)
 	}
 }

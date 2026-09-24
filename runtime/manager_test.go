@@ -170,7 +170,7 @@ func TestManagerPersistsConfiguredConversationEnvironment(t *testing.T) {
 		AgentRevisions:     testRevisions,
 		Store:              store,
 		Runner:             RunnerFunc(func(context.Context, RunRequest) (RunResult, error) { return RunResult{}, nil }),
-		EnvironmentOptions: []string{"none", "seatbelt", "e2b"},
+		EnvironmentOptions: []string{"local", "seatbelt", "e2b"},
 		DefaultEnvironment: "seatbelt",
 	})
 	if err != nil {
@@ -186,15 +186,15 @@ func TestManagerPersistsConfiguredConversationEnvironment(t *testing.T) {
 	if defaultConversation.Environment != "seatbelt" {
 		t.Fatalf("default environment = %q", defaultConversation.Environment)
 	}
-	inProcess, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: workspace, Environment: "none"})
+	explicit, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: workspace, Environment: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inProcess.Environment != "none" {
-		t.Fatalf("explicit environment = %q", inProcess.Environment)
+	if explicit.Environment != "local" {
+		t.Fatalf("explicit environment = %q", explicit.Environment)
 	}
-	if defaultConversation.WorkspaceLock != workspace || inProcess.WorkspaceLock != workspace {
-		t.Fatalf("host workspace locks = %q, %q, want %q", defaultConversation.WorkspaceLock, inProcess.WorkspaceLock, workspace)
+	if defaultConversation.WorkspaceLock != workspace || explicit.WorkspaceLock != workspace {
+		t.Fatalf("host workspace locks = %q, %q, want %q", defaultConversation.WorkspaceLock, explicit.WorkspaceLock, workspace)
 	}
 	sandboxed, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: workspace, Environment: "e2b"})
 	if err != nil {

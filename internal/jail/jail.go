@@ -74,6 +74,14 @@ func ResolvePathUnconfined(root, path string) (string, error) {
 	return real, nil
 }
 
+// Resolver returns ResolvePathUnconfined when unconfined, else ResolvePath.
+func Resolver(unconfined bool) func(root, path string) (string, error) {
+	if unconfined {
+		return ResolvePathUnconfined
+	}
+	return ResolvePath
+}
+
 // Check verifies that path stays within the (already resolved) root.
 // Both sides are resolved through symlinks (e.g. /var → /private/var on
 // macOS), and paths may reference files that do not exist yet (writes).

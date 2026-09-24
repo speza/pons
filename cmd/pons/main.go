@@ -261,7 +261,7 @@ func main() {
 		logger.Printf("workspace root: %v", err)
 		os.Exit(1)
 	}
-	if *sandbox == "" {
+	if *sandbox = strings.TrimSpace(*sandbox); *sandbox == "" {
 		if *sandbox, err = defaultSandbox(runtime.GOOS); err != nil {
 			logger.Print(err)
 			os.Exit(1)

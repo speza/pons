@@ -58,8 +58,8 @@ func Patch(path, patch string) protocol.Action {
 
 // Edit is the edit_file tool plugin.
 type Edit struct {
-	root       string // resolved jail root
-	unconfined bool
+	root    string // resolved jail root
+	resolve func(root, path string) (string, error)
 	// The operation is a read-modify-write. Serialize edits so concurrent
 	// actions cannot lose one another's changes (ADR-0006).
 	mu sync.Mutex
@@ -80,7 +80,7 @@ func New(cfg Config) (*Edit, error) {
 	if err != nil {
 		return nil, fmt.Errorf("edit: %w", err)
 	}
-	return &Edit{root: root, unconfined: cfg.Unconfined}, nil
+	return &Edit{root: root, resolve: jail.Resolver(cfg.Unconfined)}, nil
 }
 
 // Setup registers the edit tool.
@@ -163,11 +163,7 @@ func (p *Edit) apply(ctx context.Context, a protocol.Action) (protocol.ToolResul
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: "invalid arguments: " + err.Error()}, nil
 	}
 
-	resolve := jail.ResolvePath
-	if p.unconfined {
-		resolve = jail.ResolvePathUnconfined
-	}
-	path, err := resolve(p.root, pathArg)
+	path, err := p.resolve(p.root, pathArg)
 	if err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 	}
