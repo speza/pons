@@ -152,8 +152,10 @@ Each ADR records its decision status and implementation state separately.
 
 The browser UI is a development and testing surface for the HTTP/SSE runtime.
 It is not intended for use outside web development and testing. The server
-embeds the built React client. From a fresh checkout, build it and start the
-server after setting up a provider as shown in [Quick start](#quick-start):
+embeds the built React client, which is not committed: without a build, the
+server still compiles and runs, and `/` shows how to build the UI. Building it
+needs Node. From a fresh checkout, build it and start the server after setting
+up a provider as shown in [Quick start](#quick-start):
 
 ```sh
 make web-install
@@ -175,8 +177,8 @@ example, `/Users/you/projects/my-project`). The path must exist inside
 `"workspace_root"` in `~/.pons/config.json` if your projects live elsewhere.
 
 The browser uses the same HTTP/SSE runtime API as the CLI. Frontend source is
-in [`web/`](web/); run `make web-build` after changing it so the server embeds
-the new assets.
+in [`web/`](web/); run `make web-build` after changing it, then rebuild the
+server so it embeds the new assets.
 
 When the server is started with `-sandbox seatbelt` or `-sandbox e2b`, the web
 client lets each new conversation choose between the in-process tools and the

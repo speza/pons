@@ -41,3 +41,22 @@ jobs:
         with:
           version: v2.13.2
           args: --timeout=5m
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        run: npm --prefix web ci
+
+      - name: Type-check and build the web UI
+        run: make web-build
