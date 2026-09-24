@@ -12,12 +12,12 @@ how and in what order it is built. The ADRs hold the detailed contracts.
 
 ## Summary
 
-pons becomes a self-hosted home for long-lived agents. The owner runs one
-server and gets a **chief of staff**: an assistant they can message from
-anywhere, which remembers them, keeps its own files, runs routine checks,
-reaches out when something matters, and hands specialist work to other
-agents, such as coding agents, that keep their own context. Agents persist
-as identities, memory, and workspaces, not as always-running processes.
+pons becomes a self-hosted home for a long-lived personal agent. The owner
+runs one server and gets an agent they name and shape through conversation:
+one they can message from anywhere, which remembers them, keeps its own
+files, runs routine checks, reaches out when something matters, and starts
+private tasks for focused work such as coding or research. The agent persists
+as identity, memory, and workspace, not as an always-running process.
 
 ## Problem
 
@@ -29,8 +29,8 @@ only transcripts:
 - it forgets the owner between conversations unless they paste context back
   in;
 - its files live and die with a conversation or a disposable sandbox; and
-- it has one agent, so an assistant cannot hand a coding task to a coding
-  agent without the owner routing it by hand.
+- it cannot split off focused work, such as a coding task in another
+  repository, without polluting the conversation it came from.
 
 Hosted assistants such as Grok's bot and Meta's Muse point at the experience
 people want: always available, proactive, and personal. They also mean giving a
@@ -50,10 +50,11 @@ time.
    and roll back, and one person's memory never reaches another person.
 4. **Keeps its work.** Each agent has files that survive restarts and
    sandbox loss without requiring Git.
-5. **Hands off work.** The chief of staff delegates to specialist agents,
-   which keep their own context and permissions.
-6. **Many agents, one model.** The owner runs several agents that differ
-   only in configuration, starting from built-in ones.
+5. **Focused work without pollution.** The agent starts private tasks with a
+   clean context, their own workspace, and only the tools they need.
+6. **The owner decides what it is.** One agent the owner names and shapes
+   through conversation, not a set of predefined roles. More agents are
+   possible, but never required.
 7. **Cheap when idle and honest when things fail.** Idle agents cost nothing,
    and no success, send, or silence is ever inferred by accident.
 
@@ -76,16 +77,15 @@ to an agent is someone the owner has explicitly linked.
 
 ## What the owner experiences
 
-At 07:00 the chief of staff sends a brief to the owner's chat app, or sends
-nothing if the day is clear. Mid-morning the owner asks it from their phone
-to remind them about a call on Friday; on Friday it does. Later they ask it
-to fix a flaky test in a repository. It hands the task to the coding agent,
-which works in its own sandbox and reports back. The chief of staff replies
-with the outcome, and the coding agent asks before pushing. Over weeks the
-chief of staff learns the owner's preferences and keeps notes and scripts in
-its own workspace; the owner can open, correct, or roll back any of it. A
-partner in the same household uses the same assistant, and neither sees the
-other's memories.
+The owner names their agent, say "Ada". At 07:00 Ada sends a brief to the
+owner's chat app, or sends nothing if the day is clear. Mid-morning the owner
+asks Ada from their phone to remind them about a call on Friday; on Friday it
+does. Later they ask it to fix a flaky test in a repository. Ada starts a
+coding task: a fresh context in a sandbox with that repository, which knows
+the owner's preferences but not the morning's chat. The task reports back,
+Ada replies with the outcome, and it asks before pushing. Over weeks Ada
+learns the owner's preferences and keeps notes and scripts in its own
+workspace; the owner can open, correct, or roll back any of it.
 
 ## Use cases
 
@@ -98,40 +98,42 @@ no use case needs is a candidate to simplify or defer.
 | U2 | **Chat from anywhere.** The owner messages the assistant from phone or web; it remembers preferences across both. |
 | U3 | **Reminders.** "Remind me Friday to call X." |
 | U4 | **Watch for something.** "Tell me when PR #12 merges; give up after a week." |
-| U5 | **Hand off coding from a phone.** The assistant delegates to a coding agent in a sandbox and replies with the result. |
-| U6 | **Approve from a phone.** A coding agent wants to push; the owner approves in chat hours later. |
-| U7 | **Research report.** A research agent produces a file which comes back to the owner. |
+| U5 | **Coding from a phone.** The agent starts a coding task in a sandbox with the chosen repository and replies with the result. |
+| U6 | **Approve from a phone.** A coding task wants to push; the owner approves in chat hours later. |
+| U7 | **Research report.** A research task produces a file which comes back to the owner. |
 | U8 | **Household.** Two people share one assistant; each person's memory stays private. |
 | U9 | **The agent's own computer.** Over months the assistant keeps notes, scripts, and data in its workspace without Git; they survive sandbox loss, and the owner can roll back a bad change. |
-| U10 | **Create an agent.** The owner creates a new agent with its own persona, for example a coding agent that reviews a repository every night. |
-| U11 | **Inbox triage.** An inbox agent sorts new email and drafts replies; nothing is sent until the owner approves. |
+| U10 | **A second agent.** The owner creates another agent without a restart, for example for a household member who wants their own. |
+| U11 | **Inbox triage.** The agent sorts new email in a low-privilege task and drafts replies; nothing is sent until the owner approves. |
 
-## Agents
+## Your agent and its tasks
 
-An agent is one kind of object with a persona, tools, workspace, memory,
-schedules, and channels. There are no agent types; the agents below are
-example configurations. pons ships the first two built in, and owners can
-create the rest, or their own, later.
+The owner gets one agent and names it. It has no predefined role: its
+persona, preferences, and routines come from the owner's instructions and
+its memory. It keeps one long-lived context, workspace, and memory, which is
+what makes it useful day to day.
 
-| Agent | Role | Context | Triggers | Notes |
+Work that would pollute that context runs as a **task**: a private
+conversation that starts with only the request, runs once, and reports back.
+Each task runs under a **task profile** that the owner configures and the
+agent chooses from:
+
+| Profile | Tools | Workspace | Memory | Typical use |
 | --- | --- | --- | --- | --- |
-| **Chief of staff** (built in, default) | Day-to-day help; orchestrates other agents | One long-lived workspace; learns from conversations | Chat, schedules, events | The only agent that delegates by default |
-| **Coding agent** (built in) | Focused work on one problem or codebase | Clean per task, or one workspace per codebase | Delegated, chat, schedules | Web and memory like any agent; codebase knowledge lives in the repository |
-| **Research agent** | Investigates a question and returns a report | Clean per question | Delegated, schedules | Returns files as artifacts (U7) |
-| **Inbox agent** | Triages email and drafts replies | Its own mailbox context | New-mail events, schedules | Reads untrusted content all day, so it holds few privileges and never sends without approval (U11) |
-| **Watchdog** | Watches servers or CI and alerts only when something is wrong | Its own, kept out of the chief of staff | Webhooks, frequent schedules | Mostly `no_update`; needs cost limits |
+| `general` (built in) | File, shell, web | Fresh per task | Owner's preferences, read-only | Research, one-off investigations (U7) |
+| `coding` (built in) | File, shell, web, Git | A configured repository, fresh or persistent per repository | Owner's preferences, read-only | Coding tasks (U5, U6) |
+| Owner-defined, for example `inbox` | Mail read and draft only | Fresh per task | None | Reading untrusted content with few privileges (U11) |
 
-Something becomes its own agent only when it needs different credentials or
-trust, an isolated memory or context, a different workspace, or a trigger
-pattern that would clutter another agent. Otherwise it is a tool or skill of
-an existing agent. Calendar, writing help, and quick lookups are tools of the
-chief of staff, not agents.
+A task cannot start further tasks. The agent picks a profile and, where
+allowed, one of the profile's named workspaces; it can never choose an
+arbitrary path or grant itself tools. A persistent coding context is a
+`coding` task on a per-repository workspace.
 
-The real difference between agents is context isolation, not capability. An
-assistant benefits from accumulating context about the owner's life. A coding
-agent working on unrelated problems or codebases is harmed by it. A
-persistent coding agent is the same configuration with one workspace per
-codebase.
+Additional agents are possible, for example a separate agent for each
+household member, and a profile may run its tasks as another agent. The
+default is still one agent: something becomes its own agent only when it
+needs a separate identity, persona, or memory that the owner talks to
+directly.
 
 ## Prior art
 
@@ -150,9 +152,9 @@ Two hosted products launched in 2026 take the same broad shape.
 
 pons adopts the persistent identity, the agent's own computer, per-agent
 memory, schedules and events, background work, and approvals. It differs by
-being self-hosted with owner-chosen models, by using private one-level
-delegation instead of peer messaging and shared computers, and by keeping
-household members' memory apart. The open questions below cover the ideas
+being self-hosted with owner-chosen models, by pairing one agent (like Muse)
+with private tasks instead of many peer bots, and by keeping household
+members' memory apart. The open questions below cover the ideas
 still to adopt: account-level integrations, skills, and checks on every
 outbound action.
 
@@ -170,9 +172,9 @@ These explain the decisions below and should settle future disputes.
    work or sends a message twice without saying so.
 4. **Honest outcomes.** Success, silence (`no_update`), failure, and
    "unknown" are explicit states, never inferred from an empty answer.
-5. **Private by default.** Delegated agents get only the request, memory is
-   per agent and per person, and the model never chooses who it is or where
-   a message goes.
+5. **Private by default.** Tasks get only the request, memory is per agent
+   and per person, and the model never chooses who it is, which workspace it
+   uses, or where a message goes.
 6. **Files over bespoke APIs.** Memory and workspaces are plain files the
    agent already knows how to use and the owner can inspect.
 7. **Trusted host, untrusted model.** The host decides identity, scope,
@@ -185,17 +187,19 @@ These explain the decisions below and should settle future disputes.
 
 Each decision is summarized here; its ADR holds the contract.
 
-- **One agent shape with managed definitions** (ADR-0016). Agents are
-  versioned definitions in the runtime, so editing one never changes work
-  already in flight. *Why:* supports built-in and custom agents without
-  types or restarts.
+- **One named agent with managed definitions** (ADR-0016). The agent is a
+  versioned definition in the runtime, so editing it never changes work
+  already in flight. *Why:* the owner shapes one agent instead of designing
+  roles, and more agents need no restart or new types.
 - **Lineages and explicit outcomes** (ADR-0016). Every external message
   starts a lineage that ends as completed, failed, or cancelled, with
   `no_update` as an explicit silent success. *Why:* a scheduled check that
   finds nothing must be distinguishable from a crash.
-- **One-level delegation into private conversations** (ADR-0016). The chief
-  of staff can hand a task to another agent, which cannot delegate further.
-  *Why:* covers U5 while avoiding the hardest multi-level lifecycle rules.
+- **Tasks under owner-configured profiles** (ADR-0016). The agent starts
+  private, one-run tasks with a clean context and a profile's tools,
+  workspace, and memory access; tasks cannot start tasks. *Why:* context
+  isolation for coding and research without predefined agents, and without
+  the hardest multi-level lifecycle rules.
 - **Triggers and delivery around the same queue** (ADR-0018). Chat,
   schedules, and events enter through one path; replies leave through a
   durable outbox to a destination the owner configured. *Why:* one runner,
@@ -228,8 +232,11 @@ Each decision is summarized here; its ADR holds the contract.
   unbounded context, no scoping between people, and hard to correct.
 - **Memory as database records with bespoke tools.** Rejected in favor of
   files: less inspectable and ignores how well agents already use files.
-- **Separate agent types for assistants and coding agents.** Rejected: they
-  share almost everything; the differences are settings.
+- **Predefined specialist agents** (a coding agent, a research agent).
+  Rejected as the default: they make the owner design roles up front, while
+  task profiles give the same isolation inside one agent.
+- **Many peer agents that message each other** (as in Grok Bot). Deferred:
+  more flexible, but harder to keep private and to reason about.
 - **Replies sent by a model-chosen "send message" tool.** Rejected for
   ordinary replies: delivery must be durable and destinations owner-set.
 - **Multi-tenant hosted runtime.** Rejected for pons itself; hosting would
@@ -239,10 +246,12 @@ Each decision is summarized here; its ADR holds the contract.
 
 ## Risks and trade-offs
 
-- **Serialized agents.** A chief of staff with one workspace handles one run
-  at a time, so a slow task can delay a quick reply. Mitigation: hand heavy
-  work to other agents.
-- **Isolation depends on sandboxing.** Scoped memory and delegation need
+- **Serialized agent.** The agent's own conversations share one workspace
+  and run one at a time. Mitigation: heavy work runs as tasks in their own
+  workspaces, in parallel.
+- **Task trust depends on profiles.** An `inbox` task reading hostile email
+  is only as safe as its profile's tools, approvals, and outbound checks.
+- **Isolation depends on sandboxing.** Scoped memory and tasks need
   Seatbelt or E2B. The unsandboxed development setup cannot offer them.
 - **Memory quality.** Automatic extraction may save noise; history, review,
   and restore keep it correctable.
@@ -253,12 +262,12 @@ Each decision is summarized here; its ADR holds the contract.
 
 ## Success measures
 
-- M1: the owner messages the chief of staff from a real chat app and gets a
+- M1: the owner messages their agent from a real chat app and gets a
   durable reply across a server restart.
 - M2: a morning brief arrives, or explicitly does not, every day for two
   weeks without duplicates or silent failures, using the owner's memory.
-- M3: a coding task delegated from a phone returns a result without leaking
-  the assistant's context.
+- M3: a coding task started from a phone returns a result without leaking
+  the agent's conversation context.
 - Throughout: nothing runs while idle, and the owner can inspect and correct
   every memory and workspace change.
 
@@ -269,15 +278,18 @@ Each decision is summarized here; its ADR holds the contract.
 - How much should automatic memory extraction save before review becomes
   necessary?
 - Do agents need token or cost budgets before M2?
-- Is serialized handling acceptable for the chief of staff, or does it need
-  a second, conversation-scoped lane for quick replies?
+- Is serialized handling acceptable for the agent's own conversations, or
+  does it need a second lane for quick replies?
+- **Households.** Should each household member get their own agent, as with
+  Muse, or share one agent with per-person memory? The current design
+  supports both.
 - **Integrations.** How does the owner connect apps such as email, GitHub, or
   Home Assistant once, and grant each agent a scoped subset (for example read
   but not send)? This likely needs its own ADR before U11.
 - **Skills.** Should an agent save a repeatable workflow as a file in its
   workspace or memory and rerun it on a schedule, as Grok Bot does?
 - **Outbound checks.** Should ADR-0014's classifier check every outbound
-  action (side-effecting tool calls, delivery, delegation), like Muse's
+  action (side-effecting tool calls, delivery, tasks), like Muse's
   Sentinel, rather than only individual tool calls?
-- **Agents together in one thread.** Once delegation works, should the owner
-  be able to talk to several agents in one conversation?
+- **Talking to a task.** Should the owner be able to follow up inside a
+  running or finished task, rather than only through the agent?

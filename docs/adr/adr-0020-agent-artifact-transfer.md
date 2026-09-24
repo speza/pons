@@ -7,8 +7,8 @@
 
 ## Context
 
-ADR-0016 gives a delegated child only a text request. That is inadequate when
-a research or coding agent needs to hand back a report, patch, or generated
+ADR-0016 gives a task only a text request. That is inadequate when
+a research or coding task needs to hand back a report, patch, or generated
 file. Sending a path is not transfer: agents have different workspaces, and a
 path can escape a sandbox or change after it is sent. Sharing a workspace
 defeats the recipient's independent workspace and authority.
@@ -27,10 +27,10 @@ under ADR-0019).
   source run and action ID.
 - **References are opaque and granted.** An artifact ID is not an access
   grant. A recipient can read an artifact only through a grant committed with
-  a delegation, a delegation result, or an outbound delivery the policy
+  a task, a task result, or an outbound delivery the policy
   permits. Guessing an ID grants nothing.
-- **Transfer extends delegation.** `delegate(agent_id, message,
-  artifact_refs)` and delegation results may carry references. The host
+- **Transfer extends tasks.** `start_task(message, profile, workspace,
+  artifact_refs)` and task results may carry references. The host
   applies the same recipient and egress policy as the request, and a rejected
   transfer creates no child.
 - **Materialize, never mount.** A recipient asks its environment provider to

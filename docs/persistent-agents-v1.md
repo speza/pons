@@ -19,17 +19,17 @@ ADR first.
 ## Scope
 
 The [design doc](persistent-agents-design.md) defines the goals, non-goals,
-use cases (U1–U10), built-in agents, and design principles. This plan cites
+use cases (U1–U11), agents and tasks, and design principles. This plan cites
 those use cases per phase.
 
 ## Ordering principle
 
-The assistant path comes before delegation. A persistent assistant needs
+The assistant path comes before tasks. A persistent assistant needs
 identity, channels, delivery, schedules, and memory; it does not need
-delegation. Delegation is valuable for coding work but carries the strictest
+tasks. Tasks are valuable for coding work but carries the strictest
 hands-isolation prerequisites (ADR-0016 section 10). Building the assistant
 path first delivers a usable product sooner and exercises the lineage,
-outcome, and delivery machinery that delegation reuses.
+outcome, and delivery machinery that tasks reuse.
 
 | Phase | Depends on |
 | --- | --- |
@@ -40,13 +40,13 @@ outcome, and delivery machinery that delegation reuses.
 | 5 Agent workspaces | 1 |
 | 6 Memory | 3, 5 |
 | 7 Work items | 4 |
-| 8 Delegation | 2 |
+| 8 Tasks | 2 |
 | 9 Artifacts | 8 |
 | 10 Approvals | 2 and an implemented ADR-0014 |
-| 11 Custom agents | 1 |
+| 11 Additional agents | 1 |
 
 Phase 5 can start as soon as phase 1 lands, and phase 8 after phase 2, so the
-assistant and delegation tracks can proceed in parallel.
+assistant and task tracks can proceed in parallel.
 
 ## Milestones
 
@@ -54,8 +54,8 @@ assistant and delegation tracks can proceed in parallel.
 | --- | --- | --- |
 | M1 Reachable assistant | 1–3 | The owner messages a non-default agent from a chat channel and receives a durable reply. |
 | M2 Proactive assistant | 4–7 | A scheduled morning brief reads the owner's memory files and arrives on the owner's channel, or records `no_update`; the agent's workspace survives VM replacement. |
-| M3 Delegating agents | 8–10 | A coordinator delegates a coding task, receives an artifact, and resumes after a durable approval. |
-| Later: custom agents | 11 | The owner creates their own agent from a built-in preset without a restart. |
+| M3 Tasks | 8–10 | The agent starts a coding task, receives an artifact, and resumes after a durable approval. |
+| Later: additional agents | 11 | The owner creates a second agent, for example for another household member, without a restart. |
 
 ## Phase 1: Agent identity and composition
 
@@ -67,9 +67,8 @@ assistant and delegation tracks can proceed in parallel.
   configuration on first start. Each definition has an ID, persona, provider
   slot, tools, workspace policy, memory capture policy, and limits; there is
   no agent kind.
-- Seed the built-in chief-of-staff and coding-agent definitions, with the
-  chief of staff as the default. Configuration may adjust their persona,
-  provider slot, and tools.
+- Seed one default agent, which the owner names; configuration may set its
+  persona, provider slot, and tools.
 - Record the revision on submissions and runs; runs keep the revision they
   started with. Fail closed on an unresolvable revision.
 - Add a read-only agent list to the API and web UI.
@@ -82,9 +81,10 @@ assistant and delegation tracks can proceed in parallel.
 - Accept an optional `agent_id` on conversation creation; expose ownership in
   views and the web UI.
 
-**Done when:** both built-in agents serve conversations through the same
-`Core` with different tools and personas, a configuration change creates a new
-revision without moving in-flight work, and workspace aliases are rejected.
+**Done when:** the default agent and a second configured agent serve
+conversations through the same `Core` with different tools and personas, a
+configuration change creates a new revision without moving in-flight work,
+and workspace aliases are rejected.
 
 ## Phase 2: Submission envelope, lineage, and explicit outcomes
 
@@ -206,24 +206,26 @@ conflicting commit is retained rather than overwriting.
 a deadline expiry wakes it once, and a cancelled item cannot be reopened by a
 late wake.
 
-## Phase 8: Delegation
+## Phase 8: Tasks
 
 **Use cases:** U5.
 
 **ADRs:** ADR-0016 sections 7–12.
 
-- Add the composition eligibility check for delegation (ADR-0016 section 10)
-  and reject ineligible hands at startup.
-- Add the host `delegate(agent_id, message)` tool for root conversations
-  only, with private child conversations, directed allowlists, and the
-  recipient catalog.
-- Add the one-run delegation lifecycle, transactional result routing,
+- Add the composition eligibility check for tasks (ADR-0016 section 10) and
+  reject ineligible hands at startup.
+- Add task profiles to agent definitions, with built-in `general` and
+  `coding` profiles, and named workspaces such as configured repositories.
+- Add the host `start_task(message, profile, workspace)` tool for root
+  conversations only, creating private child conversations.
+- Add the one-run task lifecycle, transactional result routing,
   cancellation, and per-lineage limits.
-- Add delegation and lineage cancellation routes, and show a conversation's
-  delegations in the web UI.
+- Add task and lineage cancellation routes, and show a conversation's tasks
+  in the web UI.
 
-**Done when:** ADR-0016's verification list passes, including the black-box
-two-agent scenario across restart.
+**Done when:** ADR-0016's verification list passes, including a coding task
+that runs in a configured repository workspace, reads but cannot change the
+owner's memory, and returns its result across a restart.
 
 ## Phase 9: Artifacts
 
@@ -233,12 +235,12 @@ two-agent scenario across restart.
 
 - Add a local content-addressed blob store with SQLite metadata.
 - Add provider export and read-only materialization for Seatbelt and E2B.
-- Extend `delegate` and result routing with artifact grants.
+- Extend `start_task` and result routing with artifact grants.
 - Allow outbound intents to carry artifact references where the adapter can
   enforce size and recipient policy.
 
-**Done when:** a research agent's published file reaches the owner through
-a delegation result without the owner's agent gaining access to any other
+**Done when:** a research task's published file reaches the owner through
+a task result without the agent gaining access to any other
 artifact, and a changed source file never alters a published artifact.
 
 Write ADR-0020's detailed contract before starting this phase.
@@ -260,14 +262,14 @@ Write ADR-0021 section 2's detailed contract before starting this phase.
 **Done when:** a paused approval survives restart, resumes exactly one action,
 and an expired approval yields one denied result.
 
-## Phase 11: Custom agents
+## Phase 11: Additional agents
 
 **Use cases:** U10.
 
 **ADRs:** ADR-0016 section 2.
 
 - Add administrator create, edit, disable, and list through the API, CLI,
-  and web UI, starting from a built-in agent as a preset.
+  and web UI.
 - Validate that a definition only references existing provider and
   credential slots, allowed tools, and allowed recipients.
 

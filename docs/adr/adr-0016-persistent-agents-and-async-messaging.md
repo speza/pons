@@ -14,14 +14,15 @@ local asynchronous mailbox: durable submissions, transactional claims,
 conversation and workspace exclusion, bounded scheduling, event persistence,
 and replay after reconnect.
 
-Personal assistants, coding agents, and research agents should use this same
-execution model. They differ in configuration, not in their core loop. An
-assistant also needs to hand work to another agent, such as a coding agent,
-without holding a model call open or requiring a human to route the result.
+An owner-named personal agent should handle day-to-day, coding, and research
+work through this same execution model. Focused work, such as a coding task
+in another repository, needs a clean context of its own without holding a
+model call open or requiring a human to route the result.
 
-A **message** is the durable transport which activates an agent. A
-**delegation** is a bounded request to another agent with a lifecycle and an
-eventual result. A **lineage** is one external submission together with all
+A **message** is the durable transport which activates an agent. A **task**
+is a bounded request run in a private child conversation, by the same agent
+or another, with a lifecycle and an eventual result; the runtime records it
+as a delegation. A **lineage** is one external submission together with all
 work it causes.
 
 All agents in one runtime belong to the trusted administrative domain defined
@@ -51,23 +52,22 @@ scheduling, or persistence.
 There are no agent kinds. Every agent has the same definition shape: a stable
 non-secret ID, a persona (display name and administrator-written
 instructions), a provider slot, tools and capability grants, workspace and
-environment policy, memory capture policy, authorization policy, allowed
-delegation recipients, and run limits. A "chief of staff" assistant and a
-coding agent differ only in these values. The runtime never branches on what
+environment policy, memory capture policy, authorization policy, task
+profiles (section 7), and run limits. The owner names their agent and shapes
+it through conversation; nothing about it is fixed to a role. The runtime never branches on what
 kind of agent something is.
 
-The main practical difference between agents is context isolation, expressed
-through workspace policy under ADR-0022: an orchestrating assistant keeps one
-long-lived workspace, while a coding agent usually starts clean per task or
-keeps one workspace per codebase. Presets that pre-fill common combinations
-are a client and documentation convenience, not a runtime concept.
+Context isolation comes from tasks, not from separate agents: the agent keeps
+one long-lived context and starts a task with a clean context, its own
+workspace, and a narrower profile when work should not pollute it. Additional
+agents remain possible, for example one per household member.
 
 Definitions are managed runtime resources stored in SQLite. An authorized
 administrator creates, edits, and disables agents through the management API,
 CLI, or web UI without restarting the server; a configuration file may seed
-definitions on first start. pons ships built-in definitions first, such as a
-chief of staff and a coding agent; administrator-created definitions use the
-same storage and arrive later without a schema change. One definition is the
+definitions on first start. pons ships one default agent, which the owner
+names, with built-in general and coding task profiles; additional agents use
+the same storage and arrive later without a schema change. One definition is the
 default, preserving the single-agent experience. Models cannot create or edit
 agent definitions.
 
@@ -169,51 +169,70 @@ mechanism:
 Decision capabilities are host tools. They are not exposed to hands and add
 no lifecycle behavior to `Core`.
 
-### 7. One level of host-side delegation
+### 7. Tasks: one level of private delegation
 
-A root conversation's agent, when granted delegation, receives a host-side
-tool:
+An agent hands work to a fresh, private context by starting a **task**. A
+task is the runtime's delegation record: a child conversation with one run
+and a result that returns to the parent. A root conversation's agent, when
+granted tasks, receives one host-side tool:
 
 ```text
-delegate(agent_id, message)
+start_task(message, profile, workspace)
 ```
 
-The recipient is one allowed agent and `message` is a self-contained text
-request. ADR-0020 defines an optional artifact-reference extension. The
-sender sees only the IDs, display names, and administrator-written role
-descriptions of its allowed recipients.
+`message` is a self-contained request. `profile` names one of the agent's
+task profiles (section 2), which decides who runs the task and with what. The
+optional `workspace` names one of the workspaces that profile allows, such as
+a configured repository; the host rejects anything else, and the model never
+supplies a path. ADR-0020 defines an optional artifact-reference extension.
 
-Delegation is one level deep. A delegated child's run never receives the
-`delegate` tool, so a lineage is at most a root with direct children. Deeper
-trees are deferred until a use case needs them.
+A task profile is owner configuration on the agent definition:
 
-The host derives sender identity, lineage, and authorization from the scoped
-run. A successful call returns a receipt with `delegation_id`, the private
-child `conversation_id`, and `status = accepted`. Acceptance does not imply
+- **runs as** the agent itself or another allowed agent;
+- **context**: the request only, never the parent's transcript;
+- **tools**, usually a subset or a specialist set such as Git for coding;
+- **workspace policy** and the named workspaces it may use under ADR-0022;
+- **memory**: none, or the starting run's scopes read-only under ADR-0019;
+  and
+- provider slot and run limits.
+
+A coding task, for example, runs as the same agent with shell, Git, and web
+tools in an E2B workspace for the chosen repository, and reads the owner's
+preferences from memory without being able to change them. The agent sees
+its profiles' names and owner-written descriptions, not their configuration.
+
+Tasks are one level deep. A task's run never receives `start_task`, so a
+lineage is at most a root with direct children. Deeper trees are deferred
+until a use case needs them.
+
+The host derives the sender, lineage, and authorization from the scoped run.
+A successful call returns a receipt with `delegation_id`, the private child
+`conversation_id`, and `status = accepted`. Acceptance does not imply
 completion; the sender may continue or finish.
 
-Each accepted delegation atomically checks that the sender run and lineage
-are active and that policy and bounds allow the request, then creates the
-delegation, a recipient-owned child conversation, and its single queued
-submission. Cancellation or failure committed first denies a late callback.
-Delegation idempotency derives from source run ID plus tool-call ID.
+Each accepted task atomically checks that the sender run and lineage are
+active and that policy and bounds allow the request, then creates the
+delegation, a child conversation owned by the profile's agent, and its
+single queued submission. Cancellation or failure committed first denies a
+late callback. Idempotency derives from source run ID plus tool-call ID.
 
-The child receives only its own definition, the request, and artifact
-references authorized under ADR-0020. It does not receive the parent's
-transcript, reasoning, tool output, memory, workspace, secrets, or
-permissions. Clients may read or cancel a child conversation but cannot
-submit messages to it.
+The child receives only its profile, the request, and artifact references
+authorized under ADR-0020. It does not receive the parent's transcript,
+reasoning, tool output, workspace, secrets, or permissions, and receives
+memory only as its profile allows. Clients may read or cancel a child
+conversation but cannot submit messages to it.
 
-### 8. Delegation lifecycle and result routing
+### 8. Task lifecycle and result routing
 
-A child conversation has exactly one submission, so a delegation is one run:
+A child conversation has exactly one submission, so a task is one run:
 
 ```text
 pending -> running | failed | cancelled
 running -> completed | failed | cancelled
 ```
 
-`pending -> failed` occurs when the recipient's revision cannot be resolved.
+`pending -> failed` occurs when the running agent's revision cannot be
+resolved.
 A run that stops without an explicit final response fails with
 `no_final_response`; an exhausted run fails with its turn-limit error. A
 child cannot use `no_update`.
@@ -231,8 +250,8 @@ tool call. The accepted child continues and its result reactivates the root.
 
 ### 9. Cancellation
 
-The sender may cancel its own delegations through a host capability; an
-authorized client may cancel one delegation or a whole lineage. Cancellation
+The sender may cancel its own tasks through a host capability; an
+authorized client may cancel one task or a whole lineage. Cancellation
 is durable and idempotent. Cancelling a delegation marks it cancelled, removes
 its queued submission from eligibility, requests context cancellation of a
 running child, and routes one notice to the parent. Cancelling a lineage also
@@ -242,17 +261,17 @@ Disconnecting a client cancels nothing.
 
 ### 10. Authorization, isolation, and eligibility
 
-A delegation is accepted only when both agents' revisions resolve, the sender
-holds the delegation grant, the recipient is on its allowlist and differs from
-the sender, and size, lineage, and egress policy allow the request. The
-egress policy sees host-derived sender, recipient, lineage, and request text,
+A task is accepted only when the relevant revisions resolve, the sender holds
+the task grant, the profile and workspace are ones the agent defines, and
+size, lineage, and egress policy allow the request. The egress policy sees
+host-derived sender, profile, running agent, lineage, and request text,
 and may allow, deny, or redact; audit records the decision and a payload
 hash.
 
-Delegation transfers a request, not authority. The recipient uses only its
-own tools, secrets, workspace, and policy, and its response is untrusted
+A task transfers a request, not authority. It uses only its profile's
+tools, secrets, workspace, and policy, and its response is untrusted
 input to the parent. Until ADR-0021's durable approvals exist, a policy that
-requires approval for delegation denies with `approval_unavailable`.
+requires approval for starting a task denies with `approval_unavailable`.
 
 Per-agent secret isolation requires process boundaries: brain credentials
 stay in the host, and hands receive only that agent's grants. pons must not
@@ -281,7 +300,7 @@ server rejects it.
 The server enforces a maximum request size (initially 64 KiB of UTF-8) and a
 maximum number of delegations per lineage (initially 16). Because each result
 reactivates the root, the delegation cap also bounds root activations.
-Denials use stable codes such as `recipient_not_allowed` and
+Denials use stable codes such as `task_profile_not_allowed` and
 `lineage_delegation_limit` without exposing policy detail.
 
 The manager reserves a global `MaxConcurrent` slot before calling
@@ -311,7 +330,7 @@ increases; old databases may need recreation under the pre-compatibility
 policy.
 
 [`docs/persistent-agents-v1.md`](../persistent-agents-v1.md) orders the work:
-identity (sections 1–3) and lineages (sections 4–6) first, delegation
+identity (sections 1–3) and lineages (sections 4–6) first, tasks
 (sections 7–11) after the assistant path.
 
 ## Verification requirements
@@ -329,13 +348,16 @@ Deterministic tests, without provider credentials or network, prove:
   early root response does not end the client's wait while delegations are
   outstanding;
 - staged decisions from a failed, cancelled, or superseded run never commit;
-- a child receives the request but no parent context, and cannot delegate;
+- a task receives the request but no parent context, cannot start tasks, and
+  gets only its profile's tools, workspace, and memory access;
+- a model-supplied profile or workspace outside the agent's configuration is
+  rejected;
 - results arriving during a parent run stay queued and attributed;
 - duplicate actions and crashes around acceptance create one child and one
   result, with no replay of interrupted tools;
 - cancellation and failure races produce exactly one terminal state, and a
   late callback cannot create a child after either;
-- recipient, egress, size, and per-lineage limits fail closed; and
+- profile, workspace, egress, size, and per-lineage limits fail closed; and
 - an ineligible hands provider is rejected when delegation is enabled.
 
 Black-box coverage exercises two scripted agents through HTTP, SQLite, the
@@ -349,7 +371,9 @@ are rejected because they waste idle resources and bypass durability, policy,
 and recovery. Blocking delegation is rejected because it holds worker
 capacity across unbounded work. Multi-level delegation is deferred because
 no current use case needs it and it concentrates most of the lifecycle
-complexity.
+complexity. Predefined specialist agents (a coding agent, a research agent)
+are rejected as the default: they make the owner design roles up front,
+while task profiles give the same context isolation inside one named agent.
 
 This ADR does not introduce shared transcripts, addressing existing
 conversations, agent-to-agent chat, model-driven agent creation or discovery,
@@ -357,10 +381,10 @@ broadcasts, priorities, workflow DAGs, or exactly-once external effects.
 
 ## Consequences
 
-One lightweight architecture supports assistants and coding and research
-agents, extending existing queueing, persistence, recovery, and events rather
+One lightweight architecture lets a single named agent handle day-to-day,
+coding, and research work through tasks, extending existing queueing, persistence, recovery, and events rather
 than adding a service. Idle agents stay cheap, and private children with
-recipient-owned authority reduce leakage.
+profile-scoped authority reduce leakage.
 
 Agents must write self-contained requests. Definition edits apply to new work
 only, and the generic tool crash window can still report an accepted

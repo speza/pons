@@ -44,8 +44,10 @@ in the scope's `MEMORY.md`. The runtime does not parse or enforce file
 contents beyond the limits in section 4.
 
 Memory is never shared between agents. Two agents serving the same principal
-each keep a separate `principals/<id>/` tree. A delegated child receives none
-of its parent's memory, and a parent receives none of its child's. Information
+each keep a separate `principals/<id>/` tree. A task run as the same agent
+receives only what its ADR-0016 task profile allows: nothing, or the
+starting run's scopes read-only. A task run by another agent receives none of
+the parent's memory, and a parent receives none of a task's. Information
 moves between agents only through a delegation request, a result, or an
 authorized artifact under ADR-0020. Any shared or cross-agent memory is a
 separate future decision.
@@ -67,7 +69,8 @@ the run's hands environment at fixed paths:
 | Human or scheduled run with a principal | read-only; read-write if that principal is an agent-wide writer | that principal's only, read-write |
 | System run without a principal | read-write only with an agent-wide write grant; otherwise read-only | none |
 | Extraction run (section 6) | as its originating lineage | as its originating lineage |
-| Delegated child | its own agent's tree, as a system run without a principal; never the parent's | none; the parent's principal is not inherited |
+| Task run as the same agent | per its profile: none, or read-only | per its profile: none, or the starting run's principal read-only |
+| Task run by another agent | that agent's tree, as a system run without a principal | none; the parent's principal is not inherited |
 
 The principal comes from ADR-0018's verified `source.principal_id`, never from
 message content or model arguments. Accounts linked to one principal share

@@ -135,7 +135,8 @@ security boundary. A hosted service should route domains to isolated runtime
 cells rather than co-host untrusted customers in one runtime.
 
 Proposed persistent-agent support lets one self-hosted server run
-long-lived assistants and delegating coding agents. The
+long-lived, owner-named agents that hand coding and research work to
+private tasks. The
 [design doc](docs/persistent-agents-design.md) explains what and why, and the
 [implementation plan](docs/persistent-agents-v1.md) orders the work. Agent
 identity and delegation are specified in
