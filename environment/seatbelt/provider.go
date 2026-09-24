@@ -121,6 +121,7 @@ func (p Provider) Start(ctx context.Context, spec environment.Spec) (environment
 			Provider:      "seatbelt",
 			WorkspaceID:   spec.WorkspaceID,
 			WorkspacePath: workspace,
+			ReadWrite:     readWrite,
 			Platform:      runtime.GOOS + "/" + runtime.GOARCH,
 			Network:       network,
 		},

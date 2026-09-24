@@ -1,7 +1,7 @@
 # ADR-0016: Persistent agents run finite activations and start private tasks
 
 **Status:** Proposed
-**Implementation:** Partial — default agent, `PERSONA.md`, and recorded revisions (plan phase 1); onboarding and a grant limited to the agent's memory directory (plan phase 2); persona proposals await an approval system; tasks and additional agents not implemented
+**Implementation:** Partial — default agent, `PERSONA.md`, and recorded revisions (plan phase 1); onboarding and access limited to the agent's memory directory (plan phase 2); persona proposals await an approval system; tasks and additional agents not implemented
 **Date:** 2026-09-22
 **Related:** ADR-0001, ADR-0008 through ADR-0012, ADR-0014, ADR-0017
 through ADR-0022

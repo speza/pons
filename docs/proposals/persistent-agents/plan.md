@@ -117,7 +117,7 @@ run records the revision it used.
 ADR-0016 section 2.
 
 Let the agent maintain its own memory and learn how its owner wants it to
-work, for one owner, locally. Per-person scopes, extraction, and E2B come
+work, for one owner. Per-person scopes and a background memory agent come
 in phase 7.
 
 Steps:
@@ -128,8 +128,10 @@ Steps:
    for a single-principal agent). The owner can read or edit it, but should
    never need to.
 2. **Grant.** Grant each run the memory directory itself: a read-write
-   Seatbelt grant, or its plain path in the unsandboxed composition. E2B runs
-   get no memory until phase 7. Only the memory directory is granted:
+   Seatbelt grant, or its plain path in the unsandboxed composition. E2B
+   copies it into the sandbox at run start and, when the session closes,
+   applies only the files the run added, changed, or deleted, so the agent
+   uses memory like any other directory. Only the memory directory is granted:
    `PERSONA.md`, `agent.json`, and `revisions/` stay outside every grant. In
    the unsandboxed composition unrestricted `bash` can still reach the state
    directory, so these guarantees hold only under Seatbelt; the unsandboxed
@@ -165,6 +167,8 @@ Tests:
 - The agent's memory edits persist across conversations and restarts.
 - Under Seatbelt, the agent can write its memory directory but not
   `PERSONA.md`, `agent.json`, or `revisions/`.
+- In E2B, the agent sees memory at a sandbox path, and only the files it
+  changed are applied back, leaving other runs' changes in place.
 - Hydrated `MEMORY.md` is labeled data within its budget.
 - An agent with an empty `PERSONA.md` is prompted to introduce itself and
   ask what the owner wants help with; a written persona replaces that
@@ -361,7 +365,8 @@ Steps:
    writer.
 2. **Concurrent writers.** Decide whether several people's runs writing
    memory at once need per-scope copies and commits, which phase 2 left out.
-3. **E2B.** Upload entitled scopes at run start and download them afterwards.
+3. **E2B scopes.** Copy only the entitled scopes into the sandbox, using
+   phase 2's sync.
 4. **Background memory agent.** On idle conversations, a memory-only
    activation extracts what is worth keeping, merges duplicates, prunes
    stale entries, and keeps `MEMORY.md` within its budget, so memory stays

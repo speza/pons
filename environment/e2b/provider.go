@@ -211,8 +211,15 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 		p.debugf("workspace=%q sandbox=%q state=active", workspaceID, sandbox.ID)
 	}
 
+	synced, err := syncDirectoriesIn(ctx, client, sandbox, spec.ReadWrite)
+	if err != nil {
+		return nil, errors.Join(err, cleanup())
+	}
 	remoteArgs := append([]string(nil), args...)
 	remoteArgs = append(remoteArgs, "--workspace", defaultE2BWorkspace)
+	for _, dir := range synced {
+		remoteArgs = append(remoteArgs, "--read-write", dir.remote)
+	}
 	manifest := external.Manifest{
 		ManifestVersion: external.ManifestVersion,
 		Name:            "pons.hands",
@@ -287,11 +294,13 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 		onError:           cfg.onError,
 		onDebug:           p.OnDebug,
 		credentials:       credentials,
+		synced:            synced,
 		metadata: environment.Metadata{
 			Provider:      "e2b",
 			EnvironmentID: sandbox.ID,
 			WorkspaceID:   workspaceID,
 			WorkspacePath: defaultE2BWorkspace,
+			ReadWrite:     syncedRemotePaths(synced),
 			Platform:      "linux/amd64",
 			Network:       network,
 		},
@@ -593,8 +602,10 @@ func validateE2BSpec(spec environment.Spec) (string, []string, environment.Netwo
 	if len(spec.ReadOnly) != 0 {
 		return "", nil, "", nil, errors.New("environment: E2B does not yet support external plugin paths")
 	}
-	if len(spec.ReadWrite) != 0 {
-		return "", nil, "", nil, errors.New("environment: E2B does not yet support read-write host grants")
+	for _, dir := range spec.ReadWrite {
+		if info, err := os.Stat(dir); !filepath.IsAbs(dir) || err != nil || !info.IsDir() {
+			return "", nil, "", nil, fmt.Errorf("environment: read-write path %q must be an absolute directory", dir)
+		}
 	}
 	network := spec.Network
 	if network == "" {

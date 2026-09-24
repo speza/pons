@@ -610,22 +610,19 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	if environmentErr != nil {
 		return result, environmentErr
 	}
-	// Memory is granted only where hands can reach the host directory; E2B
-	// runs have none until memory can be uploaded and downloaded (phase 7).
+	// Memory is the one part of the agent directory hands may use. Local
+	// environments grant it in place; E2B copies it in and applies the run's
+	// changes back when the session closes.
+	var memory *llm.Memory
 	var memoryRoots []string
-	if r.agents != nil && selectedEnvironment != "e2b" {
-		memory, err := r.agents.Memory(agent.ID, agentdir.DefaultMemoryBudget)
+	if r.agents != nil {
+		loaded, err := r.agents.Memory(agent.ID, agentdir.DefaultMemoryBudget)
 		if err != nil {
 			return result, err
 		}
-		memoryRoots = []string{memory.Path}
-		brainConfig.Memory = &llm.Memory{Path: memory.Path, Index: memory.Index, Truncated: memory.Truncated}
+		memory = &llm.Memory{Path: loaded.Path, Index: loaded.Index, Truncated: loaded.Truncated}
+		memoryRoots = []string{loaded.Path}
 	}
-	brain, err := llm.New(brainConfig)
-	if err != nil {
-		return result, fmt.Errorf("brain: %w", err)
-	}
-	defer func() { err = errors.Join(err, brain.Close(context.Background())) }()
 
 	turns, turnsErr := runtimeTurns(request.Messages)
 	if turnsErr != nil {
@@ -691,6 +688,13 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 			}
 		}()
 		metadata := session.Metadata()
+		if memory != nil {
+			// The prompt names memory where the hands see it.
+			if len(metadata.ReadWrite) != len(spec.ReadWrite) {
+				return result, fmt.Errorf("execution environment %q did not grant the agent's memory", selectedEnvironment)
+			}
+			memory.Path = metadata.ReadWrite[len(metadata.ReadWrite)-1]
+		}
 		core.Workspace, core.Platform = metadata.WorkspacePath, metadata.Platform
 		effectiveSandbox = metadata.Provider
 		effectiveNetwork = string(metadata.Network)
@@ -726,6 +730,12 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		}
 	}
 
+	brainConfig.Memory = memory
+	brain, err := llm.New(brainConfig)
+	if err != nil {
+		return result, fmt.Errorf("brain: %w", err)
+	}
+	defer func() { err = errors.Join(err, brain.Close(context.Background())) }()
 	brain.Seed(turns, request.Text, core.Workspace, core.Platform)
 	plugins = append(plugins, brain)
 	if err := core.Use(plugins...); err != nil {

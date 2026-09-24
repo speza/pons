@@ -276,7 +276,9 @@ restart the server to change the agent.
 Runs are granted only `memory/`, never the rest of the agent directory. Under
 `-sandbox seatbelt` that is enforced, so the agent cannot change `agent.json`,
 `PERSONA.md`, or `revisions/`. In-process hands are not sandboxed and can
-reach anything the server can. E2B runs have no memory yet.
+reach anything the server can. E2B copies `memory/` into the sandbox at
+`/home/user/.pons/memory` when a run starts and writes back the files the
+run changed when it ends.
 
 An agent without a name says so when asked, rather than using the model's own
 name. While `PERSONA.md` is empty, the agent introduces itself as new and asks
