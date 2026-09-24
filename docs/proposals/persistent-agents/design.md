@@ -106,14 +106,14 @@ no use case needs is a candidate to simplify or defer.
 | U9 | **The agent's own computer.** Over months the agent keeps notes, scripts, and data in its workspace without Git; they survive sandbox loss, and the owner can roll back a bad change. |
 | U10 | **A second agent.** The owner creates another agent without a restart, for example for a household member who wants their own. |
 | U11 | **Inbox triage.** The agent sorts new email in a low-privilege task and drafts replies; nothing is sent until the owner approves. |
-| U12 | **Onboarding by chat.** A new agent asks what to call itself and what the owner wants help with; its name, role, and routines take effect once the owner confirms them. |
+| U12 | **Onboarding by chat.** A new agent, already named by the owner, asks what the owner wants help with; its role and routines take effect once the owner confirms them. |
 
 ## Your agent and its tasks
 
-The owner gets one agent and names it, usually by chatting with it: a new
-agent asks what to call itself, and the owner confirms its proposal. It has
-no predefined role: its persona, preferences, and routines come from the
-owner's instructions and its memory. It keeps one long-lived context, workspace, and memory, which is
+The owner gets one agent and names it in the agent's settings file; the
+agent never chooses or changes its own name. It has no predefined role: its
+persona, preferences, and routines come from the owner's instructions and
+its memory. It keeps one long-lived context, workspace, and memory, which is
 what makes it useful day to day.
 
 Work that would pollute that context runs as a **task**: a private
@@ -197,7 +197,7 @@ Each ADR holds the contract for its decision.
 
 | Decision | ADR | Why |
 | --- | --- | --- |
-| One named agent, versioned; persona in a host-owned `PERSONA.md` | 0016 | The owner shapes one agent instead of designing roles; edits never change work in flight |
+| One named agent, versioned; settings and persona in a host-owned agent directory | 0016 | The owner shapes one agent instead of designing roles; edits never change work in flight |
 | Lineages with explicit outcomes, including silent `no_update` | 0016 | A check that finds nothing must be distinguishable from a crash |
 | Private one-level tasks under owner-configured profiles | 0016 | Context isolation for coding and research without predefined agents |
 | Chat, schedules, and events share one intake; replies leave through a durable outbox | 0018 | One runner, owner-set destinations, no reruns when a send fails |

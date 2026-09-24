@@ -243,6 +243,42 @@ GitHub App config example. Keep credentials in the global file, not in a
 repository's `.pons.json`. Client commands select the repository and revision
 per conversation.
 
+### Agent
+
+Each server has one agent, `default`, kept as files in the runtime state
+directory (`~/.pons/runtime/server/agents/default/` by default). The server
+creates the directory on first start and logs its path; edit the files and
+restart the server to change the agent.
+
+- `agent.json` holds its settings. Empty fields use the server's defaults:
+  the default provider slot, its model, and `max_turns`.
+
+  ```json
+  {
+    "name": "Ada",
+    "provider": "",
+    "model": "",
+    "max_turns": 0
+  }
+  ```
+
+  `provider` names a configured provider slot. A malformed file stops the
+  server from starting.
+- `PERSONA.md` holds free-form instructions, used verbatim. When the agent
+  has no name and no persona, it uses a neutral identity.
+
+The agent's name appears in `GET /v1/options`, conversation snapshots, the
+CLI, and the web UI. Credentials stay in `~/.pons/config.json`, which has no
+agent settings.
+
+Each start records an agent revision: a SHA-256 fingerprint of the name,
+persona, provider slot ID, model, maximum turns, and plugin paths, never
+credentials. The server writes it once to `revisions/<revision>.json` in the
+agent directory. Every submission and run records the revision it was
+accepted under, so work queued before an edit still runs under the old
+revision. Work whose revision snapshot is missing or altered fails rather
+than running under the current one.
+
 Codex credentials are stored with restrictive permissions in
 `~/.pons/auth.json`. Multiple named credentials and provider slots are
 supported.

@@ -1,7 +1,7 @@
 # ADR-0016: Persistent agents run finite activations and start private tasks
 
 **Status:** Proposed
-**Implementation:** Not implemented
+**Implementation:** Partial — default agent, `PERSONA.md`, and recorded revisions (plan phase 1); tasks and additional agents not implemented
 **Date:** 2026-09-22
 **Related:** ADR-0001, ADR-0008 through ADR-0012, ADR-0014, ADR-0017
 through ADR-0022
@@ -50,30 +50,40 @@ scheduling, or persistence.
 ### 2. One agent shape and revisions
 
 There are no agent kinds. Every agent has the same definition: a stable
-non-secret ID, a persona, a provider slot, tools and grants, workspace and
-memory policy, task profiles (section 7), and run limits. The runtime never
-branches on what kind of agent something is. pons ships one default agent,
-which the owner names and shapes through conversation; context isolation
-comes from tasks, not from more agents.
+non-secret ID, an owner-set display name, a persona, a provider slot, tools
+and grants, workspace and memory policy, task profiles (section 7), and run
+limits. The runtime never branches on what kind of agent something is. pons
+ships one default agent, which the owner names and whose instructions the
+owner shapes through conversation; context isolation comes
+from tasks, not from more agents.
 
-The persona lives in a host-owned, versioned `PERSONA.md`, optionally seeded
-from configuration. It changes only when the owner edits it or accepts an
-exact proposal the agent made in the owner's conversation. The agent's hands
-never receive a grant to it, so under a sandboxed provider it cannot write
-it; the unsandboxed development composition trusts its owner instead.
-Learned memory under ADR-0019 never becomes persona by itself.
+Each agent is a host-owned directory, the one place its owner manages it:
+`agents/<id>/agent.json` holds structured settings such as the display name,
+provider slot, model, and limits, and `PERSONA.md` holds free-form
+instructions used verbatim. Host configuration holds providers, credentials,
+and sandboxes, never agent settings. The name is never parsed from the
+persona and never proposed or changed by the agent.
+
+`PERSONA.md` changes only when the owner edits it or accepts an exact
+proposal the agent made in the owner's conversation. The agent's hands never
+receive a grant to `agent.json`, `PERSONA.md`, or revisions, so under a
+sandboxed provider it cannot write them; the unsandboxed development
+composition trusts its owner instead. Learned memory under ADR-0019 never
+becomes persona by itself.
 
 Every change to a definition, including the persona, is an immutable revision
-with a deterministic, non-secret fingerprint. Submissions and runs keep the
-revision they were accepted under; new work uses the current one. A revision
-that cannot be resolved fails closed rather than running under changed
+with a deterministic, non-secret fingerprint, stored beside the agent as a
+write-once `revisions/<fingerprint>.json` snapshot. The runtime database
+records only which agent and revision conversations, submissions, and runs
+used. Submissions and runs keep the revision they were accepted under; new
+work uses the current one. A revision whose snapshot is missing or does not
+match its fingerprint fails closed rather than running under changed
 authority or falling back to another agent.
 
 A definition references provider and credential slots by name and never
 contains secrets. Models cannot create or edit definitions. Additional agents,
 for example one per household member, use the same definitions and are
-managed through an owner-only surface when they arrive; until then the one
-agent comes from configuration and `PERSONA.md`.
+more directories managed through an owner-only surface when they arrive.
 
 ### 3. Conversation ownership and workspaces
 
@@ -308,7 +318,7 @@ lineage status read. Remote authentication is a separate decision.
 The store exposes domain transitions, not generic queue CRUD: create a
 delegation with its child and submission, finish a child while routing its
 result, cancel a delegation or lineage, and end a lineage. The store adds
-`agent_revisions`, `delegations`, and `lineages`;
+`delegations` and `lineages`;
 conversations, submissions, and runs gain agent, revision, workspace, and
 envelope fields. The SQLite schema version
 increases; old databases may need recreation under the pre-compatibility
