@@ -42,8 +42,9 @@ validated `workspace_id`:
   definitions may use under ADR-0016's workspace validation.
 
 Workspace exclusion under ADR-0016 serializes runs that share a workspace.
-Private delegated children use their own agent's policy and never the parent's
-workspace.
+A task uses the workspace policy and named workspaces of its ADR-0016 task
+profile, such as a fresh workspace or a configured repository, and never the
+parent conversation's workspace.
 
 ### 2. Seeding does not require a source
 

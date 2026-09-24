@@ -142,8 +142,8 @@ content, are never durable, and are not retried.
 
 Connector credentials stay in host composition and are never exposed to
 brains or hands. Ingress and egress policies use verified principal, binding,
-agent, destination, and content. A recipient allowlist for delegation does
-not grant a channel delivery target. Revoking a binding prevents new ingress
+agent, destination, and content. A task profile does not grant a channel
+delivery target. Revoking a binding prevents new ingress
 and sends, including sends from already accepted work. The delivery worker
 rechecks revocation immediately before send and records a safe terminal
 failure when it suppresses an intent. Accepted work remains auditable. A
