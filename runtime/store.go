@@ -41,6 +41,7 @@ type Store interface {
 	AppendEnvironmentProgress(context.Context, Run, EnvironmentProgress) (Event, error)
 	AppendAgentEvent(context.Context, Run, Event) error
 	ToolCompleted(context.Context, Run, protocol.ToolResult) ([]Event, error)
+	ToolDenied(context.Context, Run, protocol.ToolResult) ([]Event, error)
 	FinishRun(context.Context, Run, string) ([]Event, error)
 	// FailRun atomically resolves every still-requested tool as interrupted and
 	// marks the run and submission failed. It must not strand requested tools

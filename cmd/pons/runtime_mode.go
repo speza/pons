@@ -37,7 +37,7 @@ type serverOptions struct {
 	WorkspaceRoot           string
 	ClientWorkspace         string
 	MaxConcurrent           int
-	MaxTurns                int
+	MaxSteps                int
 	Brain                   llm.Config
 	ProviderSlot            string
 	FSReadBytes             int
@@ -47,6 +47,7 @@ type serverOptions struct {
 	PluginPaths             []string
 	PluginPath              string
 	PluginMaxResultBytes    int
+	HostPlugins             []pons.Plugin
 	Debug                   bool
 	Sandbox                 string
 	E2BTemplate             string
@@ -646,6 +647,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 
 	core := pons.New()
 	core.Workspace, core.MaxTurns = request.Workspace, agent.MaxTurns
+	core.RecentActionContext = runtimeActionContext(request.Context, request.Text)
 	runLog := r.logger.With("conversation_id", request.ConversationID, "run_id", request.RunID,
 		"workspace_id", request.ConversationID, "agent_id", agent.ID, "agent_revision", agent.Revision())
 	runLog.Info("run started")
@@ -708,6 +710,10 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	if err := brain.Seed(turns, request.Text, hands); err != nil {
 		return result, err
 	}
+	core.ActionEnvironment = pons.ActionEnvironment{
+		Provider: metadata.Provider,
+		Network:  string(metadata.Network),
+	}
 	prepared := brain.PreparedInput()
 	preparedContent, err := runtimeAgentContent(prepared.Blocks)
 	if err != nil {
@@ -722,7 +728,11 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}); err != nil {
 		return result, err
 	}
-	if err := core.Use(environment.Proxy(session), brain); err != nil {
+	plugins := make([]pons.Plugin, 0, 2+len(r.opts.HostPlugins))
+	plugins = append(plugins, environment.Proxy(session))
+	plugins = append(plugins, r.opts.HostPlugins...)
+	plugins = append(plugins, brain)
+	if err := core.Use(plugins...); err != nil {
 		return result, err
 	}
 
@@ -731,7 +741,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	core.OnEventError(func(event pons.Event) error {
 		switch event.Type {
 		case pons.EventAssistantResponse:
-			runLog.Debug("assistant turn", "turn", event.Turn, "tool_calls", len(event.Actions))
+			runLog.Debug("assistant step", "step", event.Step, "tool_calls", len(event.Actions))
 			parts := make([]ponsruntime.MessagePart, 0, len(event.Parts))
 			for _, part := range event.Parts {
 				switch part.Type {
@@ -748,14 +758,16 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 				Type: ponsruntime.RunEventAssistantTurn, Parts: parts,
 			})
 		case pons.EventActionEnd:
-			runLog.Debug("tool completed", "turn", event.Turn, "tool", event.Action.Kind,
+			runLog.Debug("tool completed", "step", event.Step, "tool", event.Action.Kind,
 				"ok", event.Result.OK)
-			if err := request.Emit(ponsruntime.RunEvent{
+			return request.Emit(ponsruntime.RunEvent{
 				Type: ponsruntime.RunEventToolCompleted, ToolCallID: event.Action.ID, Result: event.Result,
-			}); err != nil {
-				return err
-			}
-			return nil
+			})
+		case pons.EventActionDenied:
+			runLog.Debug("tool denied", "step", event.Step, "tool", event.Action.Kind)
+			return request.Emit(ponsruntime.RunEvent{
+				Type: ponsruntime.RunEventToolDenied, ToolCallID: event.Action.ID, Result: event.Result,
+			})
 		}
 		entry := ponsruntime.Event{}
 		switch event.Type {
@@ -797,9 +809,9 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}
 
 	if runResult.Exhausted {
-		return result, fmt.Errorf("agent exhausted %d turns", runResult.Turns)
+		return result, fmt.Errorf("agent exhausted %d steps", runResult.Steps)
 	}
-	runLog.Debug("answer ready", "turns", runResult.Turns, "answer_chars", len(runResult.Answer))
+	runLog.Debug("answer ready", "steps", runResult.Steps, "answer_chars", len(runResult.Answer))
 	return ponsruntime.RunResult{Answer: runResult.Answer}, nil
 }
 
@@ -889,6 +901,45 @@ func runtimeAgentContent(blocks []llm.Block) ([]ponsruntime.AgentContent, error)
 		}
 	}
 	return content, nil
+}
+
+// runtimeActionContext keeps the most recent conversation evidence
+// with its original source. Tool results never become user instructions.
+func runtimeActionContext(turns []ponsruntime.ContextTurn, currentUserText string) []pons.ActionContextItem {
+	const maxTurns = 16
+	if len(turns) > maxTurns {
+		turns = turns[len(turns)-maxTurns:]
+	}
+	var context []pons.ActionContextItem
+	for _, turn := range turns {
+		for _, part := range turn.Content {
+			switch part.Type {
+			case "text":
+				var source pons.ActionContextSource
+				switch turn.Role {
+				case "user":
+					source = pons.ContextUser
+				case "assistant":
+					source = pons.ContextAssistant
+				default:
+					continue
+				}
+				context = append(context, pons.ActionContextItem{Source: source, Text: part.Text})
+			case "tool_call":
+				context = append(context, pons.ActionContextItem{
+					Source: pons.ContextAction, ActionID: part.ToolCallID,
+					Kind: protocol.ActionKind(part.ToolKind), Text: string(part.Arguments),
+				})
+			case "tool_result":
+				context = append(context, pons.ActionContextItem{
+					Source: pons.ContextToolResult, ActionID: part.ToolCallID,
+					Kind: protocol.ActionKind(part.ToolKind), Text: part.Text,
+				})
+			}
+		}
+	}
+	context = append(context, pons.ActionContextItem{Source: pons.ContextUser, Text: currentUserText})
+	return context
 }
 
 func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, message string, interactive, debug bool, options ponsruntime.ConversationOptions) error {

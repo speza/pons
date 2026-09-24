@@ -51,7 +51,7 @@ func main() {
 	message := flag.String("message", "", "task to submit to the runtime")
 	asAuth := flag.String("as", "", "codex login: store credentials under this auth id (default: codex)")
 	login := flag.Bool("login", false, "codex only: authenticate with ChatGPT (browser flow), save credentials, and exit")
-	maxTurns := flag.Int("max-turns", 12, "loop budget")
+	maxSteps := flag.Int("max-steps", 12, "loop budget")
 	// Tool output caps: everything the model can be handed back is bounded,
 	// and every bound is tunable from the composition.
 	fsReadBytes := flag.Int("fs-read-bytes", 0, "read_file byte cap; 0 = 256KiB default, negative = unlimited")
@@ -190,7 +190,7 @@ func main() {
 		}
 	}
 
-	applyInt("max-turns", maxTurns, cfg.MaxTurns)
+	applyInt("max-steps", maxSteps, cfg.MaxSteps)
 	applyInt("compact-chars", compactChars, cfg.CompactChars)
 	applyInt("fs-read-bytes", fsReadBytes, cfg.FsReadBytes)
 	applyInt("bash-timeout", bashTimeout, cfg.BashTimeout)
@@ -234,6 +234,14 @@ func main() {
 		CompactChars: *compactChars,
 		Fallbacks:    fallbacks,
 	}
+	configuredPlugins, err := buildPluginOptions(cfg.Plugins, os.Getenv)
+	if err != nil {
+		logger.Printf("%v", err)
+		os.Exit(1)
+	}
+	if !setFlags["plugin"] {
+		pluginPaths = append(pluginPaths, configuredPlugins.manifests...)
+	}
 
 	if mode == "serve" && (*message != "" || *interactive) {
 		logger.Printf("serve: --message and -i are client options")
@@ -275,7 +283,8 @@ func main() {
 		MaxConcurrent: *runtimeConcurrency, MaxTurns: *maxTurns, Brain: brainConfig, ProviderSlot: primary.ID,
 		FSReadBytes: *fsReadBytes, BashTimeout: *bashTimeout, BashMaxLines: *bashMaxLines, BashMaxBytes: *bashMaxBytes,
 		PluginPaths: pluginPaths, PluginPath: *pluginPath, PluginMaxResultBytes: *pluginMaxResultBytes, Debug: *debug,
-		Sandbox: *sandbox, E2BTemplate: *e2bTemplate, E2BHandsPath: *e2bHandsPath,
+		HostPlugins: configuredPlugins.hostPlugins,
+		Sandbox:     *sandbox, E2BTemplate: *e2bTemplate, E2BHandsPath: *e2bHandsPath,
 		GitRepository: *gitRepository, GitRevision: selectedGitRevision,
 		GitAllRepositories: *gitAllRepositories,
 		GitHubAppID:        *githubAppID, GitHubAppInstallationID: *githubAppInstallationID, GitHubAppPrivateKey: *githubAppPrivateKey,

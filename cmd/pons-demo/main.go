@@ -33,9 +33,9 @@ func main() {
 	os.WriteFile(seed, []byte("alpha\nbeta\ngamma\n"), 0o644)
 
 	// Compose the finite agent. Runtime persistence belongs to the server
-	// composition, not to a turn-observer plugin.
+	// composition, not to a step-observer plugin.
 	core := pons.New()
-	core.Workspace, core.MaxTurns, core.Log = ws, 10, logger
+	core.Workspace, core.MaxSteps, core.Log = ws, 10, logger
 	const goal = "Inspect notes.txt, write an uppercase copy, and verify it"
 
 	err = core.Use(
@@ -72,9 +72,9 @@ func main() {
 		os.Exit(1)
 	}
 	if result.Exhausted {
-		logger.Printf("stopped: exhausted %d turns", result.Turns)
+		logger.Printf("stopped: exhausted %d steps", result.Steps)
 	} else {
-		fmt.Printf("finished after %d turn(s): %s\n", result.Turns, result.Answer)
+		fmt.Printf("finished after %d step(s): %s\n", result.Steps, result.Answer)
 	}
 
 	// Prove the output exists.

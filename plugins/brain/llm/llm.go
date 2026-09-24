@@ -2,7 +2,7 @@
 //
 // Architecture (mirrors how pi's agent loop works):
 //
-//   - ONE model call per turn. Respond sends the conversation and the
+//   - One model call per agent step. Respond sends the conversation and the
 //     tool schemas; tool_use blocks in the response become protocol.Actions.
 //   - Interpret is bookkeeping, not a second model call: tool results are
 //     queued and sent back as tool_result blocks with the next call.
@@ -399,7 +399,7 @@ func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.Ass
 	}
 	summary := strings.TrimSpace(strings.Join(text, "\n"))
 	if b.logf != nil {
-		b.logf("[llm] turn %d: model=%s calls=%d text=%d chars", obs.Turn, b.model, len(calls), len(summary))
+		b.logf("[llm] step %d: model=%s calls=%d text=%d chars", obs.Step, b.model, len(calls), len(summary))
 	}
 
 	if len(calls) == 0 {

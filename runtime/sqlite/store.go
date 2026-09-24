@@ -853,6 +853,13 @@ func (s *Store) ToolCompleted(ctx context.Context, run ponsruntime.Run, result p
 	return s.toolFinished(ctx, run, result, status)
 }
 
+func (s *Store) ToolDenied(ctx context.Context, run ponsruntime.Run, result protocol.ToolResult) ([]ponsruntime.Event, error) {
+	if result.OK {
+		return nil, errors.New("runtime: denied tool result cannot be successful")
+	}
+	return s.toolFinished(ctx, run, result, ponsruntime.ToolDenied)
+}
+
 func (s *Store) toolFinished(ctx context.Context, run ponsruntime.Run, result protocol.ToolResult, status string) ([]ponsruntime.Event, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {

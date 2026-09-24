@@ -84,6 +84,7 @@ func (p *FS) Setup(c *pons.Core) error {
 		Handler:     p.readFile,
 		Description: "Read a file and return its full content.",
 		Params:      []pons.ToolParam{path},
+		Resources:   pons.StringArgResource("path", "path"),
 	}); err != nil {
 		return err
 	}
@@ -92,6 +93,7 @@ func (p *FS) Setup(c *pons.Core) error {
 		Description: "Create or overwrite a file. Parent dirs are created as needed.",
 		Params: []pons.ToolParam{path,
 			{Name: "content", Type: "string", Description: "Full file content to write", Required: true}},
+		Resources: pons.StringArgResource("path", "path"),
 	}); err != nil {
 		return err
 	}
@@ -99,6 +101,7 @@ func (p *FS) Setup(c *pons.Core) error {
 		Handler:     p.listDir,
 		Description: "List a directory. Directories have a trailing slash.",
 		Params:      []pons.ToolParam{path},
+		Resources:   pons.StringArgResource("path", "path"),
 	})
 }
 

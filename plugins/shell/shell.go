@@ -51,6 +51,7 @@ func (p *Shell) Setup(c *pons.Core) error {
 		Params: []pons.ToolParam{
 			{Name: "command", Type: "string", Description: "The shell command to run", Required: true},
 		},
+		Resources: pons.StringArgResource("command", "command"),
 	})
 }
 

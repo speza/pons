@@ -95,8 +95,9 @@ entrypoints and the child working directory resolve from the manifest
 directory. The host never invokes the entrypoint through a shell and rejects
 unknown manifest fields.
 
-The CLI activates only manifests supplied with `--plugin`; it never discovers
-project-local manifests implicitly. The child environment is empty by default.
+The CLI activates manifests supplied with `--plugin` or listed explicitly under
+`plugins.external.manifests` in the host's global `~/.pons/config.json`. It never
+discovers project-local manifests implicitly. The child environment is empty by default.
 A caller may explicitly provide scoped environment variables or a safe `PATH`,
 but credentials are not inherited accidentally. Workspace and placement are
 passed by the host during initialization.

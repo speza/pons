@@ -63,13 +63,14 @@ type settings struct {
 	StateDir             *string              `json:"state_dir,omitempty"`
 	WorkspaceRoot        *string              `json:"workspace_root,omitempty"`
 	Environment          *environmentSettings `json:"environment,omitempty"`
-	MaxTurns             *int                 `json:"max_turns,omitempty"`
+	MaxSteps             *int                 `json:"max_steps,omitempty"`
 	CompactChars         *int                 `json:"compact_chars,omitempty"`
 	FsReadBytes          *int                 `json:"fs_read_bytes,omitempty"`
 	BashTimeout          *int                 `json:"bash_timeout,omitempty"`
 	BashMaxLines         *int                 `json:"bash_max_lines,omitempty"`
 	BashMaxBytes         *int                 `json:"bash_max_bytes,omitempty"`
 	PluginMaxResultBytes *int                 `json:"plugin_max_result_bytes,omitempty"`
+	Plugins              pluginSettings       `json:"plugins,omitempty"`
 	Fallbacks            []fallbackSettings   `json:"fallbacks,omitempty"`
 	DefaultProviderID    *string              `json:"default_provider_id,omitempty"`
 	Providers            []providerSettings   `json:"providers,omitempty"`
@@ -126,6 +127,9 @@ func (s settings) validate() error {
 	if s.DefaultProviderID != nil && len(s.Providers) == 0 {
 		return fmt.Errorf("config sets default_provider_id but no providers")
 	}
+	if _, err := decodePluginConfigs(s.Plugins); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -153,6 +157,11 @@ func loadSettings(home, workspace string) (settings, error) {
 		m, err := decodeSettingsMap(data, path)
 		if err != nil {
 			return settings{}, err
+		}
+		if workspace != "" && path == filepath.Join(workspace, ".pons.json") {
+			if _, ok := m["plugins"]; ok {
+				return settings{}, fmt.Errorf("config %q: plugins is allowed only in ~/.pons/config.json", path)
+			}
 		}
 		if hasE2BAPIKey(m["environment"]) {
 			info, err := os.Stat(path)

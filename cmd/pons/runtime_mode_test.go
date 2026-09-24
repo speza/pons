@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/samperrin/pons"
 	"github.com/samperrin/pons/environment"
 	"github.com/samperrin/pons/environment/e2b"
 	"github.com/samperrin/pons/plugins/brain/llm"
@@ -125,7 +126,7 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 	execution := &recordingEnvironment{specs: make(chan environment.Spec, 2)}
 	var debugLog bytes.Buffer
 	runner := &agentRunner{opts: serverOptions{
-		MaxTurns:    3,
+		MaxSteps:    3,
 		Debug:       true,
 		Sandbox:     "e2b",
 		Environment: execution,
@@ -285,7 +286,7 @@ func TestServerRequiresSandbox(t *testing.T) {
 func TestDebugConfigurationIncludesSandboxPolicy(t *testing.T) {
 	var output bytes.Buffer
 	logDebugConfiguration(newServerLogger(&output, true), serverOptions{
-		Debug: true, Sandbox: "seatbelt", WorkspaceRoot: "/workspace", MaxTurns: 12, MaxConcurrent: 4,
+		Debug: true, Sandbox: "seatbelt", WorkspaceRoot: "/workspace", MaxSteps: 12, MaxConcurrent: 4,
 		Brain:       llm.Config{Provider: "codex", Model: "gpt-5.6-luna"},
 		Environment: &recordingEnvironment{},
 		EnvironmentSpec: environment.Spec{
@@ -423,6 +424,21 @@ func TestRuntimeContextTurnsPreserveJSONNumberPrecision(t *testing.T) {
 func TestRuntimeAgentContentRejectsNilBlock(t *testing.T) {
 	if _, err := runtimeAgentContent([]llm.Block{nil}); err == nil {
 		t.Fatal("nil model block was silently omitted")
+	}
+}
+
+func TestRuntimeActionContextPreservesSources(t *testing.T) {
+	context := runtimeActionContext([]ponsruntime.ContextTurn{
+		{Role: "assistant", Content: []ponsruntime.AgentContent{
+			{Type: "text", Text: "May I push to repo one?"},
+			{Type: "tool_call", ToolCallID: "call", ToolKind: "bash", Arguments: json.RawMessage(`{"command":"git push"}`)},
+			{Type: "tool_result", ToolCallID: "call", ToolKind: "bash", Text: "approval required", IsError: true},
+		}},
+	}, "push it")
+	if len(context) != 4 || context[0].Source != pons.ContextAssistant ||
+		context[1].Source != pons.ContextAction || context[1].Kind != "bash" ||
+		context[2].Source != pons.ContextToolResult || context[3].Source != pons.ContextUser {
+		t.Fatalf("action context: %+v", context)
 	}
 }
 

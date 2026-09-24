@@ -92,6 +92,7 @@ func (p *Edit) Setup(c *pons.Core) error {
 			{Name: "path", Type: "string", Description: "File to edit (relative to the workspace root, or an absolute path you have access to)", Required: true},
 			{Name: "patch", Type: "string", Description: "One or more blocks: '<<<<<<< SEARCH' / old text / '=======' / new text / '>>>>>>> REPLACE'", Required: true},
 		},
+		Resources: pons.StringArgResource("path", "path"),
 	})
 }
 

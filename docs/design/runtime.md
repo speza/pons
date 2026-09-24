@@ -143,9 +143,9 @@ atomically append input.accepted and index its submission
 hydrate a fresh Core/Brain from the latest compaction checkpoint and later
 committed events, or project from the start of the log without a checkpoint
         ↓
-run agent turns
+run agent steps
         ↓
-commit each complete assistant tool turn before executing its tools
+commit each complete assistant tool step before executing its tools
         ↓
 persist tool results and stream durable entity updates
         ↓
@@ -237,9 +237,10 @@ not part of durable conversation or event history.
 ### Tool results
 
 Each result has the matching tool-call ID, success/error observation, and
-structured result payload where available. Tools execute concurrently, but
-results are committed and presented to the provider in the original planned
-call order.
+structured result payload where available. Allowed tools execute concurrently;
+denied calls receive a failed result without execution and have status
+`denied`. Results are committed and presented to the provider in the original
+planned call order.
 
 The runtime never retries a tool action. A normal tool error is returned to
 the brain, which may decide to issue another action.
@@ -251,7 +252,7 @@ The durable ordering is:
 ```text
 1. persist the UserMessage;
 2. persist the complete AssistantMessage and all tool calls;
-3. execute tools;
+3. resolve denied calls and execute allowed tools;
 4. persist one ToolResult per call;
 5. continue the conversation.
 ```
@@ -263,7 +264,7 @@ unknown. This repairs the provider-required call/result pairing without
 silently repeating a side effect. The agent decides what to do next.
 
 Provider requests may be retried with backoff. A provider retry is not a tool
-retry: it occurs before an incomplete assistant turn is committed or after a
+retry: it occurs before an incomplete assistant step is committed or after a
 complete tool-result batch has been returned to the model.
 
 Background store failures are reported through the manager's supervision

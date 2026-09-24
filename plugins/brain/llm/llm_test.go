@@ -24,7 +24,7 @@ func TestSystemPromptContract(t *testing.T) {
 	prompt := b.systemPrompt()
 	for _, want := range []string{
 		"The available tool schemas are the complete capability set for this run.",
-		"Calls in the same turn may run concurrently",
+		"Calls in the same response may run concurrently",
 		"A text-only response ends the task and becomes the final answer.",
 		"Treat user reports and proposed causes as claims to verify",
 		"Preserve unrelated work already present in the workspace",
@@ -101,7 +101,7 @@ func TestBrainMapsToolUseToActions(t *testing.T) {
 	}}
 	b := newBrain(t, fake)
 	ctx := context.Background()
-	obs := protocol.Observation{Turn: 1, Message: "g", Workspace: "/w"}
+	obs := protocol.Observation{Step: 1, Message: "g", Workspace: "/w"}
 
 	response, err := b.Respond(ctx, obs)
 	if err != nil {
@@ -159,13 +159,13 @@ func TestPendingResultsDoNotDropFollowUp(t *testing.T) {
 	}}
 	b := newBrain(t, fake)
 	ctx := context.Background()
-	if _, err := b.Respond(ctx, protocol.Observation{Turn: 1, Message: "first", Workspace: "/w"}); err != nil {
+	if _, err := b.Respond(ctx, protocol.Observation{Step: 1, Message: "first", Workspace: "/w"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := b.Interpret(ctx, protocol.Observation{}, protocol.ToolResult{ActionID: "c1", OK: true, Output: "pong"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.Respond(ctx, protocol.Observation{Turn: 1, Message: "follow-up", Workspace: "/w"}); err != nil {
+	if _, err := b.Respond(ctx, protocol.Observation{Step: 1, Message: "follow-up", Workspace: "/w"}); err != nil {
 		t.Fatal(err)
 	}
 	seen := fake.seen[1]
@@ -192,7 +192,7 @@ func TestFailedToolIsErrorResult(t *testing.T) {
 	}}
 	b := newBrain(t, fake)
 	ctx := context.Background()
-	obs := protocol.Observation{Turn: 1}
+	obs := protocol.Observation{Step: 1}
 
 	if _, err := b.Respond(ctx, obs); err != nil {
 		t.Fatal(err)
@@ -213,7 +213,7 @@ func TestEmptyResponseIsSurfacedNotSwallowed(t *testing.T) {
 		{Role: "assistant", Blocks: []Block{}}, // degenerate: nothing at all
 	}}
 	b := &Brain{cfg: Config{}, client: fake, core: pons.New()}
-	_, err := b.Respond(context.Background(), protocol.Observation{Turn: 1, Message: "test"})
+	_, err := b.Respond(context.Background(), protocol.Observation{Step: 1, Message: "test"})
 	if err == nil || !strings.Contains(err.Error(), "empty response") {
 		t.Fatalf("empty response should error, got: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestCompactionKeepsToolExchangeTogether(t *testing.T) {
 	}}
 	b := &Brain{cfg: Config{CompactChars: 1, CompactKeep: 1}, client: fake, core: pons.New()}
 	ctx := context.Background()
-	obs := protocol.Observation{Turn: 1, Message: "goal"}
+	obs := protocol.Observation{Step: 1, Message: "goal"}
 	if _, err := b.Respond(ctx, obs); err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,7 @@ func TestCompactionCollapsesMiddleTurns(t *testing.T) {
 	}, client: fake, core: pons.New()}
 
 	ctx := context.Background()
-	obs := protocol.Observation{Turn: 1, Message: "test goal"}
+	obs := protocol.Observation{Step: 1, Message: "test goal"}
 	// Turn 1: tool call (no compaction — turns ≤ keep+1).
 	if _, err := b.Respond(ctx, obs); err != nil {
 		t.Fatal(err)
@@ -357,7 +357,7 @@ func TestToolSpecsReachTheModel(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	b.Respond(context.Background(), protocol.Observation{Turn: 1})
+	b.Respond(context.Background(), protocol.Observation{Step: 1})
 	if len(fake.capturedTools) != 1 || fake.capturedTools[0].Kind != "bash" {
 		t.Fatalf("tools not passed to client: %+v", fake.capturedTools)
 	}

@@ -1,4 +1,4 @@
-# ADR-0006: Tool calls within a turn execute concurrently and record in call order
+# ADR-0006: Tool calls within a step execute concurrently and record in call order
 
 **Status:** Accepted
 **Implementation:** Implemented
@@ -19,14 +19,14 @@ next brain context must remain deterministic.
    actions after it are loop control and do not execute.
 2. Results are stored by the actions' original indexes, never by completion
    time. After all running calls complete, the core emits `action_end` events,
-   writes the `TurnLog`, runs turn hooks, and gives results to the brain in
+   writes the `StepLog`, runs step hooks, and gives results to the brain in
    call order.
 3. Tool handlers and `WrapTool` middleware are responsible for being safe
    under concurrent calls. A plugin that performs a multi-step mutation of
    shared state must serialize that mutation; the edit plugin serializes its
    read-modify-write operation.
-4. Turn recording is performed after the concurrent calls have joined, so the
-   session recorder writes one deterministic turn at a time.
+4. Step recording is performed after the concurrent calls have joined, so the
+   session recorder writes one deterministic step at a time.
 
 ## Alternatives considered
 
@@ -37,7 +37,7 @@ next brain context must remain deterministic.
 
 ## Consequences
 
-- Turn latency is approximately the slowest running call rather than the sum
+- Step latency is approximately the slowest running call rather than the sum
   of all call durations.
 - The transcript and provider context preserve plan order even when tools
   finish in a different order.
