@@ -198,8 +198,11 @@ go run ./cmd/pons -provider codex -sandbox seatbelt \
 ```
 
 E2B can run the same hands protocol in a remote Linux sandbox. Build the
-template once (requires `E2B_API_KEY` and Node/npm), then configure the server
-as shown in the [Git workspace guide](docs/design/git-workspaces.md):
+template (requires `E2B_API_KEY` and Node/npm), then configure the server
+as shown in the [Git workspace guide](docs/design/git-workspaces.md). Rebuild
+it whenever you upgrade pons: the template's `pons-hands` must match the
+server, and a template built before agent memory rejects the `--read-write`
+flag, so every E2B run fails until it is rebuilt.
 
 ```sh
 make e2b-template
@@ -278,7 +281,7 @@ Runs are granted only `memory/`, never the rest of the agent directory. Under
 `PERSONA.md`, or `revisions/`. In-process hands are not sandboxed and can
 reach anything the server can. E2B copies `memory/` into the sandbox at
 `/home/user/.pons/memory` when a run starts and writes back the files the
-run changed when it ends.
+run changed when it ends; links in the sandbox copy are not synced back.
 
 An agent without a name says so when asked, rather than using the model's own
 name. While `PERSONA.md` is empty, the agent introduces itself as new and asks

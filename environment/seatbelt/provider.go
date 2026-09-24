@@ -209,6 +209,8 @@ func validateSpec(spec environment.Spec) (string, []string, []string, []string, 
 		}
 	}
 
+	// Read-write paths are kept one-for-one, so Metadata.ReadWrite lines up
+	// with Spec.ReadWrite; a path also granted read-only is a conflict.
 	readWrite := make([]string, 0, len(spec.ReadWrite))
 	for _, path := range spec.ReadWrite {
 		if !filepath.IsAbs(path) {
@@ -221,10 +223,10 @@ func validateSpec(spec environment.Spec) (string, []string, []string, []string, 
 		if info, err := os.Stat(path); err != nil || !info.IsDir() {
 			return "", nil, nil, nil, "", fmt.Errorf("environment: read-write path %q must be a directory", path)
 		}
-		if !seen[path] {
-			seen[path] = true
-			readWrite = append(readWrite, path)
+		if seen[path] {
+			return "", nil, nil, nil, "", fmt.Errorf("environment: path %q is granted both read-only and read-write", path)
 		}
+		readWrite = append(readWrite, path)
 	}
 
 	network := spec.Network

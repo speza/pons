@@ -3,7 +3,9 @@ package e2b
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,9 +13,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/samperrin/pons/environment"
 	"github.com/samperrin/pons/internal/dirsync"
+	"github.com/samperrin/pons/plugins/external/sdk"
 )
 
 // fakeSyncEnvd emulates the envd file and process calls sync uses, keeping
@@ -64,7 +70,7 @@ func (f *fakeSyncEnvd) run(command string, args []string) error {
 	switch command {
 	case "/bin/sh":
 		match := extractCommand.FindStringSubmatch(args[1])
-		tree, err := dirsync.Unarchive(bytes.NewReader(f.files[match[1]]))
+		tree, err := dirsync.Unarchive(bytes.NewReader(f.files[match[1]]), 1000, 1<<20)
 		if err != nil {
 			return err
 		}
@@ -78,14 +84,24 @@ func (f *fakeSyncEnvd) run(command string, args []string) error {
 		_, err = dirsync.Apply(dir, nil, tree)
 		return err
 	case "/bin/tar":
-		tree, err := dirsync.Read(f.local(args[3]))
+		out, dir := flagValue(args, "-cf"), flagValue(args, "-C")
+		tree, err := dirsync.Read(f.local(dir))
 		if err != nil {
 			return err
 		}
-		f.files[args[1]], err = dirsync.Archive(tree)
+		f.files[out], err = dirsync.Archive(tree)
 		return err
 	}
 	return nil
+}
+
+func flagValue(args []string, name string) string {
+	for i := range len(args) - 1 {
+		if args[i] == name {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 func (f *fakeSyncEnvd) local(remote string) string {
@@ -146,5 +162,145 @@ func TestSyncedDirectoryRoundTripsOnlyTheRunsChanges(t *testing.T) {
 		if data, err := os.ReadFile(filepath.Join(memory, name)); err != nil || string(data) != want {
 			t.Fatalf("%s = %q, %v; want %q", name, data, err, want)
 		}
+	}
+}
+
+// startWithMemory runs Provider.Start against the fake envd with one synced
+// memory directory, serving hands in-process.
+func startWithMemory(t *testing.T, failSyncUpload bool) (*fakeSyncEnvd, string, *atomic.Pointer[[]string], *atomic.Int32, environment.HandsSession, error) {
+	t.Helper()
+	envd := &fakeSyncEnvd{t: t, root: t.TempDir(), files: map[string][]byte{}}
+	var handsArgs atomic.Pointer[[]string]
+	var deletes atomic.Int32
+	var input atomic.Pointer[io.PipeWriter]
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"sandboxID":"sandbox","envdAccessToken":"token"}`)
+		case r.Method == http.MethodDelete:
+			deletes.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/sandboxes/sandbox/timeout":
+			w.WriteHeader(http.StatusNoContent)
+		case failSyncUpload && r.URL.Path == "/files" && r.URL.Query().Get("path") == "/tmp/pons-sync-0.tar":
+			http.Error(w, "upload unavailable", http.StatusServiceUnavailable)
+		case r.URL.Path == "/process.Process/SendInput":
+			var payload struct{ Input struct{ Stdin string } }
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Error(err)
+				return
+			}
+			body, err := base64.StdEncoding.DecodeString(payload.Input.Stdin)
+			if err == nil {
+				_, err = input.Load().Write(body)
+			}
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+			}
+		case r.URL.Path == "/process.Process/Start":
+			body, _ := io.ReadAll(r.Body)
+			var request struct {
+				Process struct {
+					Cmd  string
+					Args []string
+				}
+			}
+			if len(body) < 5 || json.Unmarshal(body[5:], &request) != nil {
+				t.Error("invalid Start frame")
+				return
+			}
+			if request.Process.Cmd != defaultE2BHandsPath {
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				envd.ServeHTTP(w, r)
+				return
+			}
+			handsArgs.Store(&request.Process.Args)
+			w.Header().Set("Content-Type", "application/connect+json")
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			input.Store(inW)
+			defer inW.Close()
+			defer outR.Close()
+			go func() {
+				serveErr := (sdk.Server{Name: "pons.hands", Version: "test"}).Serve(r.Context(), inR, outW)
+				_ = outW.CloseWithError(serveErr)
+			}()
+			_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"start": map[string]int{"pid": 42}}})
+			w.(http.Flusher).Flush()
+			buffer := make([]byte, 4096)
+			for {
+				n, err := outR.Read(buffer)
+				if n > 0 {
+					_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"data": map[string]string{"stdout": base64.StdEncoding.EncodeToString(buffer[:n])}}})
+					w.(http.Flusher).Flush()
+				}
+				if err != nil {
+					if errors.Is(err, io.EOF) {
+						_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"end": map[string]string{"status": "exit status 0"}}})
+					}
+					return
+				}
+			}
+		default:
+			envd.ServeHTTP(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	provider := &Provider{APIKey: "key", APIURL: server.URL, EnvdURL: server.URL, HTTPClient: server.Client(), CleanupInterval: time.Hour}
+	store := &recordingStateStore{}
+	if err := provider.SetStores(store, store); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = provider.Close() })
+	memory := filepath.Join(t.TempDir(), "memory")
+	if err := os.MkdirAll(memory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(memory, "MEMORY.md"), []byte("- tea\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := provider.Start(context.Background(), environment.Spec{
+		WorkspaceID: "workspace", WorkspacePath: t.TempDir(), RunID: "run",
+		Command: []string{defaultE2BHandsPath}, ReadWrite: []string{memory},
+	})
+	return envd, memory, &handsArgs, &deletes, session, err
+}
+
+func TestStartSyncsMemoryAndGrantsItToHands(t *testing.T) {
+	envd, memory, handsArgs, _, session, err := startWithMemory(t, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := session.Metadata().ReadWrite; len(got) != 1 || got[0] != "/home/user/.pons/memory" {
+		t.Fatalf("metadata read-write = %v", got)
+	}
+	if args := handsArgs.Load(); args == nil || flagValue(*args, "--read-write") != "/home/user/.pons/memory" {
+		t.Fatalf("hands args = %v", args)
+	}
+	remote := envd.local("/home/user/.pons/memory")
+	if data, err := os.ReadFile(filepath.Join(remote, "MEMORY.md")); err != nil || string(data) != "- tea\n" {
+		t.Fatalf("remote memory = %q, %v", data, err)
+	}
+	if err := os.WriteFile(filepath.Join(remote, "MEMORY.md"), []byte("- coffee\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(memory, "MEMORY.md")); err != nil || string(data) != "- coffee\n" {
+		t.Fatalf("host memory after close = %q, %v", data, err)
+	}
+}
+
+func TestStartDeletesSandboxWhenMemorySyncFails(t *testing.T) {
+	_, _, _, deletes, session, err := startWithMemory(t, true)
+	if err == nil {
+		_ = session.Close()
+		t.Fatal("start succeeded without syncing memory")
+	}
+	if deletes.Load() != 1 {
+		t.Fatalf("sandbox deletes = %d, want 1", deletes.Load())
 	}
 }

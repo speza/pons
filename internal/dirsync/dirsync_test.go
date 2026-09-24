@@ -40,7 +40,8 @@ func TestRoundTripAppliesOnlyTheRunsChanges(t *testing.T) {
 	}
 
 	// The remote run edits its copy while another run changes tea.md here.
-	remote, err := Unarchive(bytes.NewReader(archive))
+	files, content, _ := base.Limits()
+	remote, err := Unarchive(bytes.NewReader(archive), files, content)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,9 +74,9 @@ func TestRoundTripAppliesOnlyTheRunsChanges(t *testing.T) {
 
 func TestUnarchiveRejectsUnsafeEntries(t *testing.T) {
 	for name, header := range map[string]tar.Header{
-		"escape":   {Typeflag: tar.TypeReg, Name: "../PERSONA.md", Size: 1},
-		"absolute": {Typeflag: tar.TypeReg, Name: "/etc/passwd", Size: 1},
-		"symlink":  {Typeflag: tar.TypeSymlink, Name: "link", Linkname: "../PERSONA.md"},
+		"escape":    {Typeflag: tar.TypeReg, Name: "../PERSONA.md", Size: 1},
+		"absolute":  {Typeflag: tar.TypeReg, Name: "/etc/passwd", Size: 1},
+		"oversized": {Typeflag: tar.TypeReg, Name: "big.md", Size: 2},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var buffer bytes.Buffer
@@ -83,14 +84,34 @@ func TestUnarchiveRejectsUnsafeEntries(t *testing.T) {
 			if err := writer.WriteHeader(&header); err != nil {
 				t.Fatal(err)
 			}
-			if header.Size > 0 {
-				_, _ = writer.Write([]byte("x"))
-			}
+			_, _ = writer.Write(bytes.Repeat([]byte("x"), int(header.Size)))
 			_ = writer.Close()
-			if _, err := Unarchive(&buffer); err == nil {
+			if _, err := Unarchive(&buffer, 10, 1); err == nil {
 				t.Fatal("unsafe entry accepted")
 			}
 		})
+	}
+}
+
+func TestUnarchiveSkipsLinksAndKeepsOtherFiles(t *testing.T) {
+	var buffer bytes.Buffer
+	writer := tar.NewWriter(&buffer)
+	for _, header := range []tar.Header{
+		{Typeflag: tar.TypeSymlink, Name: "./drinks.md", Linkname: "../PERSONA.md"},
+		{Typeflag: tar.TypeLink, Name: "./copy.md", Linkname: "./coffee.md"},
+		{Typeflag: tar.TypeReg, Name: "./coffee.md", Size: 5},
+	} {
+		if err := writer.WriteHeader(&header); err != nil {
+			t.Fatal(err)
+		}
+		if header.Size > 0 {
+			_, _ = writer.Write([]byte("flat\n"))
+		}
+	}
+	_ = writer.Close()
+	tree, err := Unarchive(&buffer, 10, 100)
+	if err != nil || len(tree) != 1 || string(tree["coffee.md"]) != "flat\n" {
+		t.Fatalf("tree = %v, %v", tree, err)
 	}
 }
 

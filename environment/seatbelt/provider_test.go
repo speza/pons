@@ -83,3 +83,19 @@ func TestProfileGrantsOnlyReadWriteDirectories(t *testing.T) {
 		t.Fatalf("grant widened beyond the memory copy:\n%s", profile)
 	}
 }
+
+func TestValidateSpecKeepsReadWriteAlignedAndRejectsOverlap(t *testing.T) {
+	workspace, memory := t.TempDir(), t.TempDir()
+	command := filepath.Join(t.TempDir(), "pons-hands")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	spec := environment.Spec{WorkspacePath: workspace, Command: []string{command}, ReadWrite: []string{memory, memory}}
+	if _, _, _, readWrite, _, err := validateSpec(spec); err != nil || len(readWrite) != 2 {
+		t.Fatalf("read-write = %v, %v", readWrite, err)
+	}
+	spec.ReadOnly = []string{memory}
+	if _, _, _, _, _, err := validateSpec(spec); err == nil || !strings.Contains(err.Error(), "both read-only and read-write") {
+		t.Fatalf("overlap error = %v", err)
+	}
+}

@@ -90,14 +90,18 @@ func (s *e2bSession) syncDirectoriesOut() {
 
 func (s *e2bSession) syncDirectoryOut(ctx context.Context, i int, dir syncedDirectory) error {
 	out := "/tmp/pons-sync-out-" + strconv.Itoa(i) + ".tar"
-	if _, _, err := s.client.run(ctx, s.sandbox, "/bin/tar", []string{"-cf", out, "-C", dir.remote, "."}, "/home/user", nil); err != nil {
+	// Hard links become regular files; symlinks are skipped on unarchive.
+	if _, _, err := s.client.run(ctx, s.sandbox, "/bin/tar", []string{
+		"--hard-dereference", "-cf", out, "-C", dir.remote, ".",
+	}, "/home/user", nil); err != nil {
 		return err
 	}
+	maxFiles, maxBytes, maxArchive := dir.base.Limits()
 	var archive bytes.Buffer
-	if err := s.client.download(ctx, s.sandbox, out, &archive, dirsync.MaxArchiveBytes); err != nil {
+	if err := s.client.download(ctx, s.sandbox, out, &archive, maxArchive); err != nil {
 		return err
 	}
-	result, err := dirsync.Unarchive(&archive)
+	result, err := dirsync.Unarchive(&archive, maxFiles, maxBytes)
 	if err != nil {
 		return err
 	}

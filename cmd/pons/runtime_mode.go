@@ -149,7 +149,7 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 		"agent_revision", agent.Revision(), "agent_dir", agents.Dir(agent.ID))
 
 	environmentOptions := configuredEnvironments(opts)
-	if slices.Contains(environmentOptions, "none") {
+	if defaultEnvironment(opts) == "none" {
 		logger.Warn("in-process hands are not sandboxed; only seatbelt keeps the agent to its memory directory")
 	}
 
@@ -623,6 +623,15 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		memory = &llm.Memory{Path: loaded.Path, Index: loaded.Index, Truncated: loaded.Truncated}
 		memoryRoots = []string{loaded.Path}
 	}
+	// Build the brain before provisioning hands so configuration errors fail
+	// fast. It keeps the memory pointer, whose path is updated below once the
+	// environment reports where hands see it.
+	brainConfig.Memory = memory
+	brain, err := llm.New(brainConfig)
+	if err != nil {
+		return result, fmt.Errorf("brain: %w", err)
+	}
+	defer func() { err = errors.Join(err, brain.Close(context.Background())) }()
 
 	turns, turnsErr := runtimeTurns(request.Messages)
 	if turnsErr != nil {
@@ -730,12 +739,6 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		}
 	}
 
-	brainConfig.Memory = memory
-	brain, err := llm.New(brainConfig)
-	if err != nil {
-		return result, fmt.Errorf("brain: %w", err)
-	}
-	defer func() { err = errors.Join(err, brain.Close(context.Background())) }()
 	brain.Seed(turns, request.Text, core.Workspace, core.Platform)
 	plugins = append(plugins, brain)
 	if err := core.Use(plugins...); err != nil {

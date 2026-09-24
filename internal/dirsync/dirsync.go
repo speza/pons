@@ -21,15 +21,25 @@ import (
 )
 
 const (
-	// MaxFiles and MaxBytes bound a synced directory.
-	MaxFiles = 2000
-	MaxBytes = 16 << 20
-	// MaxArchiveBytes bounds an archive of a directory within the limits.
-	MaxArchiveBytes = MaxBytes + MaxFiles*2048 + 4096
+	// GrowthFiles and GrowthBytes bound how much a remote copy may grow
+	// beyond the snapshot it started from. The host directory itself is
+	// unbounded, so whatever local runs write never stops a remote run.
+	GrowthFiles = 2000
+	GrowthBytes = 16 << 20
 )
 
 // Tree maps slash-separated relative paths to regular file contents.
 type Tree map[string][]byte
+
+// Limits returns the file count, content bytes, and archive bytes accepted
+// back from a remote copy that started from t.
+func (t Tree) Limits() (files int, content, archive int64) {
+	for _, data := range t {
+		content += int64(len(data))
+	}
+	files, content = len(t)+GrowthFiles, content+GrowthBytes
+	return files, content, content + int64(files)*2048 + 4096
+}
 
 // Read snapshots dir's regular files. Symlinks and special files are
 // skipped: they are never synced, so a remote copy cannot smuggle one back.
@@ -40,7 +50,7 @@ func Read(dir string) (Tree, error) {
 	}
 	defer root.Close()
 
-	tree, total := Tree{}, 0
+	tree := Tree{}
 	err = fs.WalkDir(root.FS(), ".", func(name string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -48,15 +58,9 @@ func Read(dir string) (Tree, error) {
 		if !entry.Type().IsRegular() {
 			return nil
 		}
-		if len(tree) == MaxFiles {
-			return fmt.Errorf("more than %d files", MaxFiles)
-		}
 		data, err := root.ReadFile(name)
 		if err != nil {
 			return err
-		}
-		if total += len(data); total > MaxBytes {
-			return fmt.Errorf("more than %d bytes", MaxBytes)
 		}
 		tree[name] = data
 		return nil
@@ -90,11 +94,12 @@ func Archive(tree Tree) ([]byte, error) {
 }
 
 // Unarchive reads a tar archive produced by a remote environment. Regular
-// files are kept, directories are implied, and any other entry, unsafe path,
-// or overrun of the limits rejects the whole archive.
-func Unarchive(archive io.Reader) (Tree, error) {
+// files are kept; directories, links, and special entries are skipped, as
+// Read skips them locally. An unsafe path or an overrun of the limits
+// rejects the whole archive.
+func Unarchive(archive io.Reader, maxFiles int, maxBytes int64) (Tree, error) {
 	reader := tar.NewReader(archive)
-	tree, total := Tree{}, 0
+	tree, total := Tree{}, int64(0)
 	for {
 		header, err := reader.Next()
 		if errors.Is(err, io.EOF) {
@@ -104,24 +109,20 @@ func Unarchive(archive io.Reader) (Tree, error) {
 			return nil, fmt.Errorf("dirsync: unarchive: %w", err)
 		}
 		name := strings.TrimPrefix(header.Name, "./")
-		switch header.Typeflag {
-		case tar.TypeDir:
+		if header.Typeflag != tar.TypeReg {
 			continue
-		case tar.TypeReg:
-		default:
-			return nil, fmt.Errorf("dirsync: unsupported entry %q", header.Name)
 		}
 		if !safeName(name) {
 			return nil, fmt.Errorf("dirsync: unsafe path %q", header.Name)
 		}
-		if len(tree) == MaxFiles || header.Size < 0 || int64(total)+header.Size > MaxBytes {
+		if len(tree) == maxFiles || header.Size < 0 || total+header.Size > maxBytes {
 			return nil, errors.New("dirsync: archive exceeds its limits")
 		}
 		data, err := io.ReadAll(io.LimitReader(reader, header.Size))
 		if err != nil {
 			return nil, fmt.Errorf("dirsync: unarchive %s: %w", name, err)
 		}
-		total += len(data)
+		total += int64(len(data))
 		tree[name] = data
 	}
 }

@@ -3,6 +3,7 @@ package llm
 import (
 	_ "embed"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -53,7 +54,7 @@ func (m *Memory) render() string {
 	if m.Truncated {
 		attributes += ` truncated="true"`
 	}
-	index := neutralize(m.Index, "memory_index")
+	index := neutralize(m.Index)
 	if strings.TrimSpace(index) == "" {
 		index = "(empty)"
 	}
@@ -65,9 +66,10 @@ func (m *Memory) render() string {
 	return sb.String()
 }
 
-func neutralize(text, tag string) string {
-	for _, name := range []string{tag, "memory"} {
-		text = strings.ReplaceAll(text, "</"+name, "<\\/"+name)
-	}
-	return text
+// frameClose matches any spelling of a closing memory tag, which HTML-like
+// frames treat case-insensitively and with optional whitespace.
+var frameClose = regexp.MustCompile(`(?i)<(\s*/\s*memory)`)
+
+func neutralize(text string) string {
+	return frameClose.ReplaceAllString(text, `<\$1`)
 }
