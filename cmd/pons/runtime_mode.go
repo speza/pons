@@ -341,15 +341,19 @@ func (r *agentRunner) brainConfig(agent ponsruntime.AgentDefinition) (llm.Config
 
 // personaPrompt renders the agent's name and persona instructions as the
 // brain's identity section.
+// An unnamed agent must not borrow a name from its model's training.
+const unnamedIdentity = "Your owner has not named you yet. If asked your name, say so " +
+	"rather than using another assistant's name."
+
 func personaPrompt(agent ponsruntime.AgentDefinition) string {
-	switch {
-	case agent.Name == "":
-		return agent.Persona
-	case agent.Persona == "":
-		return "Your name is " + agent.Name + "."
-	default:
-		return "Your name is " + agent.Name + ".\n\n" + agent.Persona
+	identity := unnamedIdentity
+	if agent.Name != "" {
+		identity = "Your name is " + agent.Name + "."
 	}
+	if agent.Persona == "" {
+		return identity
+	}
+	return identity + "\n\n" + agent.Persona
 }
 
 func loopbackRequestOnly(next http.Handler) http.Handler {

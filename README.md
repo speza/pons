@@ -264,8 +264,10 @@ restart the server to change the agent.
 
   `provider` names a configured provider slot. A malformed file stops the
   server from starting.
-- `PERSONA.md` holds free-form instructions, used verbatim. When the agent
-  has no name and no persona, it uses a neutral identity.
+- `PERSONA.md` holds free-form instructions, used verbatim.
+
+An agent without a name says so when asked, rather than using the model's own
+name.
 
 The agent's name appears in `GET /v1/options`, conversation snapshots, the
 CLI, and the web UI. Credentials stay in `~/.pons/config.json`, which has no

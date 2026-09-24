@@ -700,11 +700,11 @@ func TestPersonaPrompt(t *testing.T) {
 	for _, test := range []struct {
 		name, persona, want string
 	}{
-		{"", "", ""},
+		{"", "", unnamedIdentity},
 		{"Ada", "", "Your name is Ada."},
 		{"Ada", "Be brief.", "Your name is Ada.\n\nBe brief."},
-		{"", "Be brief.", "Be brief."},
-		{"", "# Grace\nBe brief.", "# Grace\nBe brief."},
+		{"", "Be brief.", unnamedIdentity + "\n\nBe brief."},
+		{"", "# Grace\nBe brief.", unnamedIdentity + "\n\n# Grace\nBe brief."},
 	} {
 		agent := ponsruntime.AgentDefinition{Name: test.name, Persona: test.persona}
 		if got := personaPrompt(agent); got != test.want {
@@ -766,7 +766,7 @@ func TestEditedPersonaChangesIdentityAfterRestart(t *testing.T) {
 	if len(prompts) != 2 {
 		t.Fatalf("system prompts = %d, want 2", len(prompts))
 	}
-	if !strings.HasPrefix(prompts[0], "<persona>\nYou are a helpful, capable assistant.\n</persona>") {
+	if !strings.HasPrefix(prompts[0], "<persona>\n"+unnamedIdentity+"\n</persona>") {
 		t.Fatalf("fresh agent prompt:\n%s", prompts[0])
 	}
 	if !strings.HasPrefix(prompts[1], "<persona>\nYour name is Ada.\n\nIntroduce yourself by name.\n</persona>") {
