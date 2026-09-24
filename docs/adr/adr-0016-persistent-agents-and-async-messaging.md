@@ -67,7 +67,10 @@ administrator creates, edits, and disables agents through the management API,
 CLI, or web UI without restarting the server; a configuration file may seed
 definitions on first start. pons ships one default agent, which the owner
 names, with built-in general and coding task profiles; additional agents use
-the same storage and arrive later without a schema change. One definition is the
+the same storage and arrive later without a schema change. Until then the
+default agent's definition comes from configuration, each change is recorded
+as a new revision at startup, and management editing arrives with
+additional agents. One definition is the
 default, preserving the single-agent experience. Models cannot create or edit
 agent definitions.
 
