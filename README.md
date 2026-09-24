@@ -134,12 +134,11 @@ One runtime is one trusted administrative domain; pons is not a multi-tenant
 security boundary. A hosted service should route domains to isolated runtime
 cells rather than co-host untrusted customers in one runtime.
 
-Proposed persistent-agent support lets one self-hosted server run
-long-lived, owner-named agents that hand coding and research work to
-private tasks. The
-[design doc](docs/persistent-agents-design.md) explains what and why, and the
-[implementation plan](docs/persistent-agents-v1.md) orders the work. Agent
-identity and delegation are specified in
+Proposed persistent-agent support lets one self-hosted server run a
+long-lived, owner-named agent that hands coding and research work to private
+tasks. The [design doc](docs/persistent-agents-design.md) explains what and
+why, and the [implementation plan](docs/persistent-agents-v1.md) orders the
+work. Agent identity and tasks are specified in
 [ADR-0016](docs/adr/adr-0016-persistent-agents-and-async-messaging.md); the
 remaining runtime contracts cover
 [triggers and delivery](docs/adr/adr-0018-agent-triggers-and-delivery.md),

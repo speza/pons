@@ -58,9 +58,10 @@ comes from tasks, not from more agents.
 
 The persona lives in a host-owned, versioned `PERSONA.md`, optionally seeded
 from configuration. It changes only when the owner edits it or accepts an
-exact proposal the agent made in the owner's conversation. The agent's file
-tools cannot write it, and learned memory under ADR-0019 never becomes
-persona by itself.
+exact proposal the agent made in the owner's conversation. The agent's hands
+never receive a grant to it, so under a sandboxed provider it cannot write
+it; the unsandboxed development composition trusts its owner instead.
+Learned memory under ADR-0019 never becomes persona by itself.
 
 Every change to a definition, including the persona, is an immutable revision
 with a deterministic, non-secret fingerprint. Submissions and runs keep the

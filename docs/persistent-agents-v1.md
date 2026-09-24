@@ -121,20 +121,30 @@ Steps:
 1. **Memory directory.** Add `agents/<id>/memory/` with `MEMORY.md` and topic
    files. With one principal, the whole tree is agent-wide (ADR-0019 allows
    unscoped memory for a single-principal agent).
-2. **Mount.** Pass the memory path to runs: a read-write Seatbelt grant, or
-   the plain path in the unsandboxed composition. Refuse memory with E2B
-   until phase 7. `PERSONA.md` is never writable by the agent's tools.
+2. **Per-run copy.** Give each run a private copy of the memory directory
+   at a recorded base revision, never the canonical directory: a read-write
+   Seatbelt grant of the copy, or its plain path in the unsandboxed
+   composition. Refuse memory with E2B until phase 7. `PERSONA.md` stays
+   outside every grant. In the unsandboxed composition unrestricted `bash`
+   can still reach the state directory, so these guarantees hold only under
+   Seatbelt; the unsandboxed setup is for a trusted owner's development.
 3. **Prompt.** Add harness guidance for keeping memory: one topic per file,
    one line per file in `MEMORY.md`, update rather than duplicate. Hydrate
    `MEMORY.md` as attributed data within a byte budget, never as
    instructions.
-4. **Commit and history.** After each clean run, snapshot the memory
-   directory as a revision in a `memory` namespace of the checkpoint store,
-   recording the run and changed paths. Add `pons memory log|show|restore`.
+4. **Commit and history.** After each clean, uncancelled run, compare the
+   copy with its base. If the canonical memory has not moved, publish the
+   copy as a new revision in a `memory` namespace of the checkpoint store and
+   record the run and changed paths; if it has moved, keep the run's version
+   as a retained conflict and notify the next activation. Add
+   `pons memory log|show|restore`.
 5. **Confirmations.** Add a `confirmations` table (ID, kind, exact payload,
    status, requesting run, decided by, timestamps) and a small confirmation
    primitive: pending items appear in the conversation view; the owner
-   accepts or rejects one through `pons confirm <id>` or a web UI button.
+   accepts or rejects one through `pons confirm <id>` or a web UI button,
+   both using a new loopback route. As with ADR-0016's task eligibility,
+   hands must not be able to reach that route, which Seatbelt's network
+   denial provides.
 6. **Persona proposals.** Add a host-tool plugin, registered through `Core`
    with a run-scoped callback instead of store access, and its first tool,
    `propose_persona(text)`. Until phase 4 adds principals, every native
@@ -149,8 +159,10 @@ Tests:
 
 - The agent's memory edits persist across conversations and restarts, with
   one revision per run that changed them.
-- A cancelled or uncleanly stopped run commits nothing.
-- The agent cannot write `PERSONA.md` through file tools; only an accepted
+- A cancelled or uncleanly stopped run leaves canonical memory unchanged.
+- Two concurrent runs that change memory produce one commit and one retained
+  conflict, never a silent overwrite.
+- Under Seatbelt, the agent cannot write `PERSONA.md`; only an accepted
   confirmation changes it, exactly as proposed.
 - Hydrated `MEMORY.md` is labeled data within its budget.
 
@@ -341,9 +353,8 @@ Steps:
    `principals/<id>/` folders, and mount only the scopes a run is entitled
    to. Agent-wide memory is read-only unless the principal is an agent-wide
    writer.
-2. **Per-run copies and conflicts.** Give each run a private copy at a
-   recorded base revision; commit per scope and retain conflicting changes
-   instead of overwriting.
+2. **Per-scope commits.** Extend phase 2's copy-and-commit to each scope
+   separately, so a conflict in one person's scope does not block another's.
 3. **E2B.** Upload entitled scopes at run start and download them at commit.
 4. **Extraction.** Add the `extract` capture policy: one memory-only
    activation after each completed lineage, with optional review.
@@ -354,8 +365,7 @@ Tests:
 
 - One principal's memory never reaches another's run; linked accounts
   share it.
-- Concurrent changes to one file produce one commit and one retained
-  conflict.
+- A conflict in one person's scope does not block another scope's commit.
 - Consolidation keeps the index within budget without losing referenced
   files.
 
