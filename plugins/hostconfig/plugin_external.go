@@ -1,4 +1,4 @@
-package main
+package hostconfig
 
 import (
 	"encoding/json"
@@ -12,7 +12,7 @@ type externalPluginSettings struct {
 	id string
 }
 
-func decodeExternalPlugin(id string, enabled bool, raw json.RawMessage) (configuredPlugin, error) {
+func decodeExternalPlugin(id string, enabled bool, raw json.RawMessage) (ConfiguredPlugin, error) {
 	config, err := decodePluginObject[externalPluginSettings](id, raw)
 	if err != nil {
 		return nil, err
@@ -33,7 +33,7 @@ func (p externalPluginSettings) ID() string         { return p.id }
 func (p externalPluginSettings) Provides() []string { return nil }
 func (p externalPluginSettings) Requires() []string { return nil }
 
-func (p externalPluginSettings) Build(build *pluginBuildContext) error {
+func (p externalPluginSettings) Build(build *BuildContext) error {
 	build.manifests = append(build.manifests, p.Manifests...)
 	return nil
 }

@@ -23,6 +23,8 @@ import (
 
 	"github.com/samperrin/pons/environment/gitworkspace"
 	"github.com/samperrin/pons/plugins/brain/llm"
+	"github.com/samperrin/pons/plugins/external"
+	"github.com/samperrin/pons/plugins/hostconfig"
 	"github.com/samperrin/pons/protocol"
 	ponsruntime "github.com/samperrin/pons/runtime"
 )
@@ -234,13 +236,26 @@ func main() {
 		CompactChars: *compactChars,
 		Fallbacks:    fallbacks,
 	}
-	configuredPlugins, err := buildPluginOptions(cfg.Plugins, os.Getenv)
+	configuredPlugins, err := hostconfig.Build(cfg.Plugins, os.Getenv, pluginProviders(cfg, primary))
 	if err != nil {
 		logger.Printf("%v", err)
 		os.Exit(1)
 	}
 	if !setFlags["plugin"] {
-		pluginPaths = append(pluginPaths, configuredPlugins.manifests...)
+		pluginPaths = append(pluginPaths, configuredPlugins.Manifests...)
+	}
+	var hostPluginPaths, handsPluginPaths []string
+	for _, path := range pluginPaths {
+		manifest, loadErr := external.LoadManifest(path)
+		if loadErr != nil {
+			logger.Printf("plugin: %v", loadErr)
+			os.Exit(1)
+		}
+		if manifest.Placement == external.PlacementHost {
+			hostPluginPaths = append(hostPluginPaths, path)
+		} else {
+			handsPluginPaths = append(handsPluginPaths, path)
+		}
 	}
 
 	if mode == "serve" && (*message != "" || *interactive) {
@@ -282,8 +297,9 @@ func main() {
 		Address: *runtimeAddress, StateDir: statePath, WorkspaceRoot: root, ClientWorkspace: conversationOptions.Workspace,
 		MaxConcurrent: *runtimeConcurrency, MaxTurns: *maxTurns, Brain: brainConfig, ProviderSlot: primary.ID,
 		FSReadBytes: *fsReadBytes, BashTimeout: *bashTimeout, BashMaxLines: *bashMaxLines, BashMaxBytes: *bashMaxBytes,
-		PluginPaths: pluginPaths, PluginPath: *pluginPath, PluginMaxResultBytes: *pluginMaxResultBytes, Debug: *debug,
-		HostPlugins: configuredPlugins.hostPlugins,
+		PluginPaths: handsPluginPaths, HostPluginPaths: hostPluginPaths, PluginConfigs: configuredPlugins.Configs,
+		PluginPath: *pluginPath, PluginMaxResultBytes: *pluginMaxResultBytes, Debug: *debug,
+		HostPlugins: configuredPlugins.HostPlugins,
 		Sandbox:     *sandbox, E2BTemplate: *e2bTemplate, E2BHandsPath: *e2bHandsPath,
 		GitRepository: *gitRepository, GitRevision: selectedGitRevision,
 		GitAllRepositories: *gitAllRepositories,

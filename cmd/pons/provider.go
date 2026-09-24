@@ -85,6 +85,21 @@ func toFallback(p providerSettings) llm.Fallback {
 	}
 }
 
+// pluginProviders exposes resolved provider slots to trusted host plugins.
+// The primary alias follows CLI overrides; named entries remain addressable
+// even when a temporary fallback chain excludes them.
+func pluginProviders(cfg settings, primary llm.Fallback) map[string]llm.Fallback {
+	providers := make(map[string]llm.Fallback, len(cfg.Providers)+1)
+	for _, provider := range cfg.Providers {
+		providers[provider.ID] = toFallback(provider)
+	}
+	if primary.ID != "" {
+		providers[primary.ID] = primary
+	}
+	providers["primary"] = primary
+	return providers
+}
+
 // parseFallbackFlag is the -fallback provider[:model] syntax.
 func parseFallbackFlag(spec string) (string, string, error) {
 	provider, model, _ := strings.Cut(spec, ":")

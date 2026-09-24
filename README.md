@@ -357,26 +357,45 @@ Configure registered plugins in the global file only:
 }
 ```
 
-Each entry uses a registered implementation ID: `classifier/typesafe-jev`,
-`classifier/openai`, `action_policy`, or `external`. Classifier IDs name their
-purpose and provider. `version` is the plugin's config/API contract
-version, not an independently installed binary version. The current built-ins
-support `1.0.0`; unsupported versions and duplicate IDs fail startup. Each
-plugin validates its own `config` and declares the capabilities it provides or
+Each entry uses a built-in ID (`classifier/typesafe-jev`, `classifier/openai`,
+`classifier/codex`, `action_policy`, or `external`) or an installed external
+plugin ID. Install an external manifest at
+`~/.pons/plugins/<id>/plugin.json`, then add an enabled entry with that ID,
+the manifest's `config_version` (default `1.0.0`), and a `config` object. The
+manifest name must equal the entry ID. The `config` object is sent during
+initialization. Host-side manifests use `"placement": "host"` and can provide
+`hook_provider/v1`; hands manifests provide tools. `version` is the plugin's
+config/API contract version, not an independently installed binary version.
+Unsupported versions and duplicate IDs fail startup. Each plugin validates
+its own `config` and declares the capabilities it provides or
 needs. The loader preserves list order except where dependencies require a
 provider to come first, then calls `Core.Use`. A plugin's `Setup` method
 registers its tools, hooks, or named capabilities.
 `action_policy`'s `config.classifier` names exactly one enabled classifier;
 unknown or disabled references fail startup. Set `enabled: false` to retain a
 plugin's settings without activating it. The `external` plugin accepts absolute
-hands manifest paths and remains isolated from trusted host hooks. An explicit
-`-plugin` flag replaces its manifest list.
+manifest paths. An explicit `-plugin` flag replaces its manifest list. External
+host hooks receive bounded event data, including recent conversation context
+for `on_tool_call_start`, but no Core handle or inherited credentials. Their
+errors request approval; without an approval handler, the action is denied.
+See [the external policy example](examples/external-policy/README.md) for an
+installable hook provider.
 
-Classifier API keys come from the named environment variables, never from this
-section of the file; the default names are `TYPESAFE_API_KEY` and
-`OPENAI_API_KEY`. Every enabled classifier requires its key at startup. The
-default confidence threshold is 0.9. OpenAI confidence is
-model-generated, so its `safe` assessments still ask for approval unless
+API-backed classifier keys come from the named environment variables, never
+from this section of the file; the default names are `TYPESAFE_API_KEY` and
+`OPENAI_API_KEY`. The subscription-backed `classifier/codex` instead uses an
+existing Codex provider slot and its Pons login. For a top-level
+`"provider": "codex"`, use `"provider_id": "primary"`; with named providers,
+use the matching `providers[].id`. Its `model` and `timeout` can be set
+independently of the brain:
+
+```json
+{"id":"classifier/codex","version":"1.0.0","enabled":true,
+ "config":{"provider_id":"primary","model":"gpt-6-luna","timeout":"10s"}}
+```
+
+The default confidence threshold is 0.9. OpenAI and Codex confidence is
+model-generated, so `safe` assessments still ask for approval unless
 `action_policy`'s `config.allow_generated_confidence` is true. With no CLI approval
 handler, those asks are denied. A later user message is included in a fresh
 assessment when the agent retries the action. Changes take effect when the

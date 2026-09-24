@@ -130,12 +130,9 @@ func TestLoadSettingsGlobalPlugins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plugins, err := decodePluginConfigs(s.Plugins)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plugins) != 3 || plugins[0].ID() != "classifier/typesafe-jev" ||
-		plugins[1].ID() != "action_policy" || plugins[2].ID() != "external" {
+	plugins := s.Plugins
+	if len(plugins) != 3 || plugins[0].ID != "classifier/typesafe-jev" ||
+		plugins[1].ID != "action_policy" || plugins[2].ID != "external" {
 		t.Fatalf("plugins: %+v", plugins)
 	}
 }

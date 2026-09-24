@@ -1,0 +1,160 @@
+package hostconfig
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/samperrin/pons"
+	"github.com/samperrin/pons/plugins/actionpolicy"
+	"github.com/samperrin/pons/plugins/brain/llm"
+)
+
+func TestBuildPluginOptionsSelectsClassifier(t *testing.T) {
+	plugins := pluginSettings{
+		pluginEntryForTest("classifier/typesafe-jev", true, `{"api_key_env":"JEV_KEY"}`),
+		pluginEntryForTest("action_policy", true, `{"classifier":"classifier/typesafe-jev","min_safe_confidence":0.95,"allow_generated_confidence":true}`),
+		pluginEntryForTest("classifier/openai", true, `{"model":"custom-model","timeout":"5s"}`),
+		pluginEntryForTest("external", true, `{"manifests":["/opt/plugin.json"]}`),
+	}
+	options, err := buildPluginOptions(plugins, func(name string) string {
+		if name == "JEV_KEY" || name == "OPENAI_API_KEY" {
+			return "test-key"
+		}
+		return ""
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(options.HostPlugins) != 3 || len(options.Manifests) != 1 ||
+		options.Manifests[0] != "/opt/plugin.json" {
+		t.Fatalf("unexpected plugin options: %+v", options)
+	}
+	if got := reflect.TypeOf(options.HostPlugins[0]).String(); got != "actionpolicy.ClassifierPlugin" {
+		t.Fatalf("first host plugin: %s", got)
+	}
+	policy, ok := options.HostPlugins[1].(actionpolicy.Policy)
+	if !ok || policy.ClassifierID != "classifier/typesafe-jev" || policy.MinSafeConfidence != 0.95 ||
+		!policy.AllowGeneratedConfidence {
+		t.Fatalf("policy plugin: %+v", options.HostPlugins[1])
+	}
+	core := pons.New()
+	if err := core.Use(options.HostPlugins...); err != nil {
+		t.Fatalf("register configured plugins: %v", err)
+	}
+	if _, ok := core.Capability(actionpolicy.ClassifierCapability("classifier/typesafe-jev")); !ok {
+		t.Fatal("classifier capability was not registered")
+	}
+}
+
+func TestBuildPluginOptionsDisabledAndMissingKey(t *testing.T) {
+	plugins := pluginSettings{
+		pluginEntryForTest("classifier/openai", false, `{}`),
+		pluginEntryForTest("action_policy", false, `{"classifier":"classifier/openai"}`),
+	}
+	options, err := buildPluginOptions(plugins, func(string) string { return "" }, nil)
+	if err != nil || len(options.HostPlugins) != 0 {
+		t.Fatalf("disabled policy = %+v, %v", options, err)
+	}
+
+	plugins[0] = pluginEntryForTest("classifier/openai", true, `{}`)
+	plugins[1] = pluginEntryForTest("action_policy", true, `{"classifier":"classifier/openai"}`)
+	_, err = buildPluginOptions(plugins, func(string) string { return "" }, nil)
+	if err == nil || !strings.Contains(err.Error(), "OPENAI_API_KEY is not set") {
+		t.Fatalf("missing key error: %v", err)
+	}
+}
+
+func TestBuildCodexClassifierFromProvider(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".pons"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".pons", "auth.json"),
+		[]byte(`{"codex":{"access":"test-token","accountId":"test-account","refresh":"test-refresh","expires":9999999999999}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plugins := pluginSettings{
+		pluginEntryForTest("classifier/codex", true, `{"provider_id":"primary","model":"gpt-6-luna"}`),
+		pluginEntryForTest("action_policy", true, `{"classifier":"classifier/codex","allow_generated_confidence":true}`),
+	}
+	providers := map[string]llm.Fallback{"primary": {ID: "primary", Provider: "codex"}}
+	options, err := buildPluginOptions(plugins, func(string) string { return "" }, providers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core := pons.New()
+	if err := core.Use(options.HostPlugins...); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := core.Capability(actionpolicy.ClassifierCapability("classifier/codex")); !ok {
+		t.Fatal("Codex classifier capability was not registered")
+	}
+
+	providers["primary"] = llm.Fallback{ID: "primary", Provider: "openai"}
+	if _, err := buildPluginOptions(plugins, func(string) string { return "" }, providers); err == nil || !strings.Contains(err.Error(), "must use the codex provider") {
+		t.Fatalf("wrong provider error: %v", err)
+	}
+	if _, err := buildPluginOptions(plugins, func(string) string { return "" }, nil); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("missing provider error: %v", err)
+	}
+}
+
+func pluginEntryForTest(id string, enabled bool, config string) pluginEntry {
+	return pluginEntry{ID: id, Version: "1.0.0", Enabled: &enabled, Config: json.RawMessage(config)}
+}
+
+type customPlugin struct{}
+
+func (customPlugin) ID() string                { return "example/custom" }
+func (customPlugin) Provides() []string        { return nil }
+func (customPlugin) Requires() []string        { return nil }
+func (customPlugin) Build(*BuildContext) error { return nil }
+
+func TestRegistryAcceptsCustomInProcessPlugin(t *testing.T) {
+	registry := NewRegistry()
+	factory := func(string, bool, json.RawMessage) (ConfiguredPlugin, error) {
+		return customPlugin{}, nil
+	}
+	if err := registry.Register("example/custom", "1.0.0", factory); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Decode(Settings{pluginEntryForTest("example/custom", true, `{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Build(Settings{pluginEntryForTest("example/custom", true, `{}`)}, func(string) string { return "" }, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Register("example/custom", "1.0.0", factory); err == nil {
+		t.Fatal("duplicate registration accepted")
+	}
+}
+
+func TestInstalledExternalPluginResolvesByID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".pons", "plugins", "example.policy")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"manifest_version":1,"name":"example.policy","entrypoint":"/bin/sh","runtime_protocol":1,"placement":"host"}`
+	path := filepath.Join(dir, "plugin.json")
+	if err := os.WriteFile(path, []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configured := Settings{pluginEntryForTest("example.policy", true, `{"threshold":0.9}`)}
+	options, err := Build(configured, func(string) string { return "" }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(options.Manifests) != 1 || options.Manifests[0] != path {
+		t.Fatalf("installed plugin paths: %+v", options.Manifests)
+	}
+	if string(options.Configs[path]) != `{"threshold":0.9}` {
+		t.Fatalf("installed plugin config: %s", options.Configs[path])
+	}
+}

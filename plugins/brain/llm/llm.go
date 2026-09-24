@@ -327,6 +327,13 @@ func providerClient(slot Fallback, maxTokens int) (Client, string, error) {
 	}
 }
 
+// NewProviderClient resolves one configured provider for trusted host plugins.
+// It uses the same credentials and transport as the brain, without failover.
+func NewProviderClient(slot Fallback) (Client, error) {
+	client, _, err := providerClient(slot, 0)
+	return client, err
+}
+
 func (b *Brain) maxTokens() int {
 	if b.cfg.MaxTokens > 0 {
 		return b.cfg.MaxTokens

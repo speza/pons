@@ -1,4 +1,4 @@
-package main
+package hostconfig
 
 import (
 	"bytes"
@@ -7,25 +7,30 @@ import (
 	"io"
 
 	"github.com/samperrin/pons"
+	"github.com/samperrin/pons/plugins/brain/llm"
 )
 
-// pluginEntry separates shared plugin metadata from implementation settings.
-type pluginEntry struct {
+// Entry separates shared plugin metadata from implementation settings.
+type Entry struct {
 	ID      string          `json:"id"`
 	Version string          `json:"version"`
 	Enabled *bool           `json:"enabled"`
 	Config  json.RawMessage `json:"config"`
 }
 
-type pluginSettings []pluginEntry
+// Settings is the versioned plugin list accepted by the host configuration.
+type Settings []Entry
 
-func (settings *pluginSettings) UnmarshalJSON(data []byte) error {
+type pluginEntry = Entry
+type pluginSettings = Settings
+
+func (settings *Settings) UnmarshalJSON(data []byte) error {
 	if trimmed := bytes.TrimSpace(data); len(trimmed) == 0 || trimmed[0] != '[' {
 		return fmt.Errorf("config plugins must be a list")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	var result []pluginEntry
+	var result []Entry
 	if err := decoder.Decode(&result); err != nil {
 		return fmt.Errorf("config plugins: %w", err)
 	}
@@ -38,37 +43,82 @@ func (settings *pluginSettings) UnmarshalJSON(data []byte) error {
 
 // Configured plugins declare capability dependencies. Their implementation
 // decides what to register; the loader only validates and orders them.
-type configuredPlugin interface {
+type ConfiguredPlugin interface {
 	ID() string
 	Provides() []string
 	Requires() []string
-	Build(*pluginBuildContext) error
+	Build(*BuildContext) error
 }
 
-type pluginFactory func(string, bool, json.RawMessage) (configuredPlugin, error)
+type Factory func(string, bool, json.RawMessage) (ConfiguredPlugin, error)
 
 type pluginRegistration struct {
 	version string
-	decode  pluginFactory
+	decode  Factory
 }
 
-var pluginRegistry = map[string]pluginRegistration{
-	"classifier/typesafe-jev": {version: "1.0.0", decode: decodeTypeSafePlugin},
-	"classifier/openai":       {version: "1.0.0", decode: decodeOpenAIPlugin},
-	"action_policy":           {version: "1.0.0", decode: decodeActionPolicyPlugin},
-	"external":                {version: "1.0.0", decode: decodeExternalPlugin},
+// Registry maps implementation IDs to trusted in-process plugin factories.
+// A custom host can register additional factories before loading settings.
+type Registry struct {
+	entries map[string]pluginRegistration
 }
 
-type pluginBuildContext struct {
+func NewRegistry() *Registry {
+	return &Registry{entries: map[string]pluginRegistration{
+		"classifier/typesafe-jev": {version: "1.0.0", decode: decodeTypeSafePlugin},
+		"classifier/openai":       {version: "1.0.0", decode: decodeOpenAIPlugin},
+		"classifier/codex":        {version: "1.0.0", decode: decodeCodexPlugin},
+		"action_policy":           {version: "1.0.0", decode: decodeActionPolicyPlugin},
+		"external":                {version: "1.0.0", decode: decodeExternalPlugin},
+	}}
+}
+
+func (r *Registry) Register(id, version string, factory Factory) error {
+	if id == "" || version == "" || factory == nil {
+		return fmt.Errorf("plugin registration requires ID, version, and factory")
+	}
+	if _, exists := r.entries[id]; exists {
+		return fmt.Errorf("plugin %q is already registered", id)
+	}
+	r.entries[id] = pluginRegistration{version: version, decode: factory}
+	return nil
+}
+
+type BuildContext struct {
 	getenv      func(string) string
+	providers   map[string]llm.Fallback
 	hostPlugins []pons.Plugin
 	manifests   []string
+	configs     map[string]json.RawMessage
+}
+
+func (b *BuildContext) Getenv(name string) string { return b.getenv(name) }
+func (b *BuildContext) Provider(id string) (llm.Fallback, bool) {
+	provider, ok := b.providers[id]
+	return provider, ok
+}
+func (b *BuildContext) AddHostPlugin(plugin pons.Plugin) {
+	b.hostPlugins = append(b.hostPlugins, plugin)
+}
+func (b *BuildContext) AddManifest(path string) {
+	b.manifests = append(b.manifests, path)
+}
+func (b *BuildContext) AddManifestConfig(path string, config json.RawMessage) {
+	b.AddManifest(path)
+	if b.configs == nil {
+		b.configs = make(map[string]json.RawMessage)
+	}
+	b.configs[path] = append(json.RawMessage(nil), config...)
 }
 
 type pluginOptions struct {
-	hostPlugins []pons.Plugin
-	manifests   []string
+	HostPlugins []pons.Plugin
+	Manifests   []string
+	Configs     map[string]json.RawMessage
 }
+
+// Options are the trusted host plugins and external hands manifests to load.
+type Options = pluginOptions
 
 func decodePluginObject[T any](id string, raw json.RawMessage) (T, error) {
 	var config T
@@ -86,10 +136,15 @@ func decodePluginObject[T any](id string, raw json.RawMessage) (T, error) {
 	return config, nil
 }
 
+// DecodeObject applies the same strict JSON decoding used by built-in plugins.
+func DecodeObject[T any](id string, raw json.RawMessage) (T, error) {
+	return decodePluginObject[T](id, raw)
+}
+
 // decodePluginConfigs validates plugin-owned config and resolves capability
 // dependencies before any provider keys or executable manifests are used.
-func decodePluginConfigs(raw pluginSettings) ([]configuredPlugin, error) {
-	plugins := make(map[string]configuredPlugin, len(raw))
+func (r *Registry) decodePluginConfigs(raw Settings) ([]ConfiguredPlugin, error) {
+	plugins := make(map[string]ConfiguredPlugin, len(raw))
 	active := make(map[string]bool, len(raw))
 	ids := make([]string, 0, len(raw))
 	for i, entry := range raw {
@@ -100,9 +155,13 @@ func decodePluginConfigs(raw pluginSettings) ([]configuredPlugin, error) {
 		if _, exists := plugins[id]; exists {
 			return nil, fmt.Errorf("config plugins.%s: duplicate plugin ID", id)
 		}
-		registration, ok := pluginRegistry[id]
+		registration, ok := r.entries[id]
 		if !ok {
-			return nil, fmt.Errorf("config plugins.%s: unknown plugin ID", id)
+			var err error
+			registration, err = installedRegistration(id)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if entry.Version != registration.version {
 			return nil, fmt.Errorf("config plugins.%s: unsupported version %q (supported: %s)", id, entry.Version, registration.version)
@@ -134,7 +193,7 @@ func decodePluginConfigs(raw pluginSettings) ([]configuredPlugin, error) {
 	}
 
 	state := make(map[string]uint8)
-	ordered := make([]configuredPlugin, 0, len(ids))
+	ordered := make([]ConfiguredPlugin, 0, len(ids))
 	var visit func(string) error
 	visit = func(id string) error {
 		if state[id] == 2 {
@@ -168,18 +227,38 @@ func decodePluginConfigs(raw pluginSettings) ([]configuredPlugin, error) {
 	return ordered, nil
 }
 
+// Decode validates plugin entries and their capability dependencies.
+func Decode(raw Settings) error {
+	_, err := NewRegistry().decodePluginConfigs(raw)
+	return err
+}
+
+func (r *Registry) Decode(raw Settings) error {
+	_, err := r.decodePluginConfigs(raw)
+	return err
+}
+
 // buildPluginOptions resolves trusted host plugins once at startup. Core.Use
 // applies their capabilities afresh for each run.
-func buildPluginOptions(raw pluginSettings, getenv func(string) string) (pluginOptions, error) {
-	plugins, err := decodePluginConfigs(raw)
+func (r *Registry) Build(raw Settings, getenv func(string) string, providers map[string]llm.Fallback) (Options, error) {
+	plugins, err := r.decodePluginConfigs(raw)
 	if err != nil {
 		return pluginOptions{}, err
 	}
-	build := &pluginBuildContext{getenv: getenv}
+	build := &BuildContext{getenv: getenv, providers: providers}
 	for _, plugin := range plugins {
 		if err := plugin.Build(build); err != nil {
 			return pluginOptions{}, fmt.Errorf("config plugins.%s: %w", plugin.ID(), err)
 		}
 	}
-	return pluginOptions{hostPlugins: build.hostPlugins, manifests: build.manifests}, nil
+	return pluginOptions{HostPlugins: build.hostPlugins, Manifests: build.manifests, Configs: build.configs}, nil
+}
+
+// Build resolves enabled plugins against the trusted host's providers and environment.
+func Build(raw Settings, getenv func(string) string, providers map[string]llm.Fallback) (Options, error) {
+	return NewRegistry().Build(raw, getenv, providers)
+}
+
+func buildPluginOptions(raw Settings, getenv func(string) string, providers map[string]llm.Fallback) (Options, error) {
+	return Build(raw, getenv, providers)
 }

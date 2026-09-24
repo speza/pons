@@ -5,6 +5,21 @@ import (
 	"testing"
 )
 
+func TestPluginProvidersResolveNamedAndEffectivePrimary(t *testing.T) {
+	cfg := settings{Providers: []providerSettings{
+		{ID: "codex-personal", Provider: "codex", Model: "configured-model"},
+		{ID: "codex-work", Provider: "codex", Model: "work-model"},
+	}}
+	primary := toFallback(cfg.Providers[0])
+	primary.Model = "flag-model"
+	providers := pluginProviders(cfg, primary)
+	if providers["primary"].Model != "flag-model" ||
+		providers["codex-personal"].Model != "flag-model" ||
+		providers["codex-work"].Model != "work-model" {
+		t.Fatalf("resolved plugin providers: %+v", providers)
+	}
+}
+
 func TestProviderSlotsFromConfigList(t *testing.T) {
 	cfg := settings{
 		DefaultProviderID: new("codex-work"),
@@ -102,6 +117,7 @@ func TestProviderSlotsValidation(t *testing.T) {
 	}{
 		{"duplicate id", settings{Providers: []providerSettings{{ID: "a", Provider: "openai"}, {ID: "a", Provider: "codex"}}}, "duplicate"},
 		{"missing id", settings{Providers: []providerSettings{{Provider: "openai"}}}, "id is required"},
+		{"reserved primary id", settings{Providers: []providerSettings{{ID: "primary", Provider: "codex"}}}, "reserved"},
 		{"missing provider type", settings{Providers: []providerSettings{{ID: "a"}}}, "provider is required"},
 		{"no default with several", settings{Providers: []providerSettings{{ID: "a", Provider: "openai"}, {ID: "b", Provider: "codex"}}}, "default_provider_id"},
 		{"unknown default", settings{DefaultProviderID: new("z"), Providers: []providerSettings{{ID: "a", Provider: "openai"}}}, "does not match"},

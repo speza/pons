@@ -100,6 +100,10 @@ the contract:
 - `Deny` is final for that invocation.
 
 The core does not own a terminal, GUI, user identity, or persistence format.
+An explicitly installed host-side external plugin may also implement
+`on_tool_call_start` through the versioned `hook_provider/v1` protocol. It
+receives the policy event but no Core handle or inherited credentials; only
+its decision is applied to the pending call.
 An interactive CLI supplies an approval handler; an embedding application may
 block, display a request elsewhere, or bridge it to an asynchronous UI. A
 non-interactive caller may use ADR-0021's durable pause and exact-action

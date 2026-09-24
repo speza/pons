@@ -1,0 +1,8 @@
+{
+  "manifest_version": 1,
+  "name": "example.policy",
+  "entrypoint": "./external-policy",
+  "runtime_protocol": 1,
+  "placement": "host",
+  "config_version": "1.0.0"
+}

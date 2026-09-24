@@ -1,4 +1,4 @@
-package main
+package hostconfig
 
 import (
 	"encoding/json"
@@ -16,7 +16,7 @@ type actionPolicySettings struct {
 	id string
 }
 
-func decodeActionPolicyPlugin(id string, enabled bool, raw json.RawMessage) (configuredPlugin, error) {
+func decodeActionPolicyPlugin(id string, enabled bool, raw json.RawMessage) (ConfiguredPlugin, error) {
 	config, err := decodePluginObject[actionPolicySettings](id, raw)
 	if err != nil {
 		return nil, err
@@ -38,7 +38,7 @@ func (p actionPolicySettings) Requires() []string {
 	return []string{actionpolicy.ClassifierCapability(p.Classifier)}
 }
 
-func (p actionPolicySettings) Build(build *pluginBuildContext) error {
+func (p actionPolicySettings) Build(build *BuildContext) error {
 	policy := actionpolicy.Policy{
 		ClassifierID:             p.Classifier,
 		AllowGeneratedConfidence: p.AllowGeneratedConfidence,

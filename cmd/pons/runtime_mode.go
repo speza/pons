@@ -45,6 +45,8 @@ type serverOptions struct {
 	BashMaxLines            int
 	BashMaxBytes            int
 	PluginPaths             []string
+	HostPluginPaths         []string
+	PluginConfigs           map[string]json.RawMessage
 	PluginPath              string
 	PluginMaxResultBytes    int
 	HostPlugins             []pons.Plugin
@@ -695,7 +697,12 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 			runLog.Debug("environment closed")
 		}
 	}()
-
+	externalHooks := make([]*external.HookPlugin, 0, len(r.opts.HostPluginPaths))
+	defer func() {
+		for _, plugin := range slices.Backward(externalHooks) {
+			err = errors.Join(err, plugin.Close())
+		}
+	}()
 	metadata := session.Metadata()
 	if len(metadata.ReadWrite) != len(spec.ReadWrite) {
 		return result, fmt.Errorf("execution environment %q did not grant the agent's memory", r.opts.Sandbox)
@@ -728,8 +735,20 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}); err != nil {
 		return result, err
 	}
-	plugins := make([]pons.Plugin, 0, 2+len(r.opts.HostPlugins))
+	plugins := make([]pons.Plugin, 0, 2+len(r.opts.HostPluginPaths)+len(r.opts.HostPlugins))
 	plugins = append(plugins, environment.Proxy(session))
+	for _, manifestPath := range r.opts.HostPluginPaths {
+		plugin, pluginErr := external.NewHooks(manifestPath, external.HostConfig{
+			Workspace: request.Workspace, Path: r.opts.PluginPath, CallTimeout: 10 * time.Second,
+			PluginConfig: r.opts.PluginConfigs[manifestPath],
+			Limits:       external.Limits{MaxResultBytes: r.opts.PluginMaxResultBytes},
+		})
+		if pluginErr != nil {
+			return result, pluginErr
+		}
+		externalHooks = append(externalHooks, plugin)
+		plugins = append(plugins, plugin)
+	}
 	plugins = append(plugins, r.opts.HostPlugins...)
 	plugins = append(plugins, brain)
 	if err := core.Use(plugins...); err != nil {
