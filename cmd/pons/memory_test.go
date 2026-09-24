@@ -166,42 +166,49 @@ func TestAgentMemorySurvivesRestartAndNewConversation(t *testing.T) {
 }
 
 // remoteMemoryEnvironment stands in for E2B: it reports each read-write
-// directory under a sandbox path instead of the host path.
-type remoteMemoryEnvironment struct{ specs chan environment.Spec }
+// directory under a sandbox path named after it, or none when dropGrants is
+// set, as a provider that failed to grant them would.
+type remoteMemoryEnvironment struct {
+	specs      chan environment.Spec
+	dropGrants bool
+}
 
 func (p remoteMemoryEnvironment) Start(_ context.Context, spec environment.Spec) (environment.HandsSession, error) {
 	p.specs <- spec
-	return remoteMemorySession{readWrite: len(spec.ReadWrite)}, nil
+	session := remoteMemorySession{}
+	if !p.dropGrants {
+		for _, host := range spec.ReadWrite {
+			session.readWrite = append(session.readWrite, "/home/user/.pons/"+filepath.Base(host))
+		}
+	}
+	return session, nil
 }
 
 type remoteMemorySession struct {
 	recordingSession
-	readWrite int
+	readWrite []string
 }
 
 func (s remoteMemorySession) Metadata() environment.Metadata {
 	metadata := recordingSession{}.Metadata()
-	for range s.readWrite {
-		metadata.ReadWrite = append(metadata.ReadWrite, "/home/user/.pons/memory")
-	}
+	metadata.ReadWrite = s.readWrite
 	return metadata
 }
 func (s remoteMemorySession) Close() error { return nil }
 
-func TestRemoteRunsGetMemoryAtTheSandboxPath(t *testing.T) {
+func remoteMemoryRun(t *testing.T, execution remoteMemoryEnvironment, grants []string) (string, error) {
+	t.Helper()
 	provider, requests := scriptedProvider(t, func(providerRequest) providerReply {
 		return providerReply{Text: "ok"}
 	})
-	stateDir := t.TempDir()
-	agents, err := agentdir.Open(stateDir)
+	agents, err := agentdir.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	write(t, filepath.Join(agents.Dir("default"), "memory", "MEMORY.md"), "- tea\n")
-	execution := remoteMemoryEnvironment{specs: make(chan environment.Spec, 1)}
 	runner := &agentRunner{opts: serverOptions{
 		MaxTurns: 2, Sandbox: "e2b", Environment: execution,
-		EnvironmentSpec: environment.Spec{Command: []string{"/test/pons-hands"}},
+		EnvironmentSpec: environment.Spec{Command: []string{"/test/pons-hands"}, ReadWrite: grants},
 		Brain:           llm.Config{Provider: "openai", Model: "test", APIKey: "test", BaseURL: provider.URL + "/v1"},
 	}, logger: newServerLogger(io.Discard, false), agents: agents}
 
@@ -211,16 +218,32 @@ func TestRemoteRunsGetMemoryAtTheSandboxPath(t *testing.T) {
 		GitRepository: "https://github.com/acme/a.git", GitRevision: strings.Repeat("a", 40),
 		Emit: func(ponsruntime.RunEvent) error { return nil },
 	})
+	spec := <-execution.specs
+	hostMemory, _ := filepath.EvalSymlinks(filepath.Join(agents.Dir("default"), "memory"))
+	if len(spec.ReadWrite) != len(grants)+1 || spec.ReadWrite[len(grants)] != hostMemory {
+		t.Fatalf("read-write grants = %v, want memory %s last", spec.ReadWrite, hostMemory)
+	}
+	if err != nil {
+		return "", err
+	}
+	_, prompt := requests()[0].last()
+	return prompt, nil
+}
+
+func TestRemoteRunsGetMemoryAtTheSandboxPath(t *testing.T) {
+	// Another configured grant comes first; the prompt still names memory.
+	prompt, err := remoteMemoryRun(t, remoteMemoryEnvironment{specs: make(chan environment.Spec, 1)}, []string{t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec := <-execution.specs
-	hostMemory, _ := filepath.EvalSymlinks(filepath.Join(agents.Dir("default"), "memory"))
-	if len(spec.ReadWrite) != 1 || spec.ReadWrite[0] != hostMemory {
-		t.Fatalf("read-write grants = %v, want [%s]", spec.ReadWrite, hostMemory)
-	}
-	_, prompt := requests()[0].last()
 	if !strings.Contains(prompt, `<memory path="/home/user/.pons/memory">`) || !strings.Contains(prompt, "- tea") {
 		t.Fatalf("prompt does not use the sandbox memory path:\n%s", prompt)
+	}
+}
+
+func TestRunFailsWhenEnvironmentDoesNotGrantMemory(t *testing.T) {
+	_, err := remoteMemoryRun(t, remoteMemoryEnvironment{specs: make(chan environment.Spec, 1), dropGrants: true}, nil)
+	if err == nil || !strings.Contains(err.Error(), "did not grant the agent's memory") {
+		t.Fatalf("run error = %v", err)
 	}
 }

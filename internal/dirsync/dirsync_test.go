@@ -85,3 +85,29 @@ func TestApplyStaysInsideDirectory(t *testing.T) {
 		t.Fatalf("file written outside the directory: %v", err)
 	}
 }
+
+func TestApplyKeepsDeletedFileChangedSinceBase(t *testing.T) {
+	host := t.TempDir()
+	writeTestFile(t, filepath.Join(host, "tea.md"), "green\n")
+	writeTestFile(t, filepath.Join(host, ".dirsync-notes.md"), "keep me\n")
+	base, err := Read(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another run edits tea.md while this run deletes it and edits notes.
+	writeTestFile(t, filepath.Join(host, "tea.md"), "oolong\n")
+	result := Tree{".dirsync-notes.md": []byte("keep me\n"), "notes.md": []byte("new\n")}
+	if _, err := Apply(host, base.Digests(), result); err != nil {
+		t.Fatal(err)
+	}
+	after, err := Read(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after["tea.md"]) != "oolong\n" {
+		t.Fatalf("concurrent edit lost to a delete: %q", after["tea.md"])
+	}
+	if string(after[".dirsync-notes.md"]) != "keep me\n" || string(after["notes.md"]) != "new\n" || len(after) != 3 {
+		t.Fatalf("tree after apply = %q", after)
+	}
+}

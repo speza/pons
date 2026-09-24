@@ -625,6 +625,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	// the rest of the agent directory stays outside every grant. Concat
 	// copies so concurrent runs never share a slice.
 	spec.ReadWrite = slices.Concat(spec.ReadWrite, memoryGrant)
+	memoryIndex := len(spec.ReadWrite) - 1
 	spec.WorkspaceID = request.ConversationID
 	spec.WorkspacePath = request.Workspace
 	spec.RunID = request.RunID
@@ -662,9 +663,8 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}
 	hands := llm.Hands{Workspace: metadata.WorkspacePath, Platform: metadata.Platform, Network: string(metadata.Network)}
 	if len(memoryGrant) != 0 {
-		// The prompt names memory where the hands see it; memory is the only
-		// read-write grant.
-		hands.MemoryPath = metadata.ReadWrite[0]
+		// The prompt names memory where the hands see its own grant.
+		hands.MemoryPath = metadata.ReadWrite[memoryIndex]
 	}
 	core.Workspace, core.Platform = metadata.WorkspacePath, metadata.Platform
 

@@ -157,7 +157,12 @@ type Brain struct {
 	pending     []Result
 	seenMessage string // last message folded into context
 	hands       Hands  // what the seeded run's hands see; shown in <env>
-	logf        func(string, ...any)
+	// memoryContext is the rendered memory block and memoryTurn the index of
+	// the turn holding it (-1 when none), so compaction never summarizes
+	// away where memory lives.
+	memoryContext string
+	memoryTurn    int
+	logf          func(string, ...any)
 }
 
 // New creates the brain plugin (installed with pons.Core.Use).
@@ -501,9 +506,16 @@ func (b *Brain) compact(ctx context.Context) error {
 			summary.WriteString(t.Value)
 		}
 	}
-	compacted := Turn{Role: "user", Blocks: []Block{Text{Value: fmt.Sprintf(
-		"[Earlier conversation compacted into this summary.]\n\n%s",
-		strings.TrimSpace(summary.String()))}}}
+	text := fmt.Sprintf("[Earlier conversation compacted into this summary.]\n\n%s", strings.TrimSpace(summary.String()))
+	switch {
+	case b.memoryTurn >= 1 && b.memoryTurn < start:
+		// The memory block was in the summarized middle: carry it verbatim.
+		text += "\n\n" + b.memoryContext
+		b.memoryTurn = 1
+	case b.memoryTurn >= start:
+		b.memoryTurn = b.memoryTurn - start + 2
+	}
+	compacted := Turn{Role: "user", Blocks: []Block{Text{Value: text}}}
 	if b.logf != nil {
 		b.logf("[llm] compacted %d turns into %d-char summary (keeping %d recent)", len(middle), summary.Len(), keep)
 	}
@@ -632,6 +644,10 @@ func (b *Brain) Seed(turns []Turn, message string, hands Hands) {
 	context := ""
 	if b.cfg.Memory != nil {
 		context = b.cfg.Memory.render(hands.MemoryPath)
+	}
+	b.memoryContext, b.memoryTurn = context, -1
+	if context != "" {
+		b.memoryTurn = len(turns)
 	}
 	b.turns = append(append([]Turn(nil), turns...), Turn{
 		Role: "user", Blocks: []Block{Text{Value: b.userPrompt(protocol.Observation{

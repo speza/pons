@@ -8,6 +8,7 @@ package dirsync
 import (
 	"archive/tar"
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -91,8 +92,9 @@ func Archive(tree Tree) ([]byte, error) {
 
 // Apply writes result's changes relative to base into dir: files added or
 // changed are written and files removed are deleted. Files the run did not
-// touch are left as they are now, even if they changed since base. It returns
-// the changed paths.
+// touch are left as they are now, even if they changed since base, and a
+// removed file is kept when it changed since base, so a concurrent edit is
+// never lost to a delete. It returns the changed paths.
 func Apply(dir string, base Digests, result Tree) ([]string, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
@@ -118,6 +120,16 @@ func Apply(dir string, base Digests, result Tree) ([]string, error) {
 		if _, ok := result[name]; ok || !safeName(name) {
 			continue
 		}
+		current, err := root.ReadFile(name)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return changed, fmt.Errorf("dirsync: read %s: %w", name, err)
+		}
+		if sha256.Sum256(current) != base[name] {
+			continue
+		}
 		if err := root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return changed, fmt.Errorf("dirsync: remove %s: %w", name, err)
 		}
@@ -134,7 +146,7 @@ func writeFile(root *os.Root, name string, data []byte) error {
 			return fmt.Errorf("dirsync: create %s: %w", parent, err)
 		}
 	}
-	temporary := path.Join(path.Dir(name), ".dirsync-"+path.Base(name))
+	temporary := path.Join(path.Dir(name), ".dirsync-"+rand.Text()+".tmp")
 	if err := root.WriteFile(temporary, data, 0o600); err != nil {
 		return fmt.Errorf("dirsync: write %s: %w", name, err)
 	}

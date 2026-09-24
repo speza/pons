@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -402,5 +403,35 @@ func TestMemoryIsShownOncePerRun(t *testing.T) {
 	b.Seed(nil, "first", Hands{MemoryPath: "/memory"})
 	if follow := b.userPrompt(protocol.Observation{Message: "second"}, ""); strings.Contains(follow, "<memory") {
 		t.Fatalf("follow-up instruction repeated memory:\n%s", follow)
+	}
+}
+
+func TestCompactionKeepsMemoryBlock(t *testing.T) {
+	fake := &fakeClient{responses: []Turn{{Role: "assistant", Blocks: []Block{Text{Value: "summary"}}}}}
+	b := newBrain(t, fake)
+	b.cfg.Memory, b.cfg.CompactKeep = &Memory{Index: "- tea"}, 2
+	history := []Turn{
+		{Role: "user", Blocks: []Block{Text{Value: "old question"}}},
+		{Role: "assistant", Blocks: []Block{Text{Value: "old answer"}}},
+	}
+	b.Seed(history, "new question", Hands{MemoryPath: "/memory"})
+	for i := range 4 {
+		b.turns = append(b.turns,
+			Turn{Role: "assistant", Blocks: []Block{Text{Value: fmt.Sprintf("step %d", i)}}},
+			Turn{Role: "user", Blocks: []Block{Text{Value: "ok"}}})
+	}
+	if err := b.compact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, turn := range b.turns {
+		for _, block := range turn.Blocks {
+			if text, ok := block.(Text); ok && strings.Contains(text.Value, `<memory path="/memory">`) {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("compaction dropped the memory block: %+v", b.turns)
 	}
 }
