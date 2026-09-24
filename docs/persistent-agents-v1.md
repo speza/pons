@@ -31,10 +31,11 @@ Two typical configurations guide the design:
 - **coding and research agents**, with the same web access and memory, which
   take delegated or scheduled tasks and keep each problem's context separate.
 
-## Agent presets
+## Built-in agents
 
-Presets pre-fill a new agent's definition. They are client conveniences; the
-runtime only sees the resulting values.
+pons starts with built-in agent configurations. Owners can later create their
+own (phase 11), starting from these as presets. Either way the runtime only
+sees the resulting definition values.
 
 | Setting | Chief of staff | Coding agent |
 | --- | --- | --- |
@@ -94,6 +95,7 @@ outcome, and delivery machinery that delegation reuses.
 | 8 Delegation | 2 |
 | 9 Artifacts | 8 |
 | 10 Approvals | 2 and an implemented ADR-0014 |
+| 11 Custom agents | 1 |
 
 Phase 5 can start as soon as phase 1 lands, and phase 8 after phase 2, so the
 assistant and delegation tracks can proceed in parallel.
@@ -105,10 +107,11 @@ assistant and delegation tracks can proceed in parallel.
 | M1 Reachable assistant | 1–3 | The owner messages a non-default agent from a chat channel and receives a durable reply. |
 | M2 Proactive assistant | 4–7 | A scheduled morning brief reads the owner's memory files and arrives on the owner's channel, or records `no_update`; the agent's workspace survives VM replacement. |
 | M3 Delegating agents | 8–10 | A coordinator delegates a coding task, receives an artifact, and resumes after a durable approval. |
+| Later: custom agents | 11 | The owner creates their own agent from a built-in preset without a restart. |
 
 ## Phase 1: Agent identity and composition
 
-**Use cases:** all; U10.
+**Use cases:** all.
 
 **ADRs:** ADR-0016 sections 1–3; ADR-0022 section 1.
 
@@ -116,10 +119,12 @@ assistant and delegation tracks can proceed in parallel.
   configuration on first start. Each definition has an ID, persona, provider
   slot, tools, workspace policy, memory capture policy, and limits; there is
   no agent kind.
-- Add management create, edit, disable, and list through the API and CLI.
-  New work uses the current revision; runs keep the revision they started
-  with. Fail closed on an unresolvable revision.
-- Ship the chief-of-staff and coding-agent presets as client-side defaults.
+- Seed the built-in chief-of-staff and coding-agent definitions, with the
+  chief of staff as the default. Configuration may adjust their persona,
+  provider slot, and tools.
+- Record the revision on submissions and runs; runs keep the revision they
+  started with. Fail closed on an unresolvable revision.
+- Add a read-only agent list to the API and web UI.
 - Persist `agent_id`, `workspace_id`, and parent delegation columns on
   conversations. Carry agent and workspace identity through claims.
 - Replace the use of conversation ID as `environment.Spec.WorkspaceID` with
@@ -129,10 +134,9 @@ assistant and delegation tracks can proceed in parallel.
 - Accept an optional `agent_id` on conversation creation; expose ownership in
   views and the web UI.
 
-**Done when:** an agent created through the CLI serves a conversation without
-a restart, two agents with different tools and personas run through the same
-`Core`, an edit leaves in-flight work on its original revision, and workspace
-aliases are rejected.
+**Done when:** both built-in agents serve conversations through the same
+`Core` with different tools and personas, a configuration change creates a new
+revision without moving in-flight work, and workspace aliases are rejected.
 
 ## Phase 2: Submission envelope, lineage, and explicit outcomes
 
@@ -307,6 +311,21 @@ Write ADR-0021 section 2's detailed contract before starting this phase.
 
 **Done when:** a paused approval survives restart, resumes exactly one action,
 and an expired approval yields one denied result.
+
+## Phase 11: Custom agents
+
+**Use cases:** U10.
+
+**ADRs:** ADR-0016 section 2.
+
+- Add administrator create, edit, disable, and list through the API, CLI,
+  and web UI, starting from a built-in agent as a preset.
+- Validate that a definition only references existing provider and
+  credential slots, allowed tools, and allowed recipients.
+
+**Done when:** an owner-created agent serves a conversation and a schedule
+without a restart, and an edit leaves in-flight work on its original
+revision.
 
 ## Cross-cutting requirements
 

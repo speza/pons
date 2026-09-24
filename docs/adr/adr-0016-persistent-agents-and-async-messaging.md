@@ -65,8 +65,11 @@ are a client and documentation convenience, not a runtime concept.
 Definitions are managed runtime resources stored in SQLite. An authorized
 administrator creates, edits, and disables agents through the management API,
 CLI, or web UI without restarting the server; a configuration file may seed
-definitions on first start. One definition is the default, preserving the
-single-agent experience. Models cannot create or edit agent definitions.
+definitions on first start. pons ships built-in definitions first, such as a
+chief of staff and a coding agent; administrator-created definitions use the
+same storage and arrive later without a schema change. One definition is the
+default, preserving the single-agent experience. Models cannot create or edit
+agent definitions.
 
 Each edit creates an immutable revision with a deterministic, non-secret
 fingerprint. Submissions and runs record the revision they started under and
