@@ -14,7 +14,7 @@ replacement, and months of use, and the owner must be able to roll back a bad
 change.
 
 Most of the mechanism exists. The `archive/v1` strategy in
-[`remote-workspace-provisioning.md`](../remote-workspace-provisioning.md)
+[`remote-workspaces.md`](../design/remote-workspaces.md)
 checkpoints an E2B workspace to a content-addressed `CheckpointStore` after
 every completed run and restores the latest checkpoint onto a replacement VM.
 It is shaped for short coding tasks:
@@ -127,7 +127,7 @@ failed checkpoint.
 exclusions, and retention policy. A checkpoint table replaces the single
 current reference with retained history.
 
-[`docs/persistent-agents-v1.md`](../persistent-agents-v1.md) places this work
+[`docs/proposals/persistent-agents/plan.md`](../proposals/persistent-agents/plan.md) places this work
 in phase 6.
 
 ## Verification requirements

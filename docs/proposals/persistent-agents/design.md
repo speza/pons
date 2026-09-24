@@ -2,12 +2,12 @@
 
 **Status:** Draft for review
 **Date:** 2026-09-24
-**Related:** [implementation plan](persistent-agents-v1.md),
-[ADR-0016](adr/adr-0016-persistent-agents-and-async-messaging.md) through
-[ADR-0022](adr/adr-0022-persistent-agent-workspaces.md)
+**Related:** [implementation plan](plan.md),
+[ADR-0016](../../adr/adr-0016-persistent-agents-and-async-messaging.md) through
+[ADR-0022](../../adr/adr-0022-persistent-agent-workspaces.md)
 
 This document says what the persistent-agents feature is, who it is for, and
-why it has its shape. The [implementation plan](persistent-agents-v1.md) says
+why it has its shape. The [implementation plan](plan.md) says
 how and in what order it is built. The ADRs hold the detailed contracts.
 
 ## Summary
@@ -246,7 +246,7 @@ Each ADR holds the contract for its decision.
 
 ## Success measures
 
-The [plan's milestones](persistent-agents-v1.md#milestones) define each
+The [plan's milestones](plan.md#milestones) define each
 demonstration. Beyond them:
 
 - a daily brief runs for two weeks with no duplicates and no silent failures;

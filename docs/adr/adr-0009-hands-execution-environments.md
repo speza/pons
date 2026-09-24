@@ -178,7 +178,7 @@ residency.
 
 ## References
 
-- `docs/hands-environment-v1.md` — first local backend and provider contract
+- `docs/design/hands-environment.md` — first local backend and provider contract
 - `docs/adr/adr-0004-sandboxed-hands-boundary.md` — hands boundary and isolation
   policy
 - `docs/adr/adr-0007-language-neutral-plugin-runtime.md` — external hands wire

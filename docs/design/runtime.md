@@ -1,10 +1,10 @@
 # pons runtime v1 design
 
 **Status:** Transactional runtime and client synchronization implemented
-**Related:** [ADR-0008](adr/adr-0008-runtime-orchestration-layer.md),
-[ADR-0010](adr/adr-0010-runtime-state-and-client-synchronization.md),
-[ADR-0012](adr/adr-0012-scalable-runtime-coordination.md), and
-[ADR-0017](adr/adr-0017-one-runtime-one-trust-domain.md)
+**Related:** [ADR-0008](../adr/adr-0008-runtime-orchestration-layer.md),
+[ADR-0010](../adr/adr-0010-runtime-state-and-client-synchronization.md),
+[ADR-0012](../adr/adr-0012-scalable-runtime-coordination.md), and
+[ADR-0017](../adr/adr-0017-one-runtime-one-trust-domain.md)
 
 This document turns ADR-0008 into the smallest useful local runtime shape. It
 is an implementation guide, not a second agent protocol.
@@ -80,7 +80,7 @@ The first runtime does not include:
 - WhatsApp, Slack, Telegram, or other remote channels;
 - cross-channel identity linking or handoff;
 - persistent agents and tasks (proposed in
-  [ADR-0016](adr/adr-0016-persistent-agents-and-async-messaging.md));
+  [ADR-0016](../adr/adr-0016-persistent-agents-and-async-messaging.md));
 - mutually untrusted tenants in one runtime;
 - multi-process workers or distributed leases;
 - authentication beyond loopback binding;

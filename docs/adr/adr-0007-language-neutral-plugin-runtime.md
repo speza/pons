@@ -137,7 +137,7 @@ protocol-only stdout. A plugin may implement the protocol directly.
 
 ## References
 
-- `docs/external-plugin-protocol.md` — normative runtime and tool-provider
+- `docs/reference/external-plugin-protocol.md` — normative runtime and tool-provider
   messages
 - `plugins/external/` — host, manifest, schema validation, and adapter
 - `plugins/external/sdk/` — Go and TypeScript serving SDKs

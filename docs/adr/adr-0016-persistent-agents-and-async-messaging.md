@@ -314,7 +314,7 @@ envelope fields. The SQLite schema version
 increases; old databases may need recreation under the pre-compatibility
 policy.
 
-[`docs/persistent-agents-v1.md`](../persistent-agents-v1.md) orders the work:
+[`docs/proposals/persistent-agents/plan.md`](../proposals/persistent-agents/plan.md) orders the work:
 identity (sections 1–3) and lineages (sections 4–6) first, tasks
 (sections 7–11) after the assistant path.
 
@@ -383,4 +383,4 @@ delegation's receipt as outcome unknown.
   scheduling
 - `runtime/sqlite/store.go` — SQLite claims and event outbox
 - `cmd/pons/runtime_mode.go` — current composition
-- `docs/runtime-v1.md` — implemented one-agent runtime
+- `docs/design/runtime.md` — implemented one-agent runtime

@@ -259,7 +259,7 @@ runtime cells, not in `Core` or the local conversation contract.
 
 ## References
 
-- `docs/runtime-v1.md` — concrete v1 runtime and HTTP design
+- `docs/design/runtime.md` — concrete v1 runtime and HTTP design
 - `docs/adr/adr-0010-runtime-state-and-client-synchronization.md` — transactional
   runtime state, snapshots, durable events, and transient streaming
 - `docs/adr/adr-0016-persistent-agents-and-async-messaging.md` — proposed persistent

@@ -86,5 +86,5 @@ command exit remains a domain result according to ADR-0003.
 
 - `core.go` — `ControlPort`, `ToolPort`, and dispatch
 - `plugins/external` — persistent external hands adapter
-- `docs/external-plugin-protocol.md` — external tool-provider protocol
+- `docs/reference/external-plugin-protocol.md` — external tool-provider protocol
 - `protocol/` — action and result contracts

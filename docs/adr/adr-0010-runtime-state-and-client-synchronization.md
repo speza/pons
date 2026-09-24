@@ -245,6 +245,6 @@ snapshot. The server now uses the transactional runtime store exclusively.
 ## References
 
 - `docs/adr/adr-0008-runtime-orchestration-layer.md` — runtime ownership and API
-- `docs/runtime-v1.md` — concrete implemented runtime design
+- `docs/design/runtime.md` — concrete implemented runtime design
 - `docs/adr/adr-0005-transcript-model-vs-engine.md` — session model and engines
 - `runtime/` — transactional state, snapshot API, and durable/transient stream

@@ -119,7 +119,7 @@ current directory. That path must exist on the server host and be inside
 `workspace_root` (the server user's home directory by default). Set
 `"workspace_root"` in the global config to allow other host paths. Git
 conversations select a repository and commit instead; see the
-[Git workspace guide](docs/git-workspaces.md).
+[Git workspace guide](docs/design/git-workspaces.md).
 
 The server reads `~/.pons/config.json`. A standalone `serve` process does not
 read `.pons.json` from its startup directory. The loopback server trusts other
@@ -136,8 +136,8 @@ cells rather than co-host untrusted customers in one runtime.
 
 Proposed persistent-agent support lets one self-hosted server run a
 long-lived, owner-named agent that hands coding and research work to private
-tasks. The [design doc](docs/persistent-agents-design.md) explains what and
-why, and the [implementation plan](docs/persistent-agents-v1.md) orders the
+tasks. The [design doc](docs/proposals/persistent-agents/design.md) explains what and
+why, and the [implementation plan](docs/proposals/persistent-agents/plan.md) orders the
 work. Agent identity and tasks are specified in
 [ADR-0016](docs/adr/adr-0016-persistent-agents-and-async-messaging.md); the
 remaining runtime contracts cover
@@ -197,7 +197,7 @@ go run ./cmd/pons -provider codex -sandbox seatbelt \
 
 E2B can run the same hands protocol in a remote Linux sandbox. Build the
 template once (requires `E2B_API_KEY` and Node/npm), then configure the server
-as shown in the [Git workspace guide](docs/git-workspaces.md):
+as shown in the [Git workspace guide](docs/design/git-workspaces.md):
 
 ```sh
 make e2b-template
@@ -218,16 +218,16 @@ go run ./cmd/pons client -i \
 Use `-git-branch main` instead of `-git-revision` to start from a remote branch.
 
 New conversations from the same repository still get separate checkouts.
-The [Git workspace guide](docs/git-workspaces.md) covers GitHub App setup,
+The [Git workspace guide](docs/design/git-workspaces.md) covers GitHub App setup,
 cross-repository access, checkpoints, recovery, and cleanup. The initial E2B
 backend does not support external plugin manifests.
 
 External tools are enabled explicitly with a manifest; they are never
 discovered implicitly. Example providers are in
-[`examples/external-echo`](examples/external-echo) and
-[`examples/external-echo-ts`](examples/external-echo-ts). See the
-[external plugin protocol](docs/external-plugin-protocol.md) and
-[hands environment design](docs/hands-environment-v1.md) for details.
+[`examples/external-echo`](examples/external-echo/) and
+[`examples/external-echo-ts`](examples/external-echo-ts/). See the
+[external plugin protocol](docs/reference/external-plugin-protocol.md) and
+[hands environment design](docs/design/hands-environment.md) for details.
 
 ## Configuration
 
@@ -238,7 +238,7 @@ Configuration supports provider/model settings, runtime limits, tool output
 limits, named provider slots, and failover. Use repeatable
 `-fallback provider[:model]` flags for a temporary failover chain.
 
-The [Git workspace guide](docs/git-workspaces.md) has the complete E2B and
+The [Git workspace guide](docs/design/git-workspaces.md) has the complete E2B and
 GitHub App config example. Keep credentials in the global file, not in a
 repository's `.pons.json`. Client commands select the repository and revision
 per conversation.
@@ -260,8 +260,8 @@ Install the local lint tool once if needed with `make install-tools`.
 part of the default suite.
 
 Architecture decisions and protocol details live in [`docs/`](docs/),
-including the [runtime design](docs/runtime-v1.md) and the
-[ADR index](docs/).
+including the [runtime design](docs/design/runtime.md) and the
+[ADR index](docs/adr/).
 
 ## Dependencies
 

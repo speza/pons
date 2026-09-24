@@ -158,5 +158,5 @@ Git config, checkpoint, or sandbox-wide environment, and redacts exact token
 values from tool results before host persistence. This does not prevent an
 agent from deliberately transforming or persisting its authority.
 
-See the [remote workspace design](remote-workspace-provisioning.md) for the
+See the [remote workspace design](remote-workspaces.md) for the
 storage and placement contracts.

@@ -188,7 +188,7 @@ and pending delivery in bounded batches; in-memory wakeups are hints.
 Trusted management surfaces create, inspect, and disable schedules and
 bindings, and expose delivery status; model-controlled hands cannot call them.
 
-[`docs/persistent-agents-v1.md`](../persistent-agents-v1.md) sequences this
+[`docs/proposals/persistent-agents/plan.md`](../proposals/persistent-agents/plan.md) sequences this
 work: explicit outcomes land with lineage completion (phase 3); principals,
 bindings, delivery, and the first authenticated connector next (phase 4); and
 schedules after delivery exists (phase 5). Authenticated connectors ship only

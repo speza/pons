@@ -1,18 +1,18 @@
-# Persistent agents v1 implementation plan
+# Persistent agents implementation plan
 
 **Status:** Proposed; no phase implemented
-**Related:** [design doc](persistent-agents-design.md),
-[ADR-0016](adr/adr-0016-persistent-agents-and-async-messaging.md),
-[ADR-0017](adr/adr-0017-one-runtime-one-trust-domain.md),
-[ADR-0018](adr/adr-0018-agent-triggers-and-delivery.md),
-[ADR-0019](adr/adr-0019-agent-memory.md),
-[ADR-0020](adr/adr-0020-agent-artifact-transfer.md),
-[ADR-0021](adr/adr-0021-durable-work-and-waits.md),
-[ADR-0022](adr/adr-0022-persistent-agent-workspaces.md), and
-[ADR-0014](adr/adr-0014-native-action-authorization.md)
+**Related:** [design doc](design.md),
+[ADR-0016](../../adr/adr-0016-persistent-agents-and-async-messaging.md),
+[ADR-0017](../../adr/adr-0017-one-runtime-one-trust-domain.md),
+[ADR-0018](../../adr/adr-0018-agent-triggers-and-delivery.md),
+[ADR-0019](../../adr/adr-0019-agent-memory.md),
+[ADR-0020](../../adr/adr-0020-agent-artifact-transfer.md),
+[ADR-0021](../../adr/adr-0021-durable-work-and-waits.md),
+[ADR-0022](../../adr/adr-0022-persistent-agent-workspaces.md), and
+[ADR-0014](../../adr/adr-0014-native-action-authorization.md)
 
 This document turns the design into ordered implementation steps. The
-[design doc](persistent-agents-design.md) owns goals, use cases (U1–U12), and
+[design doc](design.md) owns goals, use cases (U1–U12), and
 principles; the ADRs own contracts; this plan owns sequencing, scope, and
 exit criteria. When they disagree, fix the ADR first.
 

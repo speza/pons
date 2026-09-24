@@ -102,7 +102,7 @@ project are not automatically folded into it without a verified binding.
 ### 2. Durable approval is a pause in one lineage
 
 This section is a decision summary. Its detailed contract is written when
-phase 11 of [`docs/persistent-agents-v1.md`](../persistent-agents-v1.md)
+phase 11 of [`docs/proposals/persistent-agents/plan.md`](../proposals/persistent-agents/plan.md)
 begins, after ADR-0014's preflight authorization stage exists.
 
 - ADR-0014's `Ask` may outlive a client connection. The runtime records a
@@ -146,7 +146,7 @@ callback and committed only when the fenced lineage finishes. The same
 transaction updates item state and emits its event. Timer/event matching,
 approval resolution, and cancellation are idempotent store transitions.
 
-[`docs/persistent-agents-v1.md`](../persistent-agents-v1.md) places work items
+[`docs/proposals/persistent-agents/plan.md`](../proposals/persistent-agents/plan.md) places work items
 in phase 8 and durable approvals in phase 11.
 
 ## Verification requirements
