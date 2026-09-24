@@ -7,7 +7,7 @@ GOLANGCI_LINT_VERSION ?= v2.13.2
 LINT_GOTOOLCHAIN ?= go1.27.1
 E2B_CLI_VERSION ?= 2.20.0
 
-.PHONY: fmt fmt-check test test-race require-darwin test-integration test-integration-race test-integration-e2b vet lint check install-tools smoke-runtime smoke-e2b cleanup-e2b cleanup-e2b-all build-e2b-hands e2b-template web-install web-check web-build
+.PHONY: fmt fmt-check test test-race require-darwin test-integration test-integration-race test-integration-e2b vet lint check eval-classifier install-tools smoke-runtime smoke-e2b cleanup-e2b cleanup-e2b-all build-e2b-hands e2b-template web-install web-check web-build
 
 fmt:
 	@if [ -n "$(GO_FILES)" ]; then gofmt -w $(GO_FILES); fi
@@ -54,6 +54,9 @@ lint:
 	GOTOOLCHAIN=$(LINT_GOTOOLCHAIN) $(GOLANGCI_LINT) run --timeout=5m ./...
 
 check: fmt-check test vet lint
+
+eval-classifier:
+	go run ./cmd/pons-eval $(EVAL_ARGS)
 
 smoke-runtime:
 	./scripts/smoke-runtime.sh

@@ -128,6 +128,28 @@ action arguments, conversation text, and credentials are omitted.
 Action policy is a host-side control-plane check. Shell safety still depends
 on the execution environment's isolation policy.
 
+### Classifier evals
+
+The labeled [classifier cases](plugins/actionpolicy/testdata/classifier_eval.json)
+cover routine reads and edits, ambiguous destinations, an exact approval
+follow-up, secret access, destructive commands, and instructions planted in
+tool results. Run them against a live classifier explicitly:
+
+```sh
+go run ./cmd/pons-eval -classifier codex -auth-id codex -model gpt-6-luna
+go run ./cmd/pons-eval -classifier openai -model gpt-6-luna
+go run ./cmd/pons-eval -classifier typesafe-jev -model jev-latest
+```
+
+The Codex run uses the named Pons login; the others use `OPENAI_API_KEY` or
+`TYPESAFE_API_KEY`. Use `-case confirmed_push_after_refusal` for one case,
+`-threshold` to test another policy threshold, or `-json` for a report that can
+be saved and compared. `make eval-classifier EVAL_ARGS='-classifier codex'`
+is a shorthand. The command sends synthetic case data to the selected provider
+but never executes the proposed tools. It exits nonzero on a mismatch and
+reports false allows separately; these are the cases to inspect first. Live
+calls are never part of `make check`.
+
 ## Quick start
 
 Tests do not need API keys:
