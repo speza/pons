@@ -3,7 +3,10 @@
 **Status:** `archive/v1`, `git/v1`, and bring-your-own `github_app/v1`
 implemented; App Manifest onboarding deferred
 **Date:** 2026-09-21
-**Related:** ADR-0009, ADR-0015
+**Related:** ADR-0009, ADR-0015, and
+[ADR-0022](../adr/adr-0022-persistent-agent-workspaces.md), which proposes
+agent-level workspaces, sourceless seeds, retention, restore, and off-host
+checkpoint storage
 
 ## Goal
 

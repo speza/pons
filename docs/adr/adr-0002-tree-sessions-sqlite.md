@@ -1,6 +1,7 @@
 # ADR-0002: Session trees use append-only JSONL (SQLite is not selected)
 
 **Status:** Superseded by ADR-0010 and ADR-0011
+**Implementation:** Not applicable — superseded
 **Date:** 2026-09-15
 **Related:** ADR-0001, ADR-0005
 

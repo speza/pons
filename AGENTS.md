@@ -60,7 +60,9 @@ to the default suite.
 - `plugins/`: execution, brains, and external adapters
 - `runtime/`: server orchestration, storage contract, and persistence
 - `internal/`: shared implementation helpers
-- `docs/`: architecture decision records and protocol documentation
+- `docs/`: see `docs/README.md`; decisions in `adr/`, designs of built
+  parts in `design/`, protocol specs in `reference/`, and unbuilt features in
+  `proposals/<feature>/`
 - `cmd/`: user-facing binaries
 
 Keep tests close to the package they cover, and update `README.md` when a

@@ -1,6 +1,7 @@
 # ADR-0013: Named provider slots with a single auth store
 
 **Status:** Accepted
+**Implementation:** Implemented
 **Date:** 2026-09-17
 **Related:** ADR-0001
 

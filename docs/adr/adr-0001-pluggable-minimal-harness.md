@@ -1,6 +1,7 @@
 # ADR-0001: pons is a minimal, plugin-extensible agent harness
 
 **Status:** Accepted
+**Implementation:** Implemented
 **Date:** 2025-09-14
 **Related:** ADR-0003, ADR-0004, ADR-0006, ADR-0007, ADR-0008, ADR-0011
 

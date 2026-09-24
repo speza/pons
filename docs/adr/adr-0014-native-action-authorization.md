@@ -1,8 +1,9 @@
 # ADR-0014: Native action authorization and classifier-backed auto mode
 
 **Status:** Proposed
+**Implementation:** Not implemented
 **Date:** 2026-09-18
-**Related:** ADR-0001, ADR-0004, ADR-0006, ADR-0007
+**Related:** ADR-0001, ADR-0004, ADR-0006, ADR-0007, ADR-0021
 
 ## Context
 
@@ -76,7 +77,8 @@ the contract:
 
 - a classifier returns an assessment, not a permission grant;
 - local policy maps the assessment to `Allow`, `Ask`, or `Deny`;
-- `Ask` invokes an application-supplied approval handler;
+- `Ask` invokes an application-supplied approval handler or ADR-0021's
+  durable pause adapter;
 - an approval handler may return only `Allow` or `Deny` for the exact pending
   action; and
 - `Deny` is final for that invocation.
@@ -84,8 +86,9 @@ the contract:
 The core does not own a terminal, GUI, user identity, or persistence format.
 An interactive CLI supplies an approval handler; an embedding application may
 block, display a request elsewhere, or bridge it to an asynchronous UI. A
-non-interactive caller must provide an explicit policy for `Ask`; absent one,
-the action is denied rather than silently allowed.
+non-interactive caller may use ADR-0021's durable pause and exact-action
+resume. Without a handler or durable pause policy, `Ask` is denied rather
+than silently allowed.
 
 ### 2. Authorization happens before tool execution
 
@@ -258,8 +261,8 @@ authorization stage is specifically for preflight decisions and approval.
 - Final exported names and whether classifier/policy composition lives in a
   generic policy plugin or directly on `Core`.
 - Exact event type and CLI rendering for `Ask`, `Allow`, and `Deny`.
-- Whether the first approval handler is synchronous only, or whether the core
-  needs a pending-token/resume API for remote UIs.
+- The exact exported resume API for ADR-0021's persisted pending plan; the
+  first directly attended handler may remain synchronous.
 - The denial-loop circuit-breaker threshold and equivalence algorithm.
 - The default classifier model/provider configuration and per-action latency
   or concurrency limits.

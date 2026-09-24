@@ -1,6 +1,7 @@
 # ADR-0009: Hands execute inside provider-backed environments
 
 **Status:** Accepted
+**Implementation:** Environment contract, Seatbelt, and E2B providers implemented
 **Date:** 2026-09-18
 **Related:** ADR-0004, ADR-0007, ADR-0008
 
@@ -177,10 +178,10 @@ residency.
 
 ## References
 
-- `docs/hands-environment-v1.md` — first local backend and provider contract
-- `docs/adr-0004-sandboxed-hands-boundary.md` — hands boundary and isolation
+- `docs/design/hands-environment.md` — first local backend and provider contract
+- `docs/adr/adr-0004-sandboxed-hands-boundary.md` — hands boundary and isolation
   policy
-- `docs/adr-0007-language-neutral-plugin-runtime.md` — external hands wire
+- `docs/adr/adr-0007-language-neutral-plugin-runtime.md` — external hands wire
   protocol
 - `plugins/external/` — current persistent tool-provider host
 - `environment/` — provider/session contract

@@ -1,6 +1,7 @@
 # ADR-0012: Runtime work is claimed durably and scheduled lazily
 
 **Status:** Accepted
+**Implementation:** Local stage implemented; distributed stages remain proposed
 **Date:** 2026-09-20
 **Related:** ADR-0008, ADR-0009, ADR-0010, ADR-0011
 
@@ -400,7 +401,7 @@ without transferring canonical state ownership into them.
 - `runtime/subscriptions.go` — process-local subscriber delivery state
 - `runtime/store.go` — durable domain transition contract
 - `runtime/sqlite/store.go` — current local transactional adapter
-- `docs/adr-0010-runtime-state-and-client-synchronization.md` — canonical state
+- `docs/adr/adr-0010-runtime-state-and-client-synchronization.md` — canonical state
   and outbox ownership
-- `docs/adr-0011-server-centred-runtime-storage.md` — injected store and
+- `docs/adr/adr-0011-server-centred-runtime-storage.md` — injected store and
   server-centred application

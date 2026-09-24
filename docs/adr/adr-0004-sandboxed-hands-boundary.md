@@ -1,6 +1,7 @@
 # ADR-0004: Hands are the execution boundary; isolation is deployment policy
 
 **Status:** Accepted
+**Implementation:** Implemented boundary; isolation is opt-in by deployment
 **Date:** 2026-09-15
 **Related:** ADR-0001, ADR-0003, ADR-0007
 
@@ -85,5 +86,5 @@ command exit remains a domain result according to ADR-0003.
 
 - `core.go` — `ControlPort`, `ToolPort`, and dispatch
 - `plugins/external` — persistent external hands adapter
-- `docs/external-plugin-protocol.md` — external tool-provider protocol
+- `docs/reference/external-plugin-protocol.md` — external tool-provider protocol
 - `protocol/` — action and result contracts

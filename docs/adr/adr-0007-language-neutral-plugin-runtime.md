@@ -1,6 +1,7 @@
 # ADR-0007: External tool plugins use a language-neutral persistent runtime
 
 **Status:** Accepted
+**Implementation:** Implemented
 **Date:** 2025-09-16
 **Related:** ADR-0001, ADR-0004, ADR-0005
 
@@ -136,7 +137,7 @@ protocol-only stdout. A plugin may implement the protocol directly.
 
 ## References
 
-- `docs/external-plugin-protocol.md` — normative runtime and tool-provider
+- `docs/reference/external-plugin-protocol.md` — normative runtime and tool-provider
   messages
 - `plugins/external/` — host, manifest, schema validation, and adapter
 - `plugins/external/sdk/` — Go and TypeScript serving SDKs

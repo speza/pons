@@ -1,8 +1,9 @@
 # ADR-0008: Long-lived orchestration is a pluggable runtime above the pons kernel
 
-**Status:** Accepted; state, storage, and coordination refined by ADR-0010 through ADR-0012
+**Status:** Accepted; state, storage, and coordination refined by ADR-0010 through ADR-0012, persistent agents and tasks proposed by ADR-0016, and trust-domain scope defined by ADR-0017
+**Implementation:** Local runtime implemented; other channel adapters remain proposed
 **Date:** 2026-09-18
-**Related:** ADR-0001, ADR-0007, ADR-0009, ADR-0010, ADR-0011, ADR-0012
+**Related:** ADR-0001, ADR-0007, ADR-0009, ADR-0010, ADR-0011, ADR-0012, ADR-0016, ADR-0017
 
 ## Context
 
@@ -216,6 +217,14 @@ When eventually added, handoff will fork a completed active transcript path
 into a new conversation; it will not roll back or fork real-world tool side
 effects.
 
+ADR-0016 separately proposes a persistent, owner-named agent that starts
+private tasks over durable messages and child conversations. That design extends the durable submission path without
+changing this ADR's finite-core boundary.
+
+ADR-0017 defines one runtime instance as one trusted administrative domain.
+Hosted tenancy belongs in a control plane which provisions and routes isolated
+runtime cells, not in `Core` or the local conversation contract.
+
 ## Alternatives considered
 
 - **Put messaging and scheduling in `Core`:** not selected. This couples the
@@ -250,12 +259,16 @@ effects.
 
 ## References
 
-- `docs/runtime-v1.md` — concrete v1 runtime and HTTP design
-- `docs/adr-0010-runtime-state-and-client-synchronization.md` — transactional
+- `docs/design/runtime.md` — concrete v1 runtime and HTTP design
+- `docs/adr/adr-0010-runtime-state-and-client-synchronization.md` — transactional
   runtime state, snapshots, durable events, and transient streaming
+- `docs/adr/adr-0016-persistent-agents-and-async-messaging.md` — proposed persistent
+  identities, mailboxes, and asynchronous delegation
+- `docs/adr/adr-0017-one-runtime-one-trust-domain.md` — single-domain scope and
+  isolated-cell hosting boundary
 - `core.go` — finite agent loop and core plugin composition
 - `protocol/` — brain/hands wire types
-- `sessions/` — transcript and session storage contract
-- `docs/adr-0001-pluggable-minimal-harness.md` — core architecture
-- `docs/adr-0005-transcript-model-vs-engine.md` — session model and composition
-- `docs/adr-0007-language-neutral-plugin-runtime.md` — external hands plugins
+- `runtime/`, `runtime/sqlite/` — runtime manager, store contract, and SQLite store
+- `docs/adr/adr-0001-pluggable-minimal-harness.md` — core architecture
+- `docs/adr/adr-0011-server-centred-runtime-storage.md` — server-owned runtime storage
+- `docs/adr/adr-0007-language-neutral-plugin-runtime.md` — external hands plugins
