@@ -23,7 +23,10 @@ import (
 // Config describes one tool host. Environment placement and filesystem
 // policy are intentionally owned by the process launcher, not this package.
 type Config struct {
-	Workspace           string
+	Workspace string
+	// ReadWrite lists directories outside the workspace, such as an agent's
+	// memory copy, that file tools may address by absolute path.
+	ReadWrite           []string
 	FSReadBytes         int
 	BashTimeout         int
 	BashMaxLines        int
@@ -49,11 +52,11 @@ func New(cfg Config) (*Host, error) {
 	if cfg.MaxConcurrency < 0 {
 		return nil, errors.New("tool host: max concurrency must be non-negative")
 	}
-	fsTools, err := fs.New(fs.Config{Root: cfg.Workspace, MaxReadBytes: cfg.FSReadBytes})
+	fsTools, err := fs.New(fs.Config{Root: cfg.Workspace, ExtraRoots: cfg.ReadWrite, MaxReadBytes: cfg.FSReadBytes})
 	if err != nil {
 		return nil, err
 	}
-	editTool, err := edit.New(edit.Config{Root: cfg.Workspace})
+	editTool, err := edit.New(edit.Config{Root: cfg.Workspace, ExtraRoots: cfg.ReadWrite})
 	if err != nil {
 		return nil, err
 	}

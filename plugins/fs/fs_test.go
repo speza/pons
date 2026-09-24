@@ -74,7 +74,7 @@ func TestReadRejectsBinary(t *testing.T) {
 
 func TestJailRejectsEscape(t *testing.T) {
 	p := newFS(t, t.TempDir())
-	res, err := p.readFile(context.Background(), Read(filepath.Join(p.root, "..", "etc", "passwd")))
+	res, err := p.readFile(context.Background(), Read(filepath.Join(p.roots[0], "..", "etc", "passwd")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,5 +148,31 @@ func TestWritePreservesMode(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(path); string(got) != "new" {
 		t.Fatalf("write content: %q", got)
+	}
+}
+
+func TestExtraRootsAcceptAbsolutePathsOnly(t *testing.T) {
+	workspace, memory := t.TempDir(), t.TempDir()
+	p, err := New(Config{Root: workspace, ExtraRoots: []string{memory}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := p.writeFile(context.Background(), Write(filepath.Join(memory, "MEMORY.md"), "- note"))
+	if err != nil || !res.OK {
+		t.Fatalf("write to extra root = %+v, %v", res, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(memory, "MEMORY.md")); err != nil || string(data) != "- note" {
+		t.Fatalf("extra root file = %q, %v", data, err)
+	}
+	res, err = p.writeFile(context.Background(), Write("MEMORY.md", "workspace"))
+	if err != nil || !res.OK {
+		t.Fatalf("relative write = %+v, %v", res, err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "MEMORY.md")); err != nil {
+		t.Fatalf("relative path did not stay in the workspace: %v", err)
+	}
+	res, _ = p.writeFile(context.Background(), Write(filepath.Join(filepath.Dir(memory), "outside.md"), "x"))
+	if res.OK {
+		t.Fatal("path beside the extra root was allowed")
 	}
 }

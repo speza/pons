@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 
@@ -31,7 +32,7 @@ func (p Provider) Start(ctx context.Context, spec environment.Spec) (environment
 	if runtime.GOOS != "darwin" {
 		return nil, ErrSeatbeltUnavailable
 	}
-	workspace, command, readOnly, network, err := validateSpec(spec)
+	workspace, command, readOnly, readWrite, network, err := validateSpec(spec)
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +46,7 @@ func (p Provider) Start(ctx context.Context, spec environment.Spec) (environment
 	}
 	cleanup := func() { _ = os.RemoveAll(scratch) }
 
-	profile, err := seatbeltProfile(workspace, scratch, command[0], readOnly, network)
+	profile, err := seatbeltProfile(workspace, scratch, command[0], readOnly, readWrite, network)
 	if err != nil {
 		cleanup()
 		return nil, err
@@ -67,6 +68,9 @@ func (p Provider) Start(ctx context.Context, spec environment.Spec) (environment
 	}
 
 	command = append(command, "--workspace", workspace)
+	for _, path := range readWrite {
+		command = append(command, "--read-write", path)
+	}
 	args := []string{"-p", profile, "--"}
 	args = append(args, command...)
 	manifest := external.Manifest{
@@ -146,61 +150,79 @@ func (s *seatbeltSession) Close() error {
 	return s.closeErr
 }
 
-func validateSpec(spec environment.Spec) (string, []string, []string, environment.NetworkPolicy, error) {
+func validateSpec(spec environment.Spec) (string, []string, []string, []string, environment.NetworkPolicy, error) {
 	if spec.WorkspacePath == "" {
-		return "", nil, nil, "", errors.New("environment: workspace is required")
+		return "", nil, nil, nil, "", errors.New("environment: workspace is required")
 	}
 	workspace, err := filepath.Abs(spec.WorkspacePath)
 	if err != nil {
-		return "", nil, nil, "", fmt.Errorf("environment: workspace: %w", err)
+		return "", nil, nil, nil, "", fmt.Errorf("environment: workspace: %w", err)
 	}
 	workspace, err = filepath.EvalSymlinks(workspace)
 	if err != nil {
-		return "", nil, nil, "", fmt.Errorf("environment: workspace: %w", err)
+		return "", nil, nil, nil, "", fmt.Errorf("environment: workspace: %w", err)
 	}
 	info, err := os.Stat(workspace)
 	if err != nil || !info.IsDir() {
 		if err != nil {
-			return "", nil, nil, "", fmt.Errorf("environment: workspace: %w", err)
+			return "", nil, nil, nil, "", fmt.Errorf("environment: workspace: %w", err)
 		}
-		return "", nil, nil, "", errors.New("environment: workspace must be a directory")
+		return "", nil, nil, nil, "", errors.New("environment: workspace must be a directory")
 	}
 
 	if len(spec.Command) == 0 || spec.Command[0] == "" {
-		return "", nil, nil, "", errors.New("environment: hands command is required")
+		return "", nil, nil, nil, "", errors.New("environment: hands command is required")
 	}
 	command := append([]string(nil), spec.Command...)
 	if !filepath.IsAbs(command[0]) {
-		return "", nil, nil, "", errors.New("environment: hands command must be absolute")
+		return "", nil, nil, nil, "", errors.New("environment: hands command must be absolute")
 	}
 	command[0], err = filepath.EvalSymlinks(command[0])
 	if err != nil {
-		return "", nil, nil, "", fmt.Errorf("environment: hands command: %w", err)
+		return "", nil, nil, nil, "", fmt.Errorf("environment: hands command: %w", err)
 	}
 	info, err = os.Stat(command[0])
 	if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
 		if err != nil {
-			return "", nil, nil, "", fmt.Errorf("environment: hands command: %w", err)
+			return "", nil, nil, nil, "", fmt.Errorf("environment: hands command: %w", err)
 		}
-		return "", nil, nil, "", errors.New("environment: hands command is not executable")
+		return "", nil, nil, nil, "", errors.New("environment: hands command is not executable")
 	}
 
 	readOnly := make([]string, 0, len(spec.ReadOnly))
 	seen := make(map[string]bool, len(spec.ReadOnly))
 	for _, path := range spec.ReadOnly {
 		if !filepath.IsAbs(path) {
-			return "", nil, nil, "", errors.New("environment: read-only path must be absolute")
+			return "", nil, nil, nil, "", errors.New("environment: read-only path must be absolute")
 		}
 		path, err = filepath.EvalSymlinks(path)
 		if err != nil {
-			return "", nil, nil, "", fmt.Errorf("environment: read-only path: %w", err)
+			return "", nil, nil, nil, "", fmt.Errorf("environment: read-only path: %w", err)
 		}
 		if _, err := os.Stat(path); err != nil {
-			return "", nil, nil, "", fmt.Errorf("environment: read-only path: %w", err)
+			return "", nil, nil, nil, "", fmt.Errorf("environment: read-only path: %w", err)
 		}
 		if !seen[path] {
 			seen[path] = true
 			readOnly = append(readOnly, path)
+		}
+	}
+
+	readWrite := make([]string, 0, len(spec.ReadWrite))
+	for _, path := range spec.ReadWrite {
+		if !filepath.IsAbs(path) {
+			return "", nil, nil, nil, "", errors.New("environment: read-write path must be absolute")
+		}
+		path, err = filepath.EvalSymlinks(path)
+		if err != nil {
+			return "", nil, nil, nil, "", fmt.Errorf("environment: read-write path: %w", err)
+		}
+		if info, err := os.Stat(path); err != nil || !info.IsDir() {
+			return "", nil, nil, nil, "", fmt.Errorf("environment: read-write path %q must be a directory", path)
+		}
+		if !seen[path] {
+			seen[path] = true
+			readWrite = append(readWrite, path)
 		}
 	}
 
@@ -209,9 +231,9 @@ func validateSpec(spec environment.Spec) (string, []string, []string, environmen
 		network = environment.NetworkDisabled
 	}
 	if network != environment.NetworkDisabled && network != environment.NetworkEnabled {
-		return "", nil, nil, "", fmt.Errorf("environment: invalid network policy %q", network)
+		return "", nil, nil, nil, "", fmt.Errorf("environment: invalid network policy %q", network)
 	}
-	return workspace, command, readOnly, network, nil
+	return workspace, command, readOnly, readWrite, network, nil
 }
 
 func cleanEnvironment(explicit []string, scratch string) ([]string, error) {
@@ -240,7 +262,7 @@ func cleanEnvironment(explicit []string, scratch string) ([]string, error) {
 	return out, nil
 }
 
-func seatbeltProfile(workspace, scratch, handsCommand string, readOnly []string, network environment.NetworkPolicy) (string, error) {
+func seatbeltProfile(workspace, scratch, handsCommand string, readOnly, readWrite []string, network environment.NetworkPolicy) (string, error) {
 	quoted := make([]string, 3)
 	for i, value := range []string{workspace, scratch, handsCommand} {
 		var err error
@@ -262,7 +284,7 @@ func seatbeltProfile(workspace, scratch, handsCommand string, readOnly []string,
 		"  (require-not (vnode-type REGULAR-FILE)))",
 		"(allow file-read-metadata file-test-existence",
 	}
-	ancestorPaths := append([]string{workspace, scratch, handsCommand}, readOnly...)
+	ancestorPaths := slices.Concat([]string{workspace, scratch, handsCommand}, readOnly, readWrite)
 	for _, ancestor := range pathAncestors(ancestorPaths...) {
 		literal, err := seatbeltString(ancestor)
 		if err != nil {
@@ -285,6 +307,13 @@ func seatbeltProfile(workspace, scratch, handsCommand string, readOnly []string,
 		"  (subpath "+quoted[0]+")",
 		"  (subpath "+quoted[1]+"))",
 	)
+	for _, path := range readWrite {
+		literal, err := seatbeltString(path)
+		if err != nil {
+			return "", err
+		}
+		lines = append(lines, "(allow file-read* file-write* (subpath "+literal+"))")
+	}
 	for _, path := range readOnly {
 		literal, err := seatbeltString(path)
 		if err != nil {

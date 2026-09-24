@@ -58,7 +58,7 @@ func Patch(path, patch string) protocol.Action {
 
 // Edit is the edit_file tool plugin.
 type Edit struct {
-	root string // resolved jail root
+	roots []string // resolved jail roots; the first is the workspace
 	// The operation is a read-modify-write. Serialize edits so concurrent
 	// actions cannot lose one another's changes (ADR-0006).
 	mu sync.Mutex
@@ -67,15 +67,18 @@ type Edit struct {
 // Config tunes the plugin.
 type Config struct {
 	Root string // jail root; "" = process cwd
+	// ExtraRoots are further directories absolute paths may address, such
+	// as a host-granted memory directory. Relative paths stay under Root.
+	ExtraRoots []string
 }
 
 // New creates the plugin (installed with pons.Core.Use).
 func New(cfg Config) (*Edit, error) {
-	root, err := jail.Resolve(cfg.Root)
+	roots, err := jail.ResolveRoots(cfg.Root, cfg.ExtraRoots)
 	if err != nil {
 		return nil, fmt.Errorf("edit: %w", err)
 	}
-	return &Edit{root: root}, nil
+	return &Edit{roots: roots}, nil
 }
 
 // Setup registers the edit tool.
@@ -158,7 +161,7 @@ func (p *Edit) apply(ctx context.Context, a protocol.Action) (protocol.ToolResul
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: "invalid arguments: " + err.Error()}, nil
 	}
 
-	path, err := jail.ResolvePath(p.root, pathArg)
+	path, err := jail.ResolvePathWithin(p.roots, pathArg)
 	if err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 	}

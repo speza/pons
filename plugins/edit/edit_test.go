@@ -101,7 +101,7 @@ func TestMultipleBlocksAppliedSequentially(t *testing.T) {
 
 func TestJailRejectsEscape(t *testing.T) {
 	p := newEdit(t, t.TempDir())
-	res, _ := p.apply(context.Background(), Patch(filepath.Join(p.root, "..", "x"), "<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE"))
+	res, _ := p.apply(context.Background(), Patch(filepath.Join(p.roots[0], "..", "x"), "<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE"))
 	if res.OK || !strings.Contains(res.Error, "escapes root") {
 		t.Fatalf("escape: %+v", res)
 	}

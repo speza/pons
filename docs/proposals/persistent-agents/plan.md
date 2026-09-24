@@ -123,26 +123,29 @@ in phase 7.
 Steps:
 
 1. **Memory directory.** Add `agents/<id>/memory/` with `MEMORY.md` and topic
-   files. With one principal, the whole tree is agent-wide (ADR-0019 allows
-   unscoped memory for a single-principal agent).
-2. **Per-run copy.** Give each run a private copy of the memory directory
-   at a recorded base revision, never the canonical directory: a read-write
-   Seatbelt grant of the copy, or its plain path in the unsandboxed
-   composition. Refuse memory with E2B until phase 7. Only the memory copy
-   is granted: `PERSONA.md`, `agent.json`, and `revisions/` stay outside
-   every grant. In the unsandboxed composition unrestricted `bash`
-   can still reach the state directory, so these guarantees hold only under
-   Seatbelt; the unsandboxed setup is for a trusted owner's development.
-3. **Prompt.** Add harness guidance for keeping memory: one topic per file,
-   one line per file in `MEMORY.md`, update rather than duplicate. Hydrate
+   files, maintained by the agent itself like a small wiki. With one
+   principal, the whole tree is agent-wide (ADR-0019 allows unscoped memory
+   for a single-principal agent). The owner can read or edit it, but should
+   never need to.
+2. **Grant.** Grant each run the memory directory itself: a read-write
+   Seatbelt grant, or its plain path in the unsandboxed composition. E2B runs
+   get no memory until phase 7. Only the memory directory is granted:
+   `PERSONA.md`, `agent.json`, and `revisions/` stay outside every grant. In
+   the unsandboxed composition unrestricted `bash` can still reach the state
+   directory, so these guarantees hold only under Seatbelt; the unsandboxed
+   setup is for a trusted owner's development.
+3. **Prompt.** Add harness guidance for keeping memory: update it when the
+   owner states or corrects something worth keeping, one topic per file, one
+   line per file in `MEMORY.md`, update rather than duplicate. Hydrate
    `MEMORY.md` as attributed data within a byte budget, never as
    instructions.
-4. **Commit and history.** After each clean, uncancelled run, compare the
-   copy with its base. If the canonical memory has not moved, publish the
-   copy as a new revision in a `memory` namespace of the checkpoint store and
-   record the run and changed paths; if it has moved, keep the run's version
-   as a retained conflict and notify the next activation. Add
-   `pons memory log|show|restore`.
+4. **No host-side history.** Memory is deliberately plain files with no
+   per-run copies, commits, conflict handling, or revision log: users should
+   not have to manage memory, and models curate their own memory poorly
+   through tools anyway. The agent keeps its file tools so it can apply
+   corrections directly; curation moves to a background memory agent in
+   phase 7. Concurrent runs may both edit memory; with one agent and one
+   active run per conversation, the last write wins.
 5. **Confirmations.** Add a `confirmations` table (ID, kind, exact payload,
    status, requesting run, decided by, timestamps) and a small confirmation
    primitive: pending items appear in the conversation view; the owner
@@ -164,11 +167,7 @@ Steps:
 
 Tests:
 
-- The agent's memory edits persist across conversations and restarts, with
-  one revision per run that changed them.
-- A cancelled or uncleanly stopped run leaves canonical memory unchanged.
-- Two concurrent runs that change memory produce one commit and one retained
-  conflict, never a silent overwrite.
+- The agent's memory edits persist across conversations and restarts.
 - Under Seatbelt, the agent cannot write `PERSONA.md`, `agent.json`, or
   `revisions/`; only an accepted confirmation changes `PERSONA.md`, exactly
   as proposed.
@@ -362,20 +361,19 @@ Steps:
    `principals/<id>/` folders, and mount only the scopes a run is entitled
    to. Agent-wide memory is read-only unless the principal is an agent-wide
    writer.
-2. **Per-scope commits.** Extend phase 2's copy-and-commit to each scope
-   separately, so a conflict in one person's scope does not block another's.
-3. **E2B.** Upload entitled scopes at run start and download them at commit.
-4. **Extraction.** Add the `extract` capture policy: one memory-only
-   activation after each completed lineage, with optional review.
-5. **Consolidation.** Add a periodic memory-only run that merges duplicates,
-   prunes stale entries, and keeps `MEMORY.md` within its budget.
+2. **Concurrent writers.** Decide whether several people's runs writing
+   memory at once need per-scope copies and commits, which phase 2 left out.
+3. **E2B.** Upload entitled scopes at run start and download them afterwards.
+4. **Background memory agent.** On idle conversations, a memory-only
+   activation extracts what is worth keeping, merges duplicates, prunes
+   stale entries, and keeps `MEMORY.md` within its budget, so memory stays
+   useful without the owner or the conversational agent curating it.
 
 Tests:
 
 - One principal's memory never reaches another's run; linked accounts
   share it.
-- A conflict in one person's scope does not block another scope's commit.
-- Consolidation keeps the index within budget without losing referenced
+- The background memory agent keeps the index within budget without losing referenced
   files.
 
 **Done when:** two household members use the agent on Telegram, each is

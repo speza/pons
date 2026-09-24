@@ -1,7 +1,7 @@
 # ADR-0019: Agent memory is a scoped file tree owned by one agent
 
 **Status:** Proposed
-**Implementation:** Not implemented
+**Implementation:** Partial — single-owner memory directory granted directly to local runs, with prompt guidance and hydration (plan phase 2); per-run copies, commits, history, scopes, E2B, and extraction not implemented
 **Date:** 2026-09-24
 **Related:** ADR-0009, ADR-0016, ADR-0017, ADR-0018, ADR-0020, ADR-0021, ADR-0022
 
@@ -168,9 +168,20 @@ The store adds memory scope revisions, per-run base revisions, commit audit
 rows, and review state. Revision content is stored through `CheckpointStore`.
 
 [`docs/proposals/persistent-agents/plan.md`](../proposals/persistent-agents/plan.md) builds this in
-two steps: a single-owner version with local mounts and history in phase 2,
-then principal scopes, per-run copies, E2B, extraction, and consolidation in
-phase 7.
+two steps: a single-owner version with local mounts in phase 2, then principal
+scopes, E2B, and a background memory agent in phase 7.
+
+### Phase 2 simplification
+
+Phase 2 implements sections 1, 2 (one agent-wide scope), and 6's hydration, but
+deliberately not sections 3 to 5. The run is granted the canonical
+`agents/<id>/memory/` directory itself; there are no per-run copies, commits,
+conflict retention, revision log, or management commands. Memory should need
+no attention from its owner, and models curate their own memory poorly through
+tools, so host-side versioning added machinery without making memory better.
+The agent keeps direct file access so it can apply corrections, and curation
+moves to a background memory agent (section 6's extraction and consolidation)
+in phase 7, which revisits sections 3 to 5 for multi-principal writes.
 
 ## Verification requirements
 

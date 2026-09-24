@@ -593,6 +593,9 @@ func validateE2BSpec(spec environment.Spec) (string, []string, environment.Netwo
 	if len(spec.ReadOnly) != 0 {
 		return "", nil, "", nil, errors.New("environment: E2B does not yet support external plugin paths")
 	}
+	if len(spec.ReadWrite) != 0 {
+		return "", nil, "", nil, errors.New("environment: E2B does not yet support read-write host grants")
+	}
 	network := spec.Network
 	if network == "" {
 		network = environment.NetworkDisabled

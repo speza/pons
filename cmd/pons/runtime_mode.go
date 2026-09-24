@@ -148,8 +148,12 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 	logger.Info("agent ready", "agent_id", agent.ID, "agent_name", agent.Name,
 		"agent_revision", agent.Revision(), "agent_dir", agents.Dir(agent.ID))
 
-	runner := &agentRunner{opts: opts, logger: logger}
 	environmentOptions := configuredEnvironments(opts)
+	if slices.Contains(environmentOptions, "none") {
+		logger.Warn("in-process hands are not sandboxed; only seatbelt keeps the agent to its memory directory")
+	}
+
+	runner := &agentRunner{opts: opts, logger: logger, agents: agents}
 	backgroundErrors := make(chan error, 1)
 	manager, err := ponsruntime.New(ponsruntime.Config{
 		Store:              store,
@@ -573,6 +577,8 @@ func resolvePathWithMissingLeaf(path string) (string, error) {
 type agentRunner struct {
 	opts   serverOptions
 	logger *slog.Logger
+	// agents supplies each run's memory directory; nil runs without memory.
+	agents *agentdir.Store
 }
 
 func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (result ponsruntime.RunResult, err error) {
@@ -589,6 +595,21 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	brainConfig, err := r.brainConfig(agent)
 	if err != nil {
 		return result, err
+	}
+	provider, spec, selectedEnvironment, environmentErr := r.executionEnvironment(request.Environment)
+	if environmentErr != nil {
+		return result, environmentErr
+	}
+	// Memory is granted only where hands can reach the host directory; E2B
+	// runs have none until memory can be uploaded and downloaded (phase 7).
+	var memoryRoots []string
+	if r.agents != nil && selectedEnvironment != "e2b" {
+		memory, err := r.agents.Memory(agent.ID, agentdir.DefaultMemoryBudget)
+		if err != nil {
+			return result, err
+		}
+		memoryRoots = []string{memory.Path}
+		brainConfig.Memory = &llm.Memory{Path: memory.Path, Index: memory.Index, Truncated: memory.Truncated}
 	}
 	brain, err := llm.New(brainConfig)
 	if err != nil {
@@ -622,11 +643,11 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}()
 	plugins := make([]pons.Plugin, 0, 4+len(agent.PluginPaths))
 	effectiveSandbox, effectiveNetwork, effectiveEnvironmentID := "none", "host", ""
-	provider, spec, selectedEnvironment, environmentErr := r.executionEnvironment(request.Environment)
-	if environmentErr != nil {
-		return result, environmentErr
-	}
 	if provider != nil {
+		// Only the memory directory is granted; the rest of the agent
+		// directory stays outside every grant. Concat copies so concurrent
+		// runs never share a slice.
+		spec.ReadWrite = slices.Concat(spec.ReadWrite, memoryRoots)
 		spec.WorkspaceID = request.ConversationID
 		spec.WorkspacePath = request.Workspace
 		spec.RunID = request.RunID
@@ -672,11 +693,11 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		}
 		plugins = append(plugins, environment.Proxy(session))
 	} else {
-		fsTools, fsErr := fs.New(fs.Config{Root: request.Workspace, MaxReadBytes: r.opts.FSReadBytes})
+		fsTools, fsErr := fs.New(fs.Config{Root: request.Workspace, ExtraRoots: memoryRoots, MaxReadBytes: r.opts.FSReadBytes})
 		if fsErr != nil {
 			return result, fsErr
 		}
-		editTool, editErr := edit.New(edit.Config{Root: request.Workspace})
+		editTool, editErr := edit.New(edit.Config{Root: request.Workspace, ExtraRoots: memoryRoots})
 		if editErr != nil {
 			return result, editErr
 		}

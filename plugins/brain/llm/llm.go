@@ -127,7 +127,10 @@ type Config struct {
 	BaseURL   string // override the provider endpoint
 	MaxTokens int    // default 4096
 	Persona   string // the agent's identity; empty uses a neutral default
-	Logger    *log.Logger
+	// Memory, when set, adds the harness rules for keeping memory and
+	// hydrates the run's memory index as attributed data.
+	Memory *Memory
+	Logger *log.Logger
 
 	// Compaction: when the conversation (estimate) exceeds CompactChars,
 	// older turns are summarized into one user message, keeping the last
@@ -334,13 +337,13 @@ func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.Ass
 	}
 	if len(b.turns) == 0 {
 		// First turn: the goal as the opening user message.
-		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: userPrompt(obs)}}})
+		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: b.userPrompt(obs)}}})
 	} else if obs.Message != "" && obs.Message != b.seenMessage {
 		// A new instruction arrived (interactive follow-up, resumed run
 		// with a fresh goal): append it with a fresh <env> block. This is
 		// intentionally independent of pending results: an instruction
 		// arriving after an exhausted run must not be discarded.
-		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: userPrompt(obs)}}})
+		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: b.userPrompt(obs)}}})
 	}
 	b.seenMessage = obs.Message
 
@@ -551,8 +554,9 @@ func truncText(s string, n int) string {
 
 // userPrompt renders a new instruction with the environment the brain is
 // working in: the jailed workspace (the model is blind to everything not
-// stated here), the platform, and the date.
-func userPrompt(obs protocol.Observation) string {
+// stated here), the platform, and the date, followed by the memory index when
+// the run has memory.
+func (b *Brain) userPrompt(obs protocol.Observation) string {
 	now := obs.Now
 	if now.IsZero() {
 		now = time.Now()
@@ -567,6 +571,10 @@ func userPrompt(obs protocol.Observation) string {
 	fmt.Fprintf(&sb, "os: %s\n", platform)
 	fmt.Fprintf(&sb, "date: %s\n", now.Format("2006-01-02"))
 	sb.WriteString("</env>\n\n")
+	if b.cfg.Memory != nil {
+		sb.WriteString(b.cfg.Memory.render())
+		sb.WriteString("\n")
+	}
 	sb.WriteString(obs.Message)
 	return sb.String()
 }
@@ -607,7 +615,7 @@ func stringify(in map[string]any) json.RawMessage {
 func (b *Brain) Seed(turns []Turn, message, workspace, platform string) {
 	b.pending = nil
 	b.turns = append(append([]Turn(nil), turns...), Turn{
-		Role: "user", Blocks: []Block{Text{Value: userPrompt(protocol.Observation{
+		Role: "user", Blocks: []Block{Text{Value: b.userPrompt(protocol.Observation{
 			Message: message, Workspace: workspace, Platform: platform, Now: time.Now(),
 		})}},
 	})

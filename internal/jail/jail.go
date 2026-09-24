@@ -27,18 +27,42 @@ func Resolve(root string) (string, error) {
 	return resolved, nil
 }
 
+// ResolveRoots resolves a primary root and any additional roots.
+func ResolveRoots(root string, extra []string) ([]string, error) {
+	roots := make([]string, 0, 1+len(extra))
+	for _, value := range append([]string{root}, extra...) {
+		resolved, err := Resolve(value)
+		if err != nil {
+			return nil, err
+		}
+		roots = append(roots, resolved)
+	}
+	return roots, nil
+}
+
 // ResolvePath makes path absolute relative to root when needed, resolves
 // existing symlinks, and verifies containment. The returned path is the
 // canonical path the caller should use for the operation; checking one path
 // and opening a different spelling would reintroduce symlink surprises.
 func ResolvePath(root, path string) (string, error) {
+	return ResolvePathWithin([]string{root}, path)
+}
+
+// ResolvePathWithin resolves path like ResolvePath, relative to the first
+// root, and accepts it when it stays within any of the (already resolved)
+// roots. Additional roots let a host grant a directory outside the
+// workspace, such as an agent's memory, without widening the workspace.
+func ResolvePathWithin(roots []string, path string) (string, error) {
+	if len(roots) == 0 {
+		return "", fmt.Errorf("jail: no root")
+	}
 	if path == "" {
 		return "", fmt.Errorf("jail: empty path")
 	}
 
 	abs := path
 	if !filepath.IsAbs(abs) {
-		abs = filepath.Join(root, abs)
+		abs = filepath.Join(roots[0], abs)
 	}
 	abs, err := filepath.Abs(abs)
 	if err != nil {
@@ -50,14 +74,16 @@ func ResolvePath(root, path string) (string, error) {
 		return "", fmt.Errorf("jail: cannot resolve path: %w", err)
 	}
 
-	rel, err := filepath.Rel(root, real)
-	if err != nil {
-		return "", err
+	for _, root := range roots {
+		rel, err := filepath.Rel(root, real)
+		if err != nil {
+			continue
+		}
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel) {
+			return real, nil
+		}
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("jail: path %q escapes root %q", path, root)
-	}
-	return real, nil
+	return "", fmt.Errorf("jail: path %q escapes root %q", path, roots[0])
 }
 
 // Check verifies that path stays within the (already resolved) root.

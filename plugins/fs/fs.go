@@ -39,13 +39,16 @@ func List(path string) protocol.Action {
 
 // FS is the filesystem tool plugin.
 type FS struct {
-	root string // resolved jail root
-	cfg  Config
+	roots []string // resolved jail roots; the first is the workspace
+	cfg   Config
 }
 
 // Config tunes the plugin.
 type Config struct {
 	Root string // jail root; "" = process cwd
+	// ExtraRoots are further directories absolute paths may address, such
+	// as a host-granted memory directory. Relative paths stay under Root.
+	ExtraRoots []string
 	// MaxReadBytes caps read_file output so a huge or binary file cannot
 	// flood the model context. 0 = default (256 KiB); negative = unlimited.
 	MaxReadBytes int
@@ -65,11 +68,11 @@ func (p *FS) maxReadBytes() int {
 
 // New creates the plugin (it is installed with pons.Core.Use).
 func New(cfg Config) (*FS, error) {
-	root, err := jail.Resolve(cfg.Root)
+	roots, err := jail.ResolveRoots(cfg.Root, cfg.ExtraRoots)
 	if err != nil {
 		return nil, fmt.Errorf("fs: %w", err)
 	}
-	return &FS{root: root, cfg: cfg}, nil
+	return &FS{roots: roots, cfg: cfg}, nil
 }
 
 // Setup registers the three filesystem tools.
@@ -100,7 +103,7 @@ func (p *FS) Setup(c *pons.Core) error {
 // resolvePath is the jail: it returns the canonical, root-relative path
 // that the operation must use after the containment check.
 func (p *FS) resolvePath(path string) (string, error) {
-	return jail.ResolvePath(p.root, path)
+	return jail.ResolvePathWithin(p.roots, path)
 }
 
 func (p *FS) readFile(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {

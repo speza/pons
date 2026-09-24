@@ -51,7 +51,9 @@ type WorkspacePlan struct {
 // Spec is the explicit policy and launch input for one hands environment.
 // WorkspaceID is the independent logical workspace identity. WorkspacePath is
 // the host-local path used directly by local providers or once as an archive
-// source. Command[0] must be an absolute pons-hands executable path.
+// source. ReadWrite grants further host directories, such as a run's private
+// memory copy; providers that cannot grant them must refuse the spec.
+// Command[0] must be an absolute pons-hands executable path.
 // Environment is a clean, explicit list of KEY=VALUE entries; the parent
 // environment is never inherited.
 type Spec struct {
@@ -60,6 +62,7 @@ type Spec struct {
 	RunID              string
 	Command            []string
 	ReadOnly           []string
+	ReadWrite          []string
 	Network            NetworkPolicy
 	Environment        []string
 	Limits             ResourceLimits
