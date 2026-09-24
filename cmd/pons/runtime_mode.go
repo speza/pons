@@ -29,6 +29,7 @@ import (
 	"github.com/samperrin/pons/plugins/fs"
 	"github.com/samperrin/pons/protocol"
 	ponsruntime "github.com/samperrin/pons/runtime"
+	"github.com/samperrin/pons/runtime/agentdir"
 	"github.com/samperrin/pons/runtime/checkpoint"
 	"github.com/samperrin/pons/runtime/httptransport"
 	runtimesqlite "github.com/samperrin/pons/runtime/sqlite"
@@ -42,6 +43,7 @@ type serverOptions struct {
 	MaxConcurrent           int
 	MaxTurns                int
 	Brain                   llm.Config
+	ProviderSlot            string
 	FSReadBytes             int
 	BashTimeout             int
 	BashMaxLines            int
@@ -135,12 +137,25 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 		}()
 	}
 
+	agents, err := agentdir.Open(opts.StateDir)
+	if err != nil {
+		return err
+	}
+	agent, err := defaultAgent(opts, agents)
+	if err != nil {
+		return err
+	}
+	logger.Info("agent ready", "agent_id", agent.ID, "agent_name", agent.Name,
+		"agent_revision", agent.Revision(), "agent_dir", agents.Dir(agent.ID))
+
 	runner := &agentRunner{opts: opts, logger: logger}
 	environmentOptions := configuredEnvironments(opts)
 	backgroundErrors := make(chan error, 1)
 	manager, err := ponsruntime.New(ponsruntime.Config{
 		Store:              store,
 		Runner:             runner,
+		Agent:              agent,
+		AgentRevisions:     agents,
 		MaxConcurrent:      opts.MaxConcurrent,
 		EnvironmentOptions: environmentOptions,
 		DefaultEnvironment: defaultEnvironment(opts),
@@ -196,8 +211,12 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 
 	defer manager.Close()
 	server := &http.Server{
-		Addr:    opts.Address,
-		Handler: loopbackRequestOnly(httptransport.HandlerWithOptions(manager, httptransport.HandlerOptions{Environments: environmentOptions, DefaultEnvironment: defaultEnvironment(opts)})),
+		Addr: opts.Address,
+		Handler: loopbackRequestOnly(httptransport.HandlerWithOptions(manager, httptransport.HandlerOptions{
+			Agent:              manager.Agent(),
+			Environments:       environmentOptions,
+			DefaultEnvironment: defaultEnvironment(opts),
+		})),
 
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -247,6 +266,89 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 			serveErr = nil
 		}
 		return errors.Join(managerErr, shutdownErr, serveErr)
+	}
+}
+
+// defaultAgent loads the default agent's directory, resolves its settings
+// against the server's provider chain and limits, and records the resulting
+// revision. Empty settings use the server's defaults.
+func defaultAgent(opts serverOptions, agents *agentdir.Store) (ponsruntime.AgentDefinition, error) {
+	settings, persona, err := agents.Load(ponsruntime.DefaultAgentID)
+	if err != nil {
+		return ponsruntime.AgentDefinition{}, err
+	}
+
+	slot := opts.ProviderSlot
+	model := opts.Brain.Model
+	if settings.Provider != "" && settings.Provider != slot {
+		index := fallbackIndex(opts.Brain.Fallbacks, settings.Provider)
+		if index < 0 {
+			return ponsruntime.AgentDefinition{}, fmt.Errorf("agent %s: provider slot %q is not configured",
+				agents.Dir(ponsruntime.DefaultAgentID), settings.Provider)
+		}
+		slot, model = settings.Provider, opts.Brain.Fallbacks[index].Model
+	}
+	if settings.Model != "" {
+		model = settings.Model
+	}
+	maxTurns := opts.MaxTurns
+	if settings.MaxTurns > 0 {
+		maxTurns = settings.MaxTurns
+	}
+
+	agent := ponsruntime.AgentDefinition{
+		ID:           ponsruntime.DefaultAgentID,
+		Name:         settings.Name,
+		Persona:      persona,
+		ProviderSlot: slot,
+		Model:        model,
+		MaxTurns:     maxTurns,
+		PluginPaths:  slices.Clone(opts.PluginPaths),
+	}
+	if err := agents.Record(agent); err != nil {
+		return ponsruntime.AgentDefinition{}, err
+	}
+	return agent, nil
+}
+
+func fallbackIndex(fallbacks []llm.Fallback, id string) int {
+	return slices.IndexFunc(fallbacks, func(fallback llm.Fallback) bool { return fallback.ID == id })
+}
+
+// brainConfig selects the agent revision's provider slot as the primary,
+// keeping the rest of the configured chain as fallbacks in order.
+func (r *agentRunner) brainConfig(agent ponsruntime.AgentDefinition) (llm.Config, error) {
+	config := r.opts.Brain
+	config.Logger = nil
+	if agent.ProviderSlot != r.opts.ProviderSlot {
+		index := fallbackIndex(config.Fallbacks, agent.ProviderSlot)
+		if index < 0 {
+			return llm.Config{}, fmt.Errorf("agent revision uses provider slot %q, which is not configured", agent.ProviderSlot)
+		}
+
+		selected := config.Fallbacks[index]
+		primary := llm.Fallback{
+			ID: r.opts.ProviderSlot, Provider: config.Provider, Model: config.Model,
+			BaseURL: config.BaseURL, APIKey: config.APIKey,
+		}
+		config.Fallbacks = slices.Concat([]llm.Fallback{primary}, config.Fallbacks[:index], config.Fallbacks[index+1:])
+		config.Provider, config.BaseURL, config.APIKey = selected.Provider, selected.BaseURL, selected.APIKey
+	}
+	config.Model = agent.Model
+	config.Persona = personaPrompt(agent)
+	return config, nil
+}
+
+// personaPrompt renders the agent's name and persona instructions as the
+// brain's identity section.
+func personaPrompt(agent ponsruntime.AgentDefinition) string {
+	switch {
+	case agent.Name == "":
+		return agent.Persona
+	case agent.Persona == "":
+		return "Your name is " + agent.Name + "."
+	default:
+		return "Your name is " + agent.Name + ".\n\n" + agent.Persona
 	}
 }
 
@@ -469,14 +571,20 @@ type agentRunner struct {
 }
 
 func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (result ponsruntime.RunResult, err error) {
+	agent := request.Agent
+	if err := agent.Validate(); err != nil {
+		return result, err
+	}
 	if request.GitRepository == "" {
 		if _, err := validateConversationWorkspace(request.Workspace, r.opts.WorkspaceRoot, r.opts.StateDir); err != nil {
 			return result, fmt.Errorf("run host workspace: %w", err)
 		}
 	}
 
-	brainConfig := r.opts.Brain
-	brainConfig.Logger = nil
+	brainConfig, err := r.brainConfig(agent)
+	if err != nil {
+		return result, err
+	}
 	brain, err := llm.New(brainConfig)
 	if err != nil {
 		return result, fmt.Errorf("brain: %w", err)
@@ -489,9 +597,9 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}
 
 	core := pons.New()
-	core.Workspace, core.MaxTurns = request.Workspace, r.opts.MaxTurns
+	core.Workspace, core.MaxTurns = request.Workspace, agent.MaxTurns
 	runLog := r.logger.With("conversation_id", request.ConversationID, "run_id", request.RunID,
-		"workspace_id", request.ConversationID)
+		"workspace_id", request.ConversationID, "agent_id", agent.ID, "agent_revision", agent.Revision())
 	runLog.Info("run started")
 	defer func() {
 		if err != nil {
@@ -501,13 +609,13 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		}
 	}()
 
-	externals := make([]*external.Plugin, 0, len(r.opts.PluginPaths))
+	externals := make([]*external.Plugin, 0, len(agent.PluginPaths))
 	defer func() {
 		for _, plugin := range slices.Backward(externals) {
 			err = errors.Join(err, plugin.Close())
 		}
 	}()
-	plugins := make([]pons.Plugin, 0, 4+len(r.opts.PluginPaths))
+	plugins := make([]pons.Plugin, 0, 4+len(agent.PluginPaths))
 	effectiveSandbox, effectiveNetwork, effectiveEnvironmentID := "none", "host", ""
 	provider, spec, selectedEnvironment, environmentErr := r.executionEnvironment(request.Environment)
 	if environmentErr != nil {
@@ -569,7 +677,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		}
 		plugins = append(plugins, fsTools, editTool,
 			bash.New(bash.Config{Root: request.Workspace, Timeout: r.opts.BashTimeout, MaxLines: r.opts.BashMaxLines, MaxBytes: r.opts.BashMaxBytes}))
-		for _, manifestPath := range r.opts.PluginPaths {
+		for _, manifestPath := range agent.PluginPaths {
 			plugin, pluginErr := external.NewHands(manifestPath, external.HostConfig{
 				Workspace: request.Workspace, Path: r.opts.PluginPath, CallTimeout: 60 * time.Second,
 				Limits: external.Limits{MaxResultBytes: r.opts.PluginMaxResultBytes},
@@ -704,6 +812,11 @@ func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, m
 		return errors.New("runtime client: workspace and Git options apply only when creating a conversation")
 	}
 	client := httptransport.Client{BaseURL: serverURL}
+	runtimeOptions, err := client.RuntimeOptions(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "agent: %s\n", agentLabel(runtimeOptions.Agent))
 	sendCount := 0
 	send := func(text string) error {
 		key := idempotencyKey
@@ -775,6 +888,14 @@ func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, m
 		}
 	}
 	return ctx.Err()
+}
+
+// agentLabel names the agent for the CLI, falling back to its ID.
+func agentLabel(agent ponsruntime.AgentSummary) string {
+	if agent.Name == "" {
+		return agent.ID
+	}
+	return fmt.Sprintf("%s (%s)", agent.Name, agent.ID)
 }
 
 func renderConversationSnapshot(view ponsruntime.ConversationView, debug bool) {

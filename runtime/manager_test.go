@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/samperrin/pons/protocol"
 	ponsruntime "github.com/samperrin/pons/runtime"
+	"github.com/samperrin/pons/runtime/agentdir"
 	runtimesqlite "github.com/samperrin/pons/runtime/sqlite"
 )
 
@@ -40,6 +44,24 @@ const (
 )
 
 var New = ponsruntime.New
+
+var (
+	testAgent    = ponsruntime.AgentDefinition{ID: ponsruntime.DefaultAgentID, Name: "Test", MaxTurns: 3}
+	testRevision = testAgent.Revision()
+)
+
+// agentRevisions is an in-memory AgentRevisions keyed by revision.
+type agentRevisions map[string]ponsruntime.AgentDefinition
+
+func (r agentRevisions) AgentRevision(_ context.Context, agentID, revision string) (ponsruntime.AgentDefinition, error) {
+	definition, ok := r[revision]
+	if !ok || definition.ID != agentID {
+		return ponsruntime.AgentDefinition{}, fmt.Errorf("revision %q not recorded", revision)
+	}
+	return definition, nil
+}
+
+var testRevisions = agentRevisions{testRevision: testAgent}
 
 type Config = ponsruntime.Config
 
@@ -95,7 +117,7 @@ func testManager(t *testing.T, runner Runner) *Manager {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := New(Config{Store: store, Runner: runner, MaxConcurrent: 4})
+	m, err := New(Config{Agent: testAgent, AgentRevisions: testRevisions, Store: store, Runner: runner, MaxConcurrent: 4})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,6 +166,8 @@ func TestManagerPersistsConfiguredConversationEnvironment(t *testing.T) {
 	}
 	defer store.Close()
 	manager, err := New(Config{
+		Agent:              testAgent,
+		AgentRevisions:     testRevisions,
 		Store:              store,
 		Runner:             RunnerFunc(func(context.Context, RunRequest) (RunResult, error) { return RunResult{}, nil }),
 		EnvironmentOptions: []string{"none", "seatbelt", "e2b"},
@@ -228,7 +252,7 @@ func TestManagerDoesNotEagerlyHydrateDormantConversations(t *testing.T) {
 	ctx := context.Background()
 	var first ponsruntime.Conversation
 	for range 50 {
-		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 		if err := base.CreateConversation(ctx, conversation); err != nil {
 			t.Fatal(err)
 		}
@@ -238,7 +262,9 @@ func TestManagerDoesNotEagerlyHydrateDormantConversations(t *testing.T) {
 	}
 	store := &observingStore{Store: base}
 	manager, err := New(Config{
-		Store: store, RepairInterval: time.Hour,
+		Agent:          testAgent,
+		AgentRevisions: testRevisions,
+		Store:          store, RepairInterval: time.Hour,
 		Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
 			return RunResult{}, errors.New("unexpected run")
 		}),
@@ -268,7 +294,9 @@ func TestRepairScanFindsWorkAfterLostWake(t *testing.T) {
 	store := &observingStore{Store: base}
 	ran := make(chan string, 1)
 	manager, err := New(Config{
-		Store: store, RepairInterval: 10 * time.Millisecond,
+		Agent:          testAgent,
+		AgentRevisions: testRevisions,
+		Store:          store, RepairInterval: 10 * time.Millisecond,
 		Runner: RunnerFunc(func(_ context.Context, request RunRequest) (RunResult, error) {
 			ran <- request.Text
 			return RunResult{Answer: "done"}, nil
@@ -285,7 +313,7 @@ func TestRepairScanFindsWorkAfterLostWake(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Write through the store to deliberately bypass Manager.Submit's wake.
-	if _, _, err := base.Accept(context.Background(), conversation.ID, "lost-wake", []TextPart{{Type: "text", Text: "repair me"}}); err != nil {
+	if _, _, err := base.Accept(context.Background(), conversation.ID, "lost-wake", testRevision, []TextPart{{Type: "text", Text: "repair me"}}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -306,18 +334,20 @@ func TestSchedulerBoundsActiveRunGoroutines(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	for i := range 4 {
-		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 		if err := store.CreateConversation(ctx, conversation); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := store.Accept(ctx, conversation.ID, fmt.Sprintf("key-%d", i), []TextPart{{Type: "text", Text: "go"}}); err != nil {
+		if _, _, err := store.Accept(ctx, conversation.ID, fmt.Sprintf("key-%d", i), testRevision, []TextPart{{Type: "text", Text: "go"}}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	started := make(chan struct{}, 4)
 	var active, maximum atomic.Int32
 	manager, err := New(Config{
-		Store: store, MaxConcurrent: 2,
+		Agent:          testAgent,
+		AgentRevisions: testRevisions,
+		Store:          store, MaxConcurrent: 2,
 		Runner: RunnerFunc(func(ctx context.Context, _ RunRequest) (RunResult, error) {
 			current := active.Add(1)
 			defer active.Add(-1)
@@ -364,18 +394,20 @@ func TestWorkspaceExclusionIsEnforcedByRunnableClaim(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()
 	for i := range 2 {
-		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), Workspace: workspace, CreatedAt: time.Now().UTC().Add(time.Duration(i) * time.Nanosecond)}
+		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: workspace, CreatedAt: time.Now().UTC().Add(time.Duration(i) * time.Nanosecond)}
 		if err := store.CreateConversation(ctx, conversation); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := store.Accept(ctx, conversation.ID, fmt.Sprintf("key-%d", i), []TextPart{{Type: "text", Text: "go"}}); err != nil {
+		if _, _, err := store.Accept(ctx, conversation.ID, fmt.Sprintf("key-%d", i), testRevision, []TextPart{{Type: "text", Text: "go"}}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	started := make(chan string, 2)
 	release := make(chan struct{}, 2)
 	manager, err := New(Config{
-		Store: store, MaxConcurrent: 2,
+		Agent:          testAgent,
+		AgentRevisions: testRevisions,
+		Store:          store, MaxConcurrent: 2,
 		Runner: RunnerFunc(func(_ context.Context, request RunRequest) (RunResult, error) {
 			started <- request.ConversationID
 			<-release
@@ -412,11 +444,11 @@ func TestCompetingSQLiteClaimsDoNotDuplicateSubmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), Workspace: workspace, CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: workspace, CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(context.Background(), conversation); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Accept(context.Background(), conversation.ID, "once", []TextPart{{Type: "text", Text: "go"}}); err != nil {
+	if _, _, err := store.Accept(context.Background(), conversation.ID, "once", testRevision, []TextPart{{Type: "text", Text: "go"}}); err != nil {
 		t.Fatal(err)
 	}
 	start := make(chan struct{})
@@ -454,16 +486,18 @@ func TestSubscribeDuringClaimBroadcastDoesNotDuplicateDurableEvents(t *testing.T
 		t.Fatal(err)
 	}
 	defer base.Close()
-	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 	if err := base.CreateConversation(context.Background(), conversation); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := base.Accept(context.Background(), conversation.ID, "key", []TextPart{{Type: "text", Text: "go"}}); err != nil {
+	if _, _, err := base.Accept(context.Background(), conversation.ID, "key", testRevision, []TextPart{{Type: "text", Text: "go"}}); err != nil {
 		t.Fatal(err)
 	}
 	store := &delayedClaimStore{Store: base, claimed: make(chan struct{}), release: make(chan struct{})}
 	manager, err := New(Config{
-		Store: store,
+		Agent:          testAgent,
+		AgentRevisions: testRevisions,
+		Store:          store,
 		Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
 			return RunResult{Answer: "done"}, nil
 		}),
@@ -570,7 +604,9 @@ func TestBackgroundStoreFailureIsReported(t *testing.T) {
 	reported := make(chan error, 1)
 	var runnerCalls atomic.Int32
 	manager, err := New(Config{
-		Store: claimErrorStore{Store: base, err: want},
+		Agent:          testAgent,
+		AgentRevisions: testRevisions,
+		Store:          claimErrorStore{Store: base, err: want},
 		Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
 			runnerCalls.Add(1)
 			return RunResult{}, nil
@@ -810,11 +846,11 @@ func TestRestartMarksRequestedToolInterruptedWithoutRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), Workspace: workspace, CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: workspace, CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(context.Background(), conversation); err != nil {
 		t.Fatal(err)
 	}
-	accepted, _, err := store.Accept(context.Background(), conversation.ID, "stable", []TextPart{{Type: "text", Text: "do it"}})
+	accepted, _, err := store.Accept(context.Background(), conversation.ID, "stable", testRevision, []TextPart{{Type: "text", Text: "do it"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -828,7 +864,7 @@ func TestRestartMarksRequestedToolInterruptedWithoutRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	var executions atomic.Int32
-	second, err := New(Config{Store: store, Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
+	second, err := New(Config{Agent: testAgent, AgentRevisions: testRevisions, Store: store, Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
 		executions.Add(1)
 		return RunResult{}, nil
 	})})
@@ -862,15 +898,15 @@ func TestClaimHistoryExcludesLaterQueuedMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
 	}
-	first, _, err := store.Accept(ctx, conversation.ID, "first", []TextPart{{Type: "text", Text: "A"}})
+	first, _, err := store.Accept(ctx, conversation.ID, "first", testRevision, []TextPart{{Type: "text", Text: "A"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, _, err := store.Accept(ctx, conversation.ID, "second", []TextPart{{Type: "text", Text: "B"}})
+	second, _, err := store.Accept(ctx, conversation.ID, "second", testRevision, []TextPart{{Type: "text", Text: "B"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -906,11 +942,11 @@ func TestAssistantToolTurnsRemainOrderedAndComplete(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Accept(ctx, conversation.ID, "one", []TextPart{{Type: "text", Text: "go"}}); err != nil {
+	if _, _, err := store.Accept(ctx, conversation.ID, "one", testRevision, []TextPart{{Type: "text", Text: "go"}}); err != nil {
 		t.Fatal(err)
 	}
 	claim, err := store.ClaimRunnable(ctx)
@@ -965,15 +1001,15 @@ func TestRestartRunsDurablyQueuedSubmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), Workspace: workspace, CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: workspace, CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(context.Background(), conversation); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Accept(context.Background(), conversation.ID, "queued", []TextPart{{Type: "text", Text: "resume me"}}); err != nil {
+	if _, _, err := store.Accept(context.Background(), conversation.ID, "queued", testRevision, []TextPart{{Type: "text", Text: "resume me"}}); err != nil {
 		t.Fatal(err)
 	}
 	ran := make(chan string, 1)
-	second, err := New(Config{Store: store, Runner: RunnerFunc(func(_ context.Context, request RunRequest) (RunResult, error) {
+	second, err := New(Config{Agent: testAgent, AgentRevisions: testRevisions, Store: store, Runner: RunnerFunc(func(_ context.Context, request RunRequest) (RunResult, error) {
 		ran <- request.Text
 		return RunResult{Answer: "resumed"}, nil
 	})})
@@ -990,4 +1026,194 @@ func TestRestartRunsDurablyQueuedSubmission(t *testing.T) {
 		t.Fatal("queued submission did not resume")
 	}
 	waitForEvent(t, second, conversation.ID, EventRunUpdated, 2)
+}
+
+// idleStore accepts work but never claims it, leaving submissions queued.
+type idleStore struct{ ponsruntime.Store }
+
+func (idleStore) ClaimRunnable(context.Context) (*ponsruntime.ClaimedRun, error) { return nil, nil }
+
+func TestQueuedSubmissionKeepsAgentRevisionAcrossPersonaChange(t *testing.T) {
+	ctx := context.Background()
+	stateDir := t.TempDir()
+	store, err := runtimesqlite.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	agents, err := agentdir.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	original := ponsruntime.AgentDefinition{ID: ponsruntime.DefaultAgentID, Name: "Ada", Persona: "Be brief.", MaxTurns: 3}
+	if err := agents.Record(original); err != nil {
+		t.Fatal(err)
+	}
+	first, err := New(Config{Agent: original, AgentRevisions: agents, Store: idleStore{store}, Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
+		t.Error("idle manager ran work")
+		return RunResult{}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := first.CreateConversation(ctx, ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conversation.AgentID != original.ID {
+		t.Fatalf("conversation agent = %q", conversation.AgentID)
+	}
+	if _, err := first.Submit(ctx, conversation.ID, "before", []TextPart{{Type: "text", Text: "queued"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	edited := original
+	edited.Name, edited.Persona = "Grace", "Be thorough."
+	if err := agents.Record(edited); err != nil {
+		t.Fatal(err)
+	}
+	ran := make(chan RunRequest, 2)
+	second, err := New(Config{Agent: edited, AgentRevisions: agents, Store: store, Runner: RunnerFunc(func(_ context.Context, request RunRequest) (RunResult, error) {
+		ran <- request
+		return RunResult{Answer: "done"}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+
+	queued := receiveRequest(t, ran)
+	if queued.Text != "queued" || queued.Agent.Name != "Ada" || queued.Agent.Persona != "Be brief." || queued.Agent.Revision() != original.Revision() {
+		t.Fatalf("queued submission ran under %+v", queued.Agent)
+	}
+	waitForEvent(t, second, conversation.ID, EventRunUpdated, 2)
+	if _, err := second.Submit(ctx, conversation.ID, "after", []TextPart{{Type: "text", Text: "new"}}); err != nil {
+		t.Fatal(err)
+	}
+	fresh := receiveRequest(t, ran)
+	if fresh.Text != "new" || fresh.Agent.Revision() != edited.Revision() {
+		t.Fatalf("new submission ran under %+v", fresh.Agent)
+	}
+	runs := waitForEvent(t, second, conversation.ID, EventRunUpdated, 4)
+
+	var revisions []string
+	for _, event := range runs {
+		if event.Type == EventRunUpdated {
+			revisions = append(revisions, event.Run.AgentRevision)
+		}
+	}
+	want := []string{original.Revision(), original.Revision(), edited.Revision(), edited.Revision()}
+	if !slices.Equal(revisions, want) {
+		t.Fatalf("run revisions = %v, want %v", revisions, want)
+	}
+	view, err := second.View(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Submissions) != 2 ||
+		view.Submissions[0].AgentRevision != original.Revision() ||
+		view.Submissions[1].AgentRevision != edited.Revision() {
+		t.Fatalf("submission revisions = %+v", view.Submissions)
+	}
+	if view.Agent != (ponsruntime.AgentSummary{ID: "default", Name: "Grace"}) || second.Agent() != view.Agent {
+		t.Fatalf("view agent = %+v, manager agent = %+v", view.Agent, second.Agent())
+	}
+}
+
+func TestUnresolvedAgentRevisionFailsClosed(t *testing.T) {
+	stateDir := t.TempDir()
+	store, err := runtimesqlite.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents, err := agentdir.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agents.Record(testAgent); err != nil {
+		t.Fatal(err)
+	}
+	var runs atomic.Int32
+	manager, err := New(Config{Agent: testAgent, AgentRevisions: agents, Store: idleStore{store}, Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
+		return RunResult{}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Submit(context.Background(), conversation.ID, "key", []TextPart{{Type: "text", Text: "go"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The queued submission's snapshot disappears; the next server's current
+	// definition differs, so nothing may fall back to it.
+	revisions := filepath.Join(agents.Dir(testAgent.ID), "revisions")
+	if err := os.RemoveAll(revisions); err != nil {
+		t.Fatal(err)
+	}
+	current := testAgent
+	current.Persona = "Different authority."
+	if err := agents.Record(current); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := New(Config{Agent: current, AgentRevisions: agents, Store: store, Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
+		runs.Add(1)
+		return RunResult{Answer: "should not run"}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = restarted.Close(); _ = store.Close() })
+
+	events := waitForEvent(t, restarted, conversation.ID, EventRunUpdated, 2)
+	var failed Event
+	for _, event := range events {
+		if event.Type == EventRunUpdated {
+			failed = event
+		}
+	}
+	if failed.Run.Status != RunFailed || !strings.Contains(failed.Run.Error, "unavailable") {
+		t.Fatalf("run = %+v", failed.Run)
+	}
+	if runs.Load() != 0 {
+		t.Fatal("runner executed an unresolved agent revision")
+	}
+}
+
+func TestManagerRequiresAgent(t *testing.T) {
+	store, err := runtimesqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	runner := RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
+		return RunResult{}, nil
+	})
+	if _, err := New(Config{Store: store, Runner: runner}); !errors.Is(err, ponsruntime.ErrInvalidAgent) {
+		t.Fatalf("err = %v, want ErrInvalidAgent", err)
+	}
+	if _, err := New(Config{Agent: testAgent, AgentRevisions: agentRevisions{}, Store: store, Runner: runner}); err == nil {
+		t.Fatal("manager started with an unrecorded current revision")
+	}
+}
+
+func receiveRequest(t *testing.T, requests <-chan RunRequest) RunRequest {
+	t.Helper()
+	select {
+	case request := <-requests:
+		return request
+	case <-time.After(3 * time.Second):
+		t.Fatal("run did not start")
+		return RunRequest{}
+	}
 }

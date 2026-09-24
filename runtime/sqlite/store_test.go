@@ -12,8 +12,13 @@ import (
 	ponsruntime "github.com/samperrin/pons/runtime"
 )
 
+var (
+	testAgent    = ponsruntime.AgentDefinition{ID: ponsruntime.DefaultAgentID, Name: "Test"}
+	testRevision = testAgent.Revision()
+)
+
 func TestOpenRejectsOlderExistingDatabase(t *testing.T) {
-	for _, statement := range []string{"PRAGMA user_version = 0", "PRAGMA user_version = 1", "PRAGMA user_version = 2", "PRAGMA user_version = 3"} {
+	for _, statement := range []string{"PRAGMA user_version = 0", "PRAGMA user_version = 1", "PRAGMA user_version = 2", "PRAGMA user_version = 3", "PRAGMA user_version = 4"} {
 		t.Run(statement, func(t *testing.T) {
 			stateDir := t.TempDir()
 			store, err := Open(stateDir)
@@ -67,14 +72,14 @@ func TestConversationGitSelectionSurvivesClaim(t *testing.T) {
 		{"session-a-again", "https://github.com/acme/a.git", false},
 	} {
 		conversation := ponsruntime.Conversation{
-			ID: selection.id, Workspace: t.TempDir(), GitRepository: selection.repository,
+			ID: selection.id, AgentID: testAgent.ID, Workspace: t.TempDir(), GitRepository: selection.repository,
 			GitRevision: strings.Repeat("a", 40), GitAllRepositories: selection.all,
 			CreatedAt: time.Now().UTC(),
 		}
 		if err := store.CreateConversation(ctx, conversation); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := store.Accept(ctx, selection.id, "first", []ponsruntime.TextPart{{Type: "text", Text: "work"}}); err != nil {
+		if _, _, err := store.Accept(ctx, selection.id, "first", testRevision, []ponsruntime.TextPart{{Type: "text", Text: "work"}}); err != nil {
 			t.Fatal(err)
 		}
 		claim, err := store.ClaimRunnable(ctx)
@@ -103,11 +108,11 @@ func TestIndependentRemoteWorkspacesCanBeClaimedTogether(t *testing.T) {
 	seed := t.TempDir()
 	for _, id := range []string{"repo-a", "repo-b"} {
 		if err := store.CreateConversation(ctx, ponsruntime.Conversation{
-			ID: id, Workspace: seed, WorkspaceLock: id, CreatedAt: time.Now().UTC(),
+			ID: id, AgentID: testAgent.ID, Workspace: seed, WorkspaceLock: id, CreatedAt: time.Now().UTC(),
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := store.Accept(ctx, id, "first", []ponsruntime.TextPart{{Type: "text", Text: "work"}}); err != nil {
+		if _, _, err := store.Accept(ctx, id, "first", testRevision, []ponsruntime.TextPart{{Type: "text", Text: "work"}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -175,11 +180,11 @@ func TestConversationsAreReturnedNewestFirst(t *testing.T) {
 
 	ctx := context.Background()
 	old := ponsruntime.Conversation{
-		ID: "old", Workspace: "/old", Environment: "none",
+		ID: "old", AgentID: testAgent.ID, Workspace: "/old", Environment: "none",
 		CreatedAt: time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC),
 	}
 	newest := ponsruntime.Conversation{
-		ID: "new", Workspace: "/new", Environment: "e2b",
+		ID: "new", AgentID: testAgent.ID, Workspace: "/new", Environment: "e2b",
 		CreatedAt: time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC),
 	}
 	if err := store.CreateConversation(ctx, old); err != nil {
@@ -395,14 +400,14 @@ func TestToolCallIDsAreScopedToTheirRun(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	conversation := ponsruntime.Conversation{
-		ID: "conversation", Workspace: t.TempDir(), CreatedAt: time.Now().UTC(),
+		ID: "conversation", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC(),
 	}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
 	}
 	var runIDs []string
 	for _, key := range []string{"first", "second"} {
-		if _, _, err := store.Accept(ctx, conversation.ID, key, []ponsruntime.TextPart{{Type: "text", Text: key}}); err != nil {
+		if _, _, err := store.Accept(ctx, conversation.ID, key, testRevision, []ponsruntime.TextPart{{Type: "text", Text: key}}); err != nil {
 			t.Fatal(err)
 		}
 		claim, err := store.ClaimRunnable(ctx)
@@ -444,12 +449,12 @@ func TestFailRunAtomicallyInterruptsRequestedTools(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	conversation := ponsruntime.Conversation{
-		ID: "conversation", Workspace: t.TempDir(), CreatedAt: time.Now().UTC(),
+		ID: "conversation", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC(),
 	}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Accept(ctx, conversation.ID, "key", []ponsruntime.TextPart{{Type: "text", Text: "go"}}); err != nil {
+	if _, _, err := store.Accept(ctx, conversation.ID, "key", testRevision, []ponsruntime.TextPart{{Type: "text", Text: "go"}}); err != nil {
 		t.Fatal(err)
 	}
 	claim, err := store.ClaimRunnable(ctx)
@@ -522,5 +527,44 @@ func assertToolStatus(t *testing.T, store *Store, runID, id, want string) {
 	}
 	if got != want {
 		t.Fatalf("tool %s/%s status = %q, want %q", runID, id, got, want)
+	}
+}
+
+func TestAgentRevisionIsRecordedOnSubmissionAndRun(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	conversation := ponsruntime.Conversation{
+		ID: "conversation", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC(),
+	}
+	if err := store.CreateConversation(ctx, conversation); err != nil {
+		t.Fatal(err)
+	}
+	parts := []ponsruntime.TextPart{{Type: "text", Text: "go"}}
+	if _, _, err := store.Accept(ctx, conversation.ID, "empty", "", parts); err == nil {
+		t.Fatal("accepted a submission without an agent revision")
+	}
+	if _, _, err := store.Accept(ctx, conversation.ID, "key", testRevision, parts); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := store.ClaimRunnable(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Run.AgentRevision != testRevision || claim.Conversation.AgentID != testAgent.ID {
+		t.Fatalf("claim run = %+v, conversation = %+v", claim.Run, claim.Conversation)
+	}
+	if _, _, err := store.FinishRun(ctx, claim.Run, "done"); err != nil {
+		t.Fatal(err)
+	}
+	view, err := store.View(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Conversation.AgentID != testAgent.ID || len(view.Submissions) != 1 || view.Submissions[0].AgentRevision != testRevision {
+		t.Fatalf("view = %+v", view)
 	}
 }

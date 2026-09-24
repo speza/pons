@@ -21,7 +21,7 @@ import (
 
 const (
 	runtimeDBName        = "runtime.db"
-	currentSchemaVersion = 4
+	currentSchemaVersion = 5
 )
 
 // Store is the local, exclusive-manager runtime backend. Its transactions
@@ -96,6 +96,7 @@ WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`).Scan(&tableCount); err != ni
 	const schema = `
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL CHECK (agent_id <> ''),
   workspace TEXT NOT NULL,
   workspace_lock TEXT NOT NULL,
   git_repository TEXT NOT NULL DEFAULT '',
@@ -135,6 +136,7 @@ CREATE TABLE IF NOT EXISTS submissions (
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   idempotency_key TEXT NOT NULL,
   message_id TEXT NOT NULL REFERENCES messages(id),
+  agent_revision TEXT NOT NULL CHECK (agent_revision <> ''),
   status TEXT NOT NULL,
   error TEXT NOT NULL DEFAULT '',
   accepted_at INTEGER NOT NULL,
@@ -151,6 +153,7 @@ CREATE TABLE IF NOT EXISTS runs (
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   submission_id TEXT NOT NULL REFERENCES submissions(id),
   inbound_message_id TEXT NOT NULL,
+  agent_revision TEXT NOT NULL CHECK (agent_revision <> ''),
   status TEXT NOT NULL,
   error TEXT NOT NULL DEFAULT '',
   started_at INTEGER NOT NULL,
@@ -438,8 +441,8 @@ func (s *Store) CreateConversation(ctx context.Context, conversation ponsruntime
 		workspaceLock = conversation.Workspace
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO conversations(id, workspace, workspace_lock, git_repository, git_revision, git_all_repositories, environment, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
-		conversation.ID, conversation.Workspace, workspaceLock, conversation.GitRepository, conversation.GitRevision,
+		`INSERT INTO conversations(id, agent_id, workspace, workspace_lock, git_repository, git_revision, git_all_repositories, environment, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		conversation.ID, conversation.AgentID, conversation.Workspace, workspaceLock, conversation.GitRepository, conversation.GitRevision,
 		conversation.GitAllRepositories, conversation.Environment, encodeTime(conversation.CreatedAt))
 
 	if err != nil {
@@ -452,8 +455,8 @@ func (s *Store) Conversation(ctx context.Context, id string) (ponsruntime.Conver
 	var conversation ponsruntime.Conversation
 	var created int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, workspace, workspace_lock, git_repository, git_revision, git_all_repositories, environment, created_at FROM conversations WHERE id = ?`, id,
-	).Scan(&conversation.ID, &conversation.Workspace, &conversation.WorkspaceLock, &conversation.GitRepository, &conversation.GitRevision,
+		`SELECT id, agent_id, workspace, workspace_lock, git_repository, git_revision, git_all_repositories, environment, created_at FROM conversations WHERE id = ?`, id,
+	).Scan(&conversation.ID, &conversation.AgentID, &conversation.Workspace, &conversation.WorkspaceLock, &conversation.GitRepository, &conversation.GitRevision,
 		&conversation.GitAllRepositories, &conversation.Environment, &created)
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -468,7 +471,7 @@ func (s *Store) Conversation(ctx context.Context, id string) (ponsruntime.Conver
 
 func (s *Store) Conversations(ctx context.Context) ([]ponsruntime.Conversation, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, workspace, workspace_lock, git_repository, git_revision, git_all_repositories, environment, created_at
+SELECT id, agent_id, workspace, workspace_lock, git_repository, git_revision, git_all_repositories, environment, created_at
 FROM conversations
 ORDER BY created_at DESC, id DESC`)
 	if err != nil {
@@ -480,7 +483,7 @@ ORDER BY created_at DESC, id DESC`)
 	for rows.Next() {
 		var conversation ponsruntime.Conversation
 		var created int64
-		if err := rows.Scan(&conversation.ID, &conversation.Workspace, &conversation.WorkspaceLock, &conversation.GitRepository, &conversation.GitRevision, &conversation.GitAllRepositories, &conversation.Environment, &created); err != nil {
+		if err := rows.Scan(&conversation.ID, &conversation.AgentID, &conversation.Workspace, &conversation.WorkspaceLock, &conversation.GitRepository, &conversation.GitRevision, &conversation.GitAllRepositories, &conversation.Environment, &created); err != nil {
 			return nil, fmt.Errorf("runtime: list conversations: %w", err)
 		}
 		conversation.CreatedAt = decodeTime(created)
@@ -587,7 +590,11 @@ func (s *Store) AppendEnvironmentProgress(ctx context.Context, run ponsruntime.R
 	return event, nil
 }
 
-func (s *Store) Accept(ctx context.Context, conversationID, key string, parts []ponsruntime.TextPart) (ponsruntime.AcceptedMessage, []ponsruntime.Event, error) {
+func (s *Store) Accept(
+	ctx context.Context,
+	conversationID, key, agentRevision string,
+	parts []ponsruntime.TextPart,
+) (ponsruntime.AcceptedMessage, []ponsruntime.Event, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return ponsruntime.AcceptedMessage{}, nil, err
@@ -623,15 +630,18 @@ func (s *Store) Accept(ctx context.Context, conversationID, key string, parts []
 	}
 
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO submissions(id, conversation_id, idempotency_key, message_id, status, accepted_at)
-VALUES(?, ?, ?, ?, ?, ?)`, id, conversationID, key, message.ID, ponsruntime.RunQueued, encodeTime(now)); err != nil {
+INSERT INTO submissions(id, conversation_id, idempotency_key, message_id, agent_revision, status, accepted_at)
+VALUES(?, ?, ?, ?, ?, ?, ?)`, id, conversationID, key, message.ID, agentRevision, ponsruntime.RunQueued, encodeTime(now)); err != nil {
 		return ponsruntime.AcceptedMessage{}, nil, err
 	}
 	messageEvent, err := updateMessageEventTx(ctx, tx, message)
 	if err != nil {
 		return ponsruntime.AcceptedMessage{}, nil, err
 	}
-	submission := ponsruntime.Submission{ID: id, ConversationID: conversationID, MessageID: message.ID, Status: ponsruntime.RunQueued, AcceptedAt: now}
+	submission := ponsruntime.Submission{
+		ID: id, ConversationID: conversationID, MessageID: message.ID, AgentRevision: agentRevision,
+		Status: ponsruntime.RunQueued, AcceptedAt: now,
+	}
 	submissionEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
 		Type: ponsruntime.EventSubmissionUpdated, ConversationID: conversationID,
 		InboundMessageID: id, Submission: &submission,
@@ -649,8 +659,8 @@ func conversationTx(ctx context.Context, tx *sql.Tx, id string) (ponsruntime.Con
 	var conversation ponsruntime.Conversation
 	var created int64
 	err := tx.QueryRowContext(ctx,
-		`SELECT id, workspace, workspace_lock, git_repository, git_revision, git_all_repositories, environment, created_at FROM conversations WHERE id = ?`, id,
-	).Scan(&conversation.ID, &conversation.Workspace, &conversation.WorkspaceLock, &conversation.GitRepository, &conversation.GitRevision,
+		`SELECT id, agent_id, workspace, workspace_lock, git_repository, git_revision, git_all_repositories, environment, created_at FROM conversations WHERE id = ?`, id,
+	).Scan(&conversation.ID, &conversation.AgentID, &conversation.Workspace, &conversation.WorkspaceLock, &conversation.GitRepository, &conversation.GitRevision,
 		&conversation.GitAllRepositories, &conversation.Environment, &created)
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -673,12 +683,12 @@ func (s *Store) ClaimRunnable(ctx context.Context) (*ponsruntime.ClaimedRun, err
 		return nil, err
 	}
 	defer tx.Rollback()
-	var id, conversationID, key, workspace, workspaceLock, gitRepository, gitRevision, environment string
+	var id, conversationID, key, agentRevision, agentID, workspace, workspaceLock, gitRepository, gitRevision, environment string
 	var gitAllRepositories bool
 	var accepted, conversationCreated int64
 	err = tx.QueryRowContext(ctx, `
-SELECT queued.id, queued.conversation_id, queued.idempotency_key, queued.accepted_at,
-       conversation.workspace, conversation.workspace_lock, conversation.git_repository, conversation.git_revision,
+SELECT queued.id, queued.conversation_id, queued.idempotency_key, queued.agent_revision, queued.accepted_at,
+       conversation.agent_id, conversation.workspace, conversation.workspace_lock, conversation.git_repository, conversation.git_revision,
        conversation.git_all_repositories, conversation.environment, conversation.created_at
 
 FROM submissions AS queued
@@ -696,7 +706,7 @@ WHERE queued.status = ?
   )
 ORDER BY queued.accepted_at, queued.id
 LIMIT 1`, ponsruntime.RunQueued, ponsruntime.RunRunning, ponsruntime.RunRunning,
-	).Scan(&id, &conversationID, &key, &accepted, &workspace, &workspaceLock, &gitRepository, &gitRevision,
+	).Scan(&id, &conversationID, &key, &agentRevision, &accepted, &agentID, &workspace, &workspaceLock, &gitRepository, &gitRevision,
 		&gitAllRepositories, &environment, &conversationCreated)
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -710,13 +720,12 @@ LIMIT 1`, ponsruntime.RunQueued, ponsruntime.RunRunning, ponsruntime.RunRunning,
 	if err != nil {
 		return nil, err
 	}
-
 	acceptedAt := decodeTime(accepted)
 	createdAt := decodeTime(conversationCreated)
 	now := canonicalTime(time.Now())
 	run := ponsruntime.Run{
 		ID: newID(), ConversationID: conversationID, InboundMessageID: id,
-		Status: ponsruntime.RunRunning, StartedAt: now,
+		AgentRevision: agentRevision, Status: ponsruntime.RunRunning, StartedAt: now,
 	}
 
 	result, err := tx.ExecContext(ctx, `UPDATE submissions SET status = ? WHERE id = ? AND status = ?`, ponsruntime.RunRunning, id, ponsruntime.RunQueued)
@@ -732,12 +741,15 @@ LIMIT 1`, ponsruntime.RunQueued, ponsruntime.RunRunning, ponsruntime.RunRunning,
 	}
 
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO runs(id, conversation_id, submission_id, inbound_message_id, status, started_at)
-VALUES(?, ?, ?, ?, ?, ?)`, run.ID, conversationID, id, id, run.Status, encodeTime(now)); err != nil {
+INSERT INTO runs(id, conversation_id, submission_id, inbound_message_id, agent_revision, status, started_at)
+VALUES(?, ?, ?, ?, ?, ?, ?)`, run.ID, conversationID, id, id, agentRevision, run.Status, encodeTime(now)); err != nil {
 		return nil, err
 	}
 
-	submission := ponsruntime.Submission{ID: id, ConversationID: conversationID, MessageID: id, Status: ponsruntime.RunRunning, AcceptedAt: acceptedAt}
+	submission := ponsruntime.Submission{
+		ID: id, ConversationID: conversationID, MessageID: id, AgentRevision: agentRevision,
+		Status: ponsruntime.RunRunning, AcceptedAt: acceptedAt,
+	}
 	subEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
 		Type: ponsruntime.EventSubmissionUpdated, ConversationID: conversationID, RunID: run.ID,
 		InboundMessageID: id, Submission: &submission,
@@ -762,7 +774,7 @@ VALUES(?, ?, ?, ?, ?, ?)`, run.ID, conversationID, id, id, run.Status, encodeTim
 	}
 	return &ponsruntime.ClaimedRun{
 		Conversation: ponsruntime.Conversation{
-			ID: conversationID, Workspace: workspace, WorkspaceLock: workspaceLock, GitRepository: gitRepository,
+			ID: conversationID, AgentID: agentID, Workspace: workspace, WorkspaceLock: workspaceLock, GitRepository: gitRepository,
 			GitRevision: gitRevision, GitAllRepositories: gitAllRepositories, Environment: environment, CreatedAt: createdAt,
 		},
 		Message: ponsruntime.InboundMessage{ID: id, IdempotencyKey: key, Parts: parts, AcceptedAt: acceptedAt},
@@ -1032,11 +1044,17 @@ func (s *Store) FinishRun(ctx context.Context, run ponsruntime.Run, answer strin
 	completed := run
 	completed.Status, completed.CompletedAt = ponsruntime.RunCompleted, &now
 	var accepted int64
-	if err := tx.QueryRowContext(ctx, `SELECT accepted_at FROM submissions WHERE id = ?`, run.InboundMessageID).Scan(&accepted); err != nil {
+	var agentRevision string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT accepted_at, agent_revision FROM submissions WHERE id = ?`, run.InboundMessageID,
+	).Scan(&accepted, &agentRevision); err != nil {
 		return ponsruntime.Message{}, nil, err
 	}
 	acceptedAt := decodeTime(accepted)
-	submission := ponsruntime.Submission{ID: run.InboundMessageID, ConversationID: run.ConversationID, MessageID: run.InboundMessageID, Status: ponsruntime.RunCompleted, AcceptedAt: acceptedAt}
+	submission := ponsruntime.Submission{
+		ID: run.InboundMessageID, ConversationID: run.ConversationID, MessageID: run.InboundMessageID,
+		AgentRevision: agentRevision, Status: ponsruntime.RunCompleted, AcceptedAt: acceptedAt,
+	}
 	messageEvent, err := updateMessageEventTx(ctx, tx, message)
 	if err != nil {
 		return ponsruntime.Message{}, nil, err
@@ -1081,11 +1099,17 @@ func (s *Store) FailRun(ctx context.Context, run ponsruntime.Run, message string
 	failed := run
 	failed.Status, failed.Error, failed.CompletedAt = ponsruntime.RunFailed, message, &now
 	var accepted int64
-	if err := tx.QueryRowContext(ctx, `SELECT accepted_at FROM submissions WHERE id = ?`, run.InboundMessageID).Scan(&accepted); err != nil {
+	var agentRevision string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT accepted_at, agent_revision FROM submissions WHERE id = ?`, run.InboundMessageID,
+	).Scan(&accepted, &agentRevision); err != nil {
 		return nil, err
 	}
 	acceptedAt := decodeTime(accepted)
-	submission := ponsruntime.Submission{ID: run.InboundMessageID, ConversationID: run.ConversationID, MessageID: run.InboundMessageID, Status: ponsruntime.RunFailed, Error: message, AcceptedAt: acceptedAt}
+	submission := ponsruntime.Submission{
+		ID: run.InboundMessageID, ConversationID: run.ConversationID, MessageID: run.InboundMessageID,
+		AgentRevision: agentRevision, Status: ponsruntime.RunFailed, Error: message, AcceptedAt: acceptedAt,
+	}
 	runEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
 		Type: ponsruntime.EventRunUpdated, ConversationID: run.ConversationID, RunID: run.ID,
 		InboundMessageID: run.InboundMessageID, Run: &failed,
@@ -1154,19 +1178,19 @@ WHERE run_id = ? AND status = ? ORDER BY rowid`, run.ID, ponsruntime.ToolRequest
 
 func (s *Store) RecoverRunning(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, conversation_id, inbound_message_id, started_at FROM runs
+SELECT id, conversation_id, inbound_message_id, agent_revision, started_at FROM runs
 WHERE status = ? ORDER BY started_at`, ponsruntime.RunRunning)
 	if err != nil {
 		return err
 	}
 	type running struct {
-		id, conversation, inbound string
-		started                   int64
+		id, conversation, inbound, revision string
+		started                             int64
 	}
 	var values []running
 	for rows.Next() {
 		var value running
-		if err := rows.Scan(&value.id, &value.conversation, &value.inbound, &value.started); err != nil {
+		if err := rows.Scan(&value.id, &value.conversation, &value.inbound, &value.revision, &value.started); err != nil {
 			rows.Close()
 			return err
 		}
@@ -1177,7 +1201,10 @@ WHERE status = ? ORDER BY started_at`, ponsruntime.RunRunning)
 	}
 	for _, value := range values {
 		started := decodeTime(value.started)
-		run := ponsruntime.Run{ID: value.id, ConversationID: value.conversation, InboundMessageID: value.inbound, Status: ponsruntime.RunRunning, StartedAt: started}
+		run := ponsruntime.Run{
+			ID: value.id, ConversationID: value.conversation, InboundMessageID: value.inbound,
+			AgentRevision: value.revision, Status: ponsruntime.RunRunning, StartedAt: started,
+		}
 		if _, err := s.FailRun(ctx, run, "execution was interrupted; outcome unknown"); err != nil {
 			return err
 		}
@@ -1279,7 +1306,7 @@ SELECT payload FROM events WHERE conversation_id = ? AND type = ? ORDER BY curso
 
 func loadSubmissionsTx(ctx context.Context, tx *sql.Tx, conversationID string) ([]ponsruntime.Submission, error) {
 	rows, err := tx.QueryContext(ctx, `
-SELECT id, message_id, status, error, accepted_at
+SELECT id, message_id, agent_revision, status, error, accepted_at
 FROM submissions WHERE conversation_id = ? ORDER BY accepted_at, rowid`, conversationID)
 	if err != nil {
 		return nil, err
@@ -1289,7 +1316,7 @@ FROM submissions WHERE conversation_id = ? ORDER BY accepted_at, rowid`, convers
 	for rows.Next() {
 		value := ponsruntime.Submission{ConversationID: conversationID}
 		var accepted int64
-		if err := rows.Scan(&value.ID, &value.MessageID, &value.Status, &value.Error, &accepted); err != nil {
+		if err := rows.Scan(&value.ID, &value.MessageID, &value.AgentRevision, &value.Status, &value.Error, &accepted); err != nil {
 			return nil, err
 		}
 		value.AcceptedAt = decodeTime(accepted)
@@ -1408,9 +1435,9 @@ func loadActiveRunTx(ctx context.Context, tx *sql.Tx, conversationID string) (*p
 	var run ponsruntime.Run
 	var started int64
 	err := tx.QueryRowContext(ctx, `
-SELECT id, inbound_message_id, status, error, started_at
+SELECT id, inbound_message_id, agent_revision, status, error, started_at
 FROM runs WHERE conversation_id = ? AND status = ? ORDER BY started_at DESC LIMIT 1`, conversationID, ponsruntime.RunRunning,
-	).Scan(&run.ID, &run.InboundMessageID, &run.Status, &run.Error, &started)
+	).Scan(&run.ID, &run.InboundMessageID, &run.AgentRevision, &run.Status, &run.Error, &started)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

@@ -29,7 +29,9 @@ type Store interface {
 	CreateConversation(context.Context, Conversation) error
 	Conversation(context.Context, string) (Conversation, error)
 	Conversations(context.Context) ([]Conversation, error)
-	Accept(context.Context, string, string, []TextPart) (AcceptedMessage, []Event, error)
+	// Accept queues a submission under the given revision of the
+	// conversation's agent. The caller guarantees the revision is recorded.
+	Accept(ctx context.Context, conversationID, key, agentRevision string, parts []TextPart) (AcceptedMessage, []Event, error)
 	// ClaimRunnable atomically selects and claims the oldest queued submission
 	// whose conversation and workspace have no active run. It returns nil when
 	// no work is currently eligible. This transition is not, by itself, a

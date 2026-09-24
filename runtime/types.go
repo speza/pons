@@ -82,6 +82,7 @@ type Run struct {
 	ID               string     `json:"id"`
 	ConversationID   string     `json:"conversation_id"`
 	InboundMessageID string     `json:"inbound_message_id"`
+	AgentRevision    string     `json:"agent_revision"`
 	Status           string     `json:"status"`
 	Error            string     `json:"error,omitempty"`
 	StartedAt        time.Time  `json:"started_at"`
@@ -104,6 +105,7 @@ type Submission struct {
 	ID             string    `json:"id"`
 	ConversationID string    `json:"conversation_id"`
 	MessageID      string    `json:"message_id"`
+	AgentRevision  string    `json:"agent_revision"`
 	Status         string    `json:"status"`
 	Error          string    `json:"error,omitempty"`
 	AcceptedAt     time.Time `json:"accepted_at"`
@@ -111,6 +113,7 @@ type Submission struct {
 
 type ConversationView struct {
 	Conversation      Conversation `json:"conversation"`
+	Agent             AgentSummary `json:"agent"`
 	Messages          []Message    `json:"messages"`
 	Submissions       []Submission `json:"submissions,omitempty"`
 	ActiveRun         *Run         `json:"active_run,omitempty"`
@@ -156,6 +159,9 @@ type EnvironmentProgress struct {
 }
 
 type RunRequest struct {
+	// Agent is the definition revision the submission was accepted under. The
+	// runner composes the brain from it rather than from current settings.
+	Agent              AgentDefinition
 	ConversationID     string
 	RunID              string
 	InboundMessageID   string
@@ -200,6 +206,7 @@ func (f RunnerFunc) Run(ctx context.Context, req RunRequest) (RunResult, error) 
 
 type Conversation struct {
 	ID                 string    `json:"conversation_id"`
+	AgentID            string    `json:"agent_id"`
 	Workspace          string    `json:"workspace"`
 	WorkspaceLock      string    `json:"-"`
 	Environment        string    `json:"environment,omitempty"`
