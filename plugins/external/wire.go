@@ -103,7 +103,7 @@ type ExecuteParams struct {
 }
 
 // HookProviderConfiguration names the hook callbacks implemented by a host
-// plugin. Each call receives one event and returns its replacement event.
+// plugin. Each call receives one event and returns a patch to mutable fields.
 type HookProviderConfiguration struct {
 	Hooks []string `json:"hooks"`
 }
@@ -114,7 +114,7 @@ type HookCallParams struct {
 }
 
 type HookCallResult struct {
-	Decision json.RawMessage `json:"decision"`
+	Patch json.RawMessage `json:"patch"`
 }
 
 type HealthResult struct {

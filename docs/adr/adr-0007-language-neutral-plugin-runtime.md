@@ -24,8 +24,7 @@ It advertises typed tools during initialization and implements their execution
 methods. Any language that can speak the protocol can implement the child.
 
 Runtime protocol 1 supports `tool_provider/v1` for hands-side tool execution
-and `hook_provider/v1` for explicitly installed host-side tool-call-start
-hooks. A connection advertises the capability appropriate to its manifest
+and `hook_provider/v1` for explicitly installed host-side Core hooks. A connection advertises the capability appropriate to its manifest
 placement. Brain and session providers remain unsupported.
 
 The independently distributed unit is the plugin. It does not receive a
@@ -135,8 +134,8 @@ protocol-only stdout. A plugin may implement the protocol directly.
 - A subprocess alone does not protect the host from a malicious child;
   deployment isolation remains explicit under ADR-0004.
 - New capabilities require a new host-side contract and adapter rather than
-  adding arbitrary methods at runtime. `hook_provider/v1` currently supports
-  `on_tool_call_start`; other hook events need explicit wire contracts.
+  adding arbitrary methods at runtime. `hook_provider/v1` supports the Core
+  hook set with event-specific patch contracts.
 
 ## References
 

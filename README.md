@@ -375,9 +375,11 @@ registers its tools, hooks, or named capabilities.
 unknown or disabled references fail startup. Set `enabled: false` to retain a
 plugin's settings without activating it. The `external` plugin accepts absolute
 manifest paths. An explicit `-plugin` flag replaces its manifest list. External
-host hooks receive bounded event data, including recent conversation context
-for `on_tool_call_start`, but no Core handle or inherited credentials. Their
-errors request approval; without an approval handler, the action is denied.
+host hooks can subscribe to all Core events. They receive bounded event data,
+including recent conversation context for `on_tool_call_start`, but no Core
+handle or inherited credentials. Tool-start hook failures request approval;
+without an approval handler, the action is denied. Other hook failures follow
+Core's run error handling.
 See [the external policy example](examples/external-policy/README.md) for an
 installable hook provider.
 

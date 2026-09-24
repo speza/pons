@@ -33,20 +33,20 @@ func main() {
 		case external.MethodHook:
 			var params external.HookCallParams
 			if err := json.Unmarshal(request.Params, &params); err != nil || params.Hook != external.HookToolCallStart {
-				result = external.HookCallResult{Decision: json.RawMessage(`{"Action":"ask","ReasonCode":"invalid_hook_request"}`)}
+				result = external.HookCallResult{Patch: json.RawMessage(`{"Decision":{"Action":"ask","ReasonCode":"invalid_hook_request"}}`)}
 				break
 			}
 			var event pons.ToolCallStartEvent
 			if err := json.Unmarshal(params.Event, &event); err != nil {
-				result = external.HookCallResult{Decision: json.RawMessage(`{"Action":"ask","ReasonCode":"invalid_tool_call"}`)}
+				result = external.HookCallResult{Patch: json.RawMessage(`{"Decision":{"Action":"ask","ReasonCode":"invalid_tool_call"}}`)}
 				break
 			}
 			decision := pons.ActionDecision{Action: pons.DispositionAllow}
 			if event.Action.Kind == "bash" || event.Action.Kind == "shell" {
 				decision = pons.ActionDecision{Action: pons.DispositionAsk, ReasonCode: "shell_review"}
 			}
-			encoded, _ := json.Marshal(decision)
-			result = external.HookCallResult{Decision: encoded}
+			patch, _ := json.Marshal(struct{ Decision pons.ActionDecision }{decision})
+			result = external.HookCallResult{Patch: patch}
 		case external.MethodShutdown:
 			_ = encoder.Encode(external.RPCResponse{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(`{}`)})
 			return

@@ -313,19 +313,39 @@ action to the proxy, and the proxy routes it to the child provider.
 ### 8.1 Host hook provider
 
 A host manifest sets `"placement":"host"`. Initialization advertises only
-`hook_provider: [1]`; the plugin must return a `hook_provider/v1` capability
-with `{"hooks":["on_tool_call_start"]}` configuration. Version 1 supports
-this pre-execution hook. Other hook names and mixed hands/host capabilities
-are rejected.
+`hook_provider: [1]`; the plugin returns a `hook_provider/v1` capability with
+a nonempty `hooks` list. Supported names are `on_agent_start`, `on_agent_end`,
+`on_agent_error`, `on_agent_step_start`, `on_assistant_response`,
+`on_agent_step_end`, `on_agent_step_error`, `on_tool_call_start`,
+`on_tool_call_end`, `on_tool_call_error`, `on_tool_call_denied`,
+`on_approval_request`, and `on_approval_resolved`. Duplicate or unknown names
+and mixed hands/host capabilities are rejected. Only advertised hooks are called.
 
-For each pending tool call, the host sends `hooks/call` with a `hook` name and
-the JSON event. The plugin returns `{"decision":{"Action":"ask",
-"ReasonCode":"needs_review"}}`. The decision may allow, ask, deny, or
-replace arguments under Core's normal validation and replay rules. The
-host-owned action ID, user message, and resource projection remain unchanged.
-Failures request approval and therefore deny execution when
-no approval handler is installed. The host enforces its normal deadlines and
-frame/result limits on hook calls.
+The host sends `hooks/call` with the `hook` name and the JSON event. Go event
+field names retain their capitalized form. Error events expose `ErrorMessage`
+as text instead of Go's `Err` interface. The plugin returns
+`{"patch":{...}}`; an observer returns `{"patch":{}}`. Only the fields in
+this table are accepted in a patch:
+
+| Hook | Patch fields |
+| --- | --- |
+| `on_agent_start` | `Message` |
+| `on_agent_end` | `Result` |
+| `on_agent_error`, `on_agent_step_error` | `ErrorMessage` (nonempty) |
+| `on_agent_step_start` | `Observation` (message and history only) |
+| `on_assistant_response` | `Response` |
+| `on_agent_step_end` | none |
+| `on_tool_call_start` | `Decision` |
+| `on_tool_call_end`, `on_tool_call_error`, `on_tool_call_denied` | `Result` |
+| `on_approval_request`, `on_approval_resolved` | `Decision` |
+
+For example, tool preflight can return `{"patch":{"Decision":{"Action":
+"ask","ReasonCode":"needs_review"}}}`. It may allow, ask, deny, or
+replace arguments under Core's normal validation and replay rules. Host-owned
+action identity, workspace, and resource projection cannot be patched. Failed
+tool-start calls request approval and deny execution when no approval handler
+is installed. Other hook failures follow Core's normal error collection and
+run termination behavior. Host deadlines and frame/result limits apply.
 
 ## 9. Security requirements
 
@@ -358,5 +378,5 @@ and protocol write failures. Both SDKs keep application logs off stdout.
 ## 11. Capability scope
 
 Runtime protocol 1 defines no external brain or session-store capability.
-The host hook capability currently exposes `on_tool_call_start`; other hook
-event contracts require their own versioned wire shapes.
+The host hook capability exposes the full typed Core hook set. A future hook
+or a change to these patch contracts requires a new capability version.

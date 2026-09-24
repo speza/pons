@@ -530,7 +530,7 @@ func (h *Host) CallHook(ctx context.Context, name string, event any, result any)
 	if !known {
 		return fmt.Errorf("external: plugin %q does not provide hook %q", h.manifest.Name, name)
 	}
-	encoded, err := json.Marshal(event)
+	encoded, err := json.Marshal(hookWireEvent(event))
 	if err != nil {
 		return fmt.Errorf("external: encode hook event: %w", err)
 	}
@@ -547,11 +547,13 @@ func (h *Host) CallHook(ctx context.Context, name string, event any, result any)
 		return errors.New("external: hook result exceeds limit")
 	}
 	var returned HookCallResult
-	if err := json.Unmarshal(raw, &returned); err != nil || len(returned.Decision) == 0 {
+	if err := json.Unmarshal(raw, &returned); err != nil || len(returned.Patch) == 0 {
 		return errors.New("external: malformed hook result")
 	}
-	if err := json.Unmarshal(returned.Decision, result); err != nil {
-		return fmt.Errorf("external: malformed hook decision: %w", err)
+	decoder := json.NewDecoder(bytes.NewReader(returned.Patch))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(result); err != nil {
+		return fmt.Errorf("external: malformed hook patch: %w", err)
 	}
 	return nil
 }
