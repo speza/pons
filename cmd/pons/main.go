@@ -53,7 +53,7 @@ func main() {
 	message := flag.String("message", "", "task to submit to the runtime")
 	asAuth := flag.String("as", "", "codex login: store credentials under this auth id (default: codex)")
 	login := flag.Bool("login", false, "codex only: authenticate with ChatGPT (browser flow), save credentials, and exit")
-	maxSteps := flag.Int("max-steps", 12, "loop budget")
+	maxTurns := flag.Int("max-turns", 12, "loop budget")
 	// Tool output caps: everything the model can be handed back is bounded,
 	// and every bound is tunable from the composition.
 	fsReadBytes := flag.Int("fs-read-bytes", 0, "read_file byte cap; 0 = 256KiB default, negative = unlimited")
@@ -192,7 +192,7 @@ func main() {
 		}
 	}
 
-	applyInt("max-steps", maxSteps, cfg.MaxSteps)
+	applyInt("max-turns", maxTurns, cfg.MaxTurns)
 	applyInt("compact-chars", compactChars, cfg.CompactChars)
 	applyInt("fs-read-bytes", fsReadBytes, cfg.FsReadBytes)
 	applyInt("bash-timeout", bashTimeout, cfg.BashTimeout)

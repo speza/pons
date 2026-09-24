@@ -126,7 +126,7 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 	execution := &recordingEnvironment{specs: make(chan environment.Spec, 2)}
 	var debugLog bytes.Buffer
 	runner := &agentRunner{opts: serverOptions{
-		MaxSteps:    3,
+		MaxTurns:    3,
 		Debug:       true,
 		Sandbox:     "e2b",
 		Environment: execution,
@@ -286,7 +286,7 @@ func TestServerRequiresSandbox(t *testing.T) {
 func TestDebugConfigurationIncludesSandboxPolicy(t *testing.T) {
 	var output bytes.Buffer
 	logDebugConfiguration(newServerLogger(&output, true), serverOptions{
-		Debug: true, Sandbox: "seatbelt", WorkspaceRoot: "/workspace", MaxSteps: 12, MaxConcurrent: 4,
+		Debug: true, Sandbox: "seatbelt", WorkspaceRoot: "/workspace", MaxTurns: 12, MaxConcurrent: 4,
 		Brain:       llm.Config{Provider: "codex", Model: "gpt-5.6-luna"},
 		Environment: &recordingEnvironment{},
 		EnvironmentSpec: environment.Spec{

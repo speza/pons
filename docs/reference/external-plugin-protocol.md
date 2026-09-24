@@ -315,8 +315,8 @@ action to the proxy, and the proxy routes it to the child provider.
 A host manifest sets `"placement":"host"`. Initialization advertises only
 `hook_provider: [1]`; the plugin returns a `hook_provider/v1` capability with
 a nonempty `hooks` list. Supported names are `on_agent_start`, `on_agent_end`,
-`on_agent_error`, `on_agent_step_start`, `on_assistant_response`,
-`on_agent_step_end`, `on_agent_step_error`, `on_tool_call_start`,
+`on_agent_error`, `on_agent_turn_start`, `on_assistant_response`,
+`on_agent_turn_end`, `on_agent_turn_error`, `on_tool_call_start`,
 `on_tool_call_end`, `on_tool_call_error`, `on_tool_call_denied`,
 `on_approval_request`, and `on_approval_resolved`. Duplicate or unknown names
 and mixed hands/host capabilities are rejected. Only advertised hooks are called.
@@ -331,10 +331,10 @@ this table are accepted in a patch:
 | --- | --- |
 | `on_agent_start` | `Message` |
 | `on_agent_end` | `Result` |
-| `on_agent_error`, `on_agent_step_error` | `ErrorMessage` (nonempty) |
-| `on_agent_step_start` | `Observation` (message and history only) |
+| `on_agent_error`, `on_agent_turn_error` | `ErrorMessage` (nonempty) |
+| `on_agent_turn_start` | `Observation` (message and history only) |
 | `on_assistant_response` | `Response` |
-| `on_agent_step_end` | none |
+| `on_agent_turn_end` | none |
 | `on_tool_call_start` | `Decision` |
 | `on_tool_call_end`, `on_tool_call_error`, `on_tool_call_denied` | `Result` |
 | `on_approval_request`, `on_approval_resolved` | `Decision` |

@@ -65,7 +65,7 @@ type settings struct {
 	StateDir             *string              `json:"state_dir,omitempty"`
 	WorkspaceRoot        *string              `json:"workspace_root,omitempty"`
 	Environment          *environmentSettings `json:"environment,omitempty"`
-	MaxSteps             *int                 `json:"max_steps,omitempty"`
+	MaxTurns             *int                 `json:"max_turns,omitempty"`
 	CompactChars         *int                 `json:"compact_chars,omitempty"`
 	FsReadBytes          *int                 `json:"fs_read_bytes,omitempty"`
 	BashTimeout          *int                 `json:"bash_timeout,omitempty"`

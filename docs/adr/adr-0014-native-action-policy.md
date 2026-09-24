@@ -30,7 +30,7 @@ responsibilities under ADR-0004.
 Add a native **tool-call-start hook** to `Core`. The built-in action-policy
 plugin registers it through `Core.AddHooks(Hooks{OnToolCallStart: ...})`; policy
 rules, classification, and user interaction stay in plugins or the composing
-application. The same registration value accepts typed agent, step, tool,
+application. The same registration value accepts typed agent, turn, tool,
 and approval callbacks. Each callback can observe or apply the effects its
 event supports. `OnToolCallStart` is the pre-execution decision point.
 
@@ -60,7 +60,7 @@ type ActionAssessment struct {
 }
 
 type ToolCallStartEvent struct {
-    Step      int
+    Turn      int
     Message   string // current user/task instruction, not the full transcript
     RecentContext []ActionContextItem // bounded, source-labeled history
     Workspace string
@@ -212,7 +212,7 @@ must not replace hard policy.
 
 ### 6. Observability and response
 
-Action policy decisions are observable as loop events and in the step result
+Action policy decisions are observable as loop events and in the turn result
 history. The event API should distinguish an action denied before execution
 from one that reached `EventActionStart`.
 
@@ -275,7 +275,7 @@ tool-call-start hook is for preflight decisions and approval.
   composed.
 - Jev, supported LLMs, and deterministic policies can share one assessment
   contract.
-- Same-step tool execution remains concurrent after action policy completes.
+- Same-turn tool execution remains concurrent after action policy completes.
 - Interactive applications have an exact-action approval/override path.
 - Non-interactive applications must choose an explicit response to `Ask`.
 - `fs` and `edit` can enforce workspace paths in-process; `bash` remains

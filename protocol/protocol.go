@@ -169,23 +169,23 @@ type Interpretation struct {
 	StopReason string `json:"stop_reason,omitempty"`
 }
 
-// Observation is an immutable snapshot handed to the brain each agent step.
+// Observation is an immutable snapshot handed to the brain each agent turn.
 // Message is the user's current instruction — plain text, no framing label;
 // the environment travels separately in the brain's rendering of it.
 type Observation struct {
-	Step      int       `json:"step"`
+	Turn      int       `json:"turn"`
 	Message   string    `json:"message"`
 	Workspace string    `json:"workspace"`
 	Platform  string    `json:"platform,omitempty"` // execution GOOS/GOARCH; empty means host-local
-	History   []StepLog `json:"history,omitempty"`
+	History   []TurnLog `json:"history,omitempty"`
 	Now       time.Time `json:"now"`
 }
 
-// StepLog is one completed round-trip (response + results). Actions contains the
+// TurnLog is one completed round-trip (response + results). Actions contains the
 // complete plan, including a possible finish control action; Results contains
 // only the non-finish actions that hands executed, in matching call order.
-type StepLog struct {
-	Step    int          `json:"step"`
+type TurnLog struct {
+	Turn    int          `json:"turn"`
 	Actions []Action     `json:"actions"`
 	Results []ToolResult `json:"results"`
 }

@@ -10,7 +10,7 @@ import (
 	"github.com/samperrin/pons/protocol"
 )
 
-func TestTypedHooksRunStepAndToolLifecycle(t *testing.T) {
+func TestTypedHooksRunTurnAndToolLifecycle(t *testing.T) {
 	c := New()
 	setBrain(t, c, &continueBrain{fakeBrain{turns: [][]protocol.Action{
 		{{Kind: "fail"}},
@@ -38,19 +38,19 @@ func TestTypedHooksRunStepAndToolLifecycle(t *testing.T) {
 			appendPhase("agent_end")
 			return nil
 		},
-		OnAgentStepStart: func(_ context.Context, e *AgentStepStartEvent) error {
-			if e.Observation.Step == 0 {
-				t.Error("missing step")
+		OnAgentTurnStart: func(_ context.Context, e *AgentTurnStartEvent) error {
+			if e.Observation.Turn == 0 {
+				t.Error("missing turn")
 			}
-			appendPhase("step_start")
+			appendPhase("turn_start")
 			return nil
 		},
 		OnAssistantResponse: func(context.Context, *AssistantResponseEvent) error {
 			appendPhase("response")
 			return nil
 		},
-		OnAgentStepEnd: func(context.Context, *AgentStepEndEvent) error {
-			appendPhase("step_end")
+		OnAgentTurnEnd: func(context.Context, *AgentTurnEndEvent) error {
+			appendPhase("turn_end")
 			return nil
 		},
 		OnToolCallStart: func(_ context.Context, e *ToolCallStartEvent) error {
@@ -74,7 +74,7 @@ func TestTypedHooksRunStepAndToolLifecycle(t *testing.T) {
 	if _, err := c.Run(context.Background(), "task"); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"agent_start", "step_start", "response", "tool_start", "tool_error", "tool_end", "step_end", "step_start", "response", "step_end", "agent_end"}
+	want := []string{"agent_start", "turn_start", "response", "tool_start", "tool_error", "tool_end", "turn_end", "turn_start", "response", "turn_end", "agent_end"}
 	if !reflect.DeepEqual(phases, want) {
 		t.Fatalf("phases = %v, want %v", phases, want)
 	}
@@ -94,7 +94,7 @@ func TestTypedHooksCanChangeInputAndResult(t *testing.T) {
 	}
 	if err := c.AddHooks(Hooks{
 		OnAgentStart: func(_ context.Context, e *AgentStartEvent) error { e.Message = "changed task"; return nil },
-		OnAgentStepStart: func(_ context.Context, e *AgentStepStartEvent) error {
+		OnAgentTurnStart: func(_ context.Context, e *AgentTurnStartEvent) error {
 			if e.Observation.Message != "changed task" {
 				t.Errorf("observation = %q", e.Observation.Message)
 			}
@@ -181,7 +181,7 @@ func TestTypedHooksCanStopRun(t *testing.T) {
 	c := New()
 	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{{Kind: "ping"}}}})
 	if err := c.AddHooks(Hooks{
-		OnAgentStepStart: func(context.Context, *AgentStepStartEvent) error { return errors.New("blocked") },
+		OnAgentTurnStart: func(context.Context, *AgentTurnStartEvent) error { return errors.New("blocked") },
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -336,20 +336,20 @@ func TestApprovalHooksCanResolveAskAndDenyWins(t *testing.T) {
 	}
 }
 
-func TestStepEndHookFailureRunsOnce(t *testing.T) {
+func TestTurnEndHookFailureRunsOnce(t *testing.T) {
 	c := New()
 	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{Finish("done")}}})
 	called := 0
 	if err := c.AddHooks(Hooks{
-		OnAgentStepEnd: func(context.Context, *AgentStepEndEvent) error {
+		OnAgentTurnEnd: func(context.Context, *AgentTurnEndEvent) error {
 			called++
-			return errors.New("step end failed")
+			return errors.New("turn end failed")
 		},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	_, err := c.Run(context.Background(), "task")
-	if err == nil || !strings.Contains(err.Error(), "step end failed") || called != 1 {
+	if err == nil || !strings.Contains(err.Error(), "turn end failed") || called != 1 {
 		t.Fatalf("error = %v, calls = %d", err, called)
 	}
 }
@@ -357,11 +357,11 @@ func TestStepEndHookFailureRunsOnce(t *testing.T) {
 func TestErrorHookFailurePreservesBothErrors(t *testing.T) {
 	c := New()
 	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{Finish("done")}}})
-	original := errors.New("step blocked")
+	original := errors.New("turn blocked")
 	hookFailure := errors.New("error hook failed")
 	if err := c.AddHooks(Hooks{
-		OnAgentStepStart: func(context.Context, *AgentStepStartEvent) error { return original },
-		OnAgentStepError: func(context.Context, *AgentStepErrorEvent) error { return hookFailure },
+		OnAgentTurnStart: func(context.Context, *AgentTurnStartEvent) error { return original },
+		OnAgentTurnError: func(context.Context, *AgentTurnErrorEvent) error { return hookFailure },
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +381,7 @@ func TestHooksCollectErrorsInRegistrationOrder(t *testing.T) {
 		name string
 		err  error
 	}{{"first", first}, {"second", second}} {
-		if err := c.AddHooks(Hooks{OnAgentStepStart: func(context.Context, *AgentStepStartEvent) error {
+		if err := c.AddHooks(Hooks{OnAgentTurnStart: func(context.Context, *AgentTurnStartEvent) error {
 			called = append(called, item.name)
 			return item.err
 		}}); err != nil {

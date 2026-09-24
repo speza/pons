@@ -36,7 +36,7 @@ environments are explicit plugins or injected infrastructure.
 | Package | Role |
 | --- | --- |
 | `protocol/` | Dependency-free `Action`, `ToolResult`, and `Observation` types |
-| `core.go` | Step loop, ports, and plugin registry |
+| `core.go` | Turn loop, ports, and plugin registry |
 | `plugins/brain` | LLM and deterministic scripted brains |
 | `plugins/fs`, `edit`, `bash`, `shell` | Built-in hands-side tools |
 | `plugins/actionpolicy` | Host-side policy rules and classifier composition |
@@ -55,15 +55,15 @@ does not need tool-specific changes.
 result, err := core.Run(ctx, message) // respond -> act -> reflect -> repeat
 ```
 
-Tool calls within a step run concurrently, but results are recorded in the
-planned order. A text response, `finish` action, or `MaxSteps` ends a run;
+Tool calls within a turn run concurrently, but results are recorded in the
+planned order. A text response, `finish` action, or `MaxTurns` ends a run;
 `OnEvent` can stream lifecycle events to a UI or audit consumer. The LLM brain
 can compact old context without changing the canonical runtime history.
 
 Trusted plugins register lifecycle callbacks through `Core.AddHooks(pons.Hooks{...})`.
-The API covers agent start/end/error, step start/end/error, assistant response,
-tool call start/end/error/denial, and approval request/resolution. A step is one
-brain response and its planned tool calls; a run can contain several steps.
+The API covers agent start/end/error, turn start/end/error, assistant response,
+tool call start/end/error/denial, and approval request/resolution. A turn is one
+brain response and its planned tool calls; a run can contain several turns.
 Each hook has its own event type. Hooks can observe, return an error to stop the
 run, or change the values their event permits. `OnToolCallStart` can allow,
 ask, deny, or replace tool arguments by setting the event's `Decision`;

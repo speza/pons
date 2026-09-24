@@ -34,38 +34,38 @@ type AgentEndEvent struct {
 }
 
 type AgentErrorEvent struct {
-	Step int
+	Turn int
 	Err  error // may be replaced with a non-nil error
 }
 
-type AgentStepStartEvent struct {
+type AgentTurnStartEvent struct {
 	Observation protocol.Observation // message and history may be changed
 }
 
 type AssistantResponseEvent struct {
-	Step     int
+	Turn     int
 	Response AssistantResponse
 }
 
-type AgentStepEndEvent struct {
-	Step int
-	Run  RunResult // completed step snapshot
+type AgentTurnEndEvent struct {
+	Turn int
+	Run  RunResult // completed turn snapshot
 }
 
-type AgentStepErrorEvent struct {
-	Step int
+type AgentTurnErrorEvent struct {
+	Turn int
 	Err  error // may be replaced with a non-nil error
 }
 
 type ToolCallEndEvent struct {
-	Step   int
+	Turn   int
 	Action protocol.Action
 	Tool   *ToolSpec
 	Result protocol.ToolResult
 }
 
 type ToolCallErrorEvent struct {
-	Step   int
+	Turn   int
 	Action protocol.Action
 	Tool   *ToolSpec
 	Result protocol.ToolResult
@@ -73,7 +73,7 @@ type ToolCallErrorEvent struct {
 }
 
 type ToolCallDeniedEvent struct {
-	Step     int
+	Turn     int
 	Action   protocol.Action
 	Tool     *ToolSpec
 	Result   protocol.ToolResult
@@ -99,10 +99,10 @@ type Hooks struct {
 	OnAgentStart        func(context.Context, *AgentStartEvent) error
 	OnAgentEnd          func(context.Context, *AgentEndEvent) error
 	OnAgentError        func(context.Context, *AgentErrorEvent) error
-	OnAgentStepStart    func(context.Context, *AgentStepStartEvent) error
+	OnAgentTurnStart    func(context.Context, *AgentTurnStartEvent) error
 	OnAssistantResponse func(context.Context, *AssistantResponseEvent) error
-	OnAgentStepEnd      func(context.Context, *AgentStepEndEvent) error
-	OnAgentStepError    func(context.Context, *AgentStepErrorEvent) error
+	OnAgentTurnEnd      func(context.Context, *AgentTurnEndEvent) error
+	OnAgentTurnError    func(context.Context, *AgentTurnErrorEvent) error
 	OnToolCallStart     func(context.Context, *ToolCallStartEvent) error
 	OnToolCallEnd       func(context.Context, *ToolCallEndEvent) error
 	OnToolCallError     func(context.Context, *ToolCallErrorEvent) error

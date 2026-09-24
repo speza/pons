@@ -182,7 +182,7 @@ func startRuntimeServer(t *testing.T, ponsBinary, handsBinary, providerURL, work
 		"-workspace-root", workspace,
 		"-state-dir", stateDir,
 		"-addr", "127.0.0.1:0",
-		"-max-steps", "4",
+		"-max-turns", "4",
 		"-runtime-concurrency", "1",
 		"-sandbox", "seatbelt",
 		"-hands-command", handsBinary,

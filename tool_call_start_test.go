@@ -357,7 +357,7 @@ func TestToolCallStartHooksCannotChangeExecutedArguments(t *testing.T) {
 
 func TestRepeatedDenialSkipsApproval(t *testing.T) {
 	c := New()
-	c.MaxSteps = 5
+	c.MaxTurns = 5
 	setBrain(t, c, endlessBrain{})
 	if err := c.AddTool("ping", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
 		t.Fatal("denied tool ran")

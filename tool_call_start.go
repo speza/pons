@@ -75,7 +75,7 @@ func StringArgResource(kind, argument string) ResourceProjection {
 
 // ToolCallStartEvent describes one exact pending tool call.
 type ToolCallStartEvent struct {
-	Step          int
+	Turn          int
 	Message       string
 	Workspace     string
 	Platform      string
@@ -209,7 +209,7 @@ func (c *Core) evaluateToolCallStart(ctx context.Context, req ToolCallStartEvent
 	if !hasStartHook {
 		return nil, req.Action, nil
 	}
-	if err := c.emit(Event{Type: EventActionPreflight, Step: req.Step, Action: &req.Action, Tool: req.Tool}); err != nil {
+	if err := c.emit(Event{Type: EventActionPreflight, Turn: req.Turn, Action: &req.Action, Tool: req.Tool}); err != nil {
 		return nil, req.Action, fmt.Errorf("event action_preflight: %w", err)
 	}
 	decision := ActionDecision{Action: DispositionAllow}
@@ -293,13 +293,13 @@ func (c *Core) evaluateToolCallStart(ctx context.Context, req ToolCallStartEvent
 		decision.Assessment.ReasonCode = safeReasonCode(decision.Assessment.ReasonCode, "reason_unavailable")
 	}
 	observed := decision
-	if err := c.emit(Event{Type: EventActionDecision, Step: req.Step, Action: &req.Action,
+	if err := c.emit(Event{Type: EventActionDecision, Turn: req.Turn, Action: &req.Action,
 		Tool: req.Tool, Decision: &observed}); err != nil {
 		return nil, req.Action, fmt.Errorf("event action_decision: %w", err)
 	}
 	if decision.Action == DispositionAsk {
 		pending := decision
-		if err := c.emit(Event{Type: EventApprovalRequest, Step: req.Step, Action: &req.Action,
+		if err := c.emit(Event{Type: EventApprovalRequest, Turn: req.Turn, Action: &req.Action,
 			Tool: req.Tool, Decision: &pending}); err != nil {
 			return nil, req.Action, fmt.Errorf("event approval_request: %w", err)
 		}
@@ -331,7 +331,7 @@ func (c *Core) evaluateToolCallStart(ctx context.Context, req ToolCallStartEvent
 		if err := c.resolveApprovalResolvedHooks(ctx, approval, &decision); err != nil {
 			return nil, req.Action, err
 		}
-		if err := c.emit(Event{Type: EventApprovalResolved, Step: req.Step, Action: &req.Action,
+		if err := c.emit(Event{Type: EventApprovalResolved, Turn: req.Turn, Action: &req.Action,
 			Tool: req.Tool, Decision: &decision}); err != nil {
 			return nil, req.Action, fmt.Errorf("event approval_resolved: %w", err)
 		}

@@ -20,8 +20,8 @@ func write(t *testing.T, path, content string) {
 func TestLoadSettingsMerge(t *testing.T) {
 	home, ws := t.TempDir(), t.TempDir()
 	write(t, filepath.Join(home, ".pons", "config.json"),
-		`{"provider":"codex","max_steps":9,"bash_timeout":0,"workspace_root":"/projects"}`)
-	write(t, filepath.Join(ws, ".pons.json"), `{"max_steps":3,"model":"m2"}`)
+		`{"provider":"codex","max_turns":9,"bash_timeout":0,"workspace_root":"/projects"}`)
+	write(t, filepath.Join(ws, ".pons.json"), `{"max_turns":3,"model":"m2"}`)
 
 	s, err := loadSettings(home, ws)
 	if err != nil {
@@ -33,8 +33,8 @@ func TestLoadSettingsMerge(t *testing.T) {
 	if s.WorkspaceRoot == nil || *s.WorkspaceRoot != "/projects" {
 		t.Fatalf("workspace root: %v", s.WorkspaceRoot)
 	}
-	if s.MaxSteps == nil || *s.MaxSteps != 3 {
-		t.Fatalf("project should win: %v", s.MaxSteps)
+	if s.MaxTurns == nil || *s.MaxTurns != 3 {
+		t.Fatalf("project should win: %v", s.MaxTurns)
 	}
 	if s.BashTimeout == nil || *s.BashTimeout != 0 {
 		t.Fatalf("zero is meaningful: %v", s.BashTimeout)
@@ -49,7 +49,7 @@ func TestLoadSettingsMissingFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Provider != nil || s.MaxSteps != nil {
+	if s.Provider != nil || s.MaxTurns != nil {
 		t.Fatalf("absent files = empty settings: %+v", s)
 	}
 }
@@ -62,12 +62,12 @@ func TestLoadSettingsStrict(t *testing.T) {
 		t.Fatal("unknown key should be rejected")
 	}
 
-	write(t, filepath.Join(ws, ".pons.json"), `{"max_steps":1} trailing`)
+	write(t, filepath.Join(ws, ".pons.json"), `{"max_turns":1} trailing`)
 	if _, err := loadSettings(t.TempDir(), ws); err == nil {
 		t.Fatal("trailing data should be rejected")
 	}
 
-	write(t, filepath.Join(ws, ".pons.json"), `{"max_steps":"no"}`)
+	write(t, filepath.Join(ws, ".pons.json"), `{"max_turns":"no"}`)
 	if _, err := loadSettings(t.TempDir(), ws); err == nil {
 		t.Fatal("wrong type should be rejected")
 	}
@@ -124,7 +124,7 @@ func TestLoadSettingsGlobalPlugins(t *testing.T) {
 			{"id":"external","version":"1.0.0","enabled":true,"config":{"manifests":["/opt/pons/example.json"]}}
 		]
 	}`)
-	write(t, filepath.Join(ws, ".pons.json"), `{"max_steps":3}`)
+	write(t, filepath.Join(ws, ".pons.json"), `{"max_turns":3}`)
 
 	s, err := loadSettings(home, ws)
 	if err != nil {

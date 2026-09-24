@@ -143,9 +143,9 @@ atomically append input.accepted and index its submission
 hydrate a fresh Core/Brain from the latest compaction checkpoint and later
 committed events, or project from the start of the log without a checkpoint
         ↓
-run agent steps
+run agent turns
         ↓
-commit each complete assistant tool step before executing its tools
+commit each complete assistant tool turn before executing its tools
         ↓
 persist tool results and stream durable entity updates
         ↓
@@ -264,7 +264,7 @@ unknown. This repairs the provider-required call/result pairing without
 silently repeating a side effect. The agent decides what to do next.
 
 Provider requests may be retried with backoff. A provider retry is not a tool
-retry: it occurs before an incomplete assistant step is committed or after a
+retry: it occurs before an incomplete assistant turn is committed or after a
 complete tool-result batch has been returned to the model.
 
 Background store failures are reported through the manager's supervision

@@ -6,7 +6,7 @@
 //   - protocol/: the wire types between brain and hands (no logic)
 //   - the two ports: ControlPort (what a brain must speak) and ToolPort
 //     (what hands must speak)
-//   - the step loop and a plugin seam for ADDING capabilities
+//   - the turn loop and a plugin seam for ADDING capabilities
 //
 // A fresh Core has zero capabilities — no tools, no brain. Plugins purely
 // add functionality (tools, brains, middleware, observers); the
@@ -59,7 +59,7 @@ type AssistantPart struct {
 	Action protocol.Action
 }
 
-// AssistantResponse is the complete output produced by a brain for one step.
+// AssistantResponse is the complete output produced by a brain for one turn.
 // Parts preserve its provider-neutral content; Actions are the tool calls the
 // core should execute.
 type AssistantResponse struct {
@@ -86,15 +86,15 @@ func (c *Core) Execute(ctx context.Context, a protocol.Action) (protocol.ToolRes
 // ToolHandler executes one action kind. Tool plugins provide these.
 type ToolHandler func(ctx context.Context, a protocol.Action) (protocol.ToolResult, error)
 
-// StepHook observes one completed step (response + results). Observational hooks
-// cannot fail the run; use StepErrorHook for persistence that must be checked.
-type StepHook func(obs protocol.Observation, step protocol.StepLog)
+// TurnHook observes one completed turn (response + results). Observational hooks
+// cannot fail the run; use TurnErrorHook for persistence that must be checked.
+type TurnHook func(obs protocol.Observation, turn protocol.TurnLog)
 
-// StepErrorHook observes one completed step and can fail the run. Persistence
+// TurnErrorHook observes one completed turn and can fail the run. Persistence
 // hooks should use this form so a durable-write failure is not silently lost.
-type StepErrorHook func(obs protocol.Observation, step protocol.StepLog) error
+type TurnErrorHook func(obs protocol.Observation, turn protocol.TurnLog) error
 
-type stepHook func(obs protocol.Observation, step protocol.StepLog) error
+type turnHook func(obs protocol.Observation, turn protocol.TurnLog) error
 
 // Plugin adds capabilities to a Core. Purely additive by contract:
 // Setup only registers; it must not change existing registrations.
@@ -113,13 +113,13 @@ type Core struct {
 	Platform            string
 	ActionEnvironment   ActionEnvironment
 	RecentActionContext []ActionContextItem
-	MaxSteps            int
+	MaxTurns            int
 	Log                 *log.Logger
 
 	handlers      map[protocol.ActionKind]ToolHandler
 	specs         map[protocol.ActionKind]ToolSpec
 	wraps         []func(ToolPort) ToolPort
-	onSteps       []stepHook
+	onTurns       []turnHook
 	onEvents      []func(Event)
 	onEventErrors []func(Event) error
 	hooks         []Hooks
@@ -294,20 +294,20 @@ func (c *Core) SetBrain(b ControlPort) error {
 	return nil
 }
 
-// OnStep appends an observational hook for every completed step. Errors from
+// OnTurn appends an observational hook for every completed turn. Errors from
 // this form are intentionally not possible; checked persistence should use
-// OnStepError.
-func (c *Core) OnStep(h StepHook) {
-	c.onSteps = append(c.onSteps, func(obs protocol.Observation, step protocol.StepLog) error {
-		h(obs, step)
+// OnTurnError.
+func (c *Core) OnTurn(h TurnHook) {
+	c.onTurns = append(c.onTurns, func(obs protocol.Observation, turn protocol.TurnLog) error {
+		h(obs, turn)
 		return nil
 	})
 }
 
-// OnStepError appends a persistence/audit hook whose error is propagated from
-// Run. Hooks run in registration order with ordinary OnStep observers.
-func (c *Core) OnStepError(h StepErrorHook) {
-	c.onSteps = append(c.onSteps, stepHook(h))
+// OnTurnError appends a persistence/audit hook whose error is propagated from
+// Run. Hooks run in registration order with ordinary OnTurn observers.
+func (c *Core) OnTurnError(h TurnErrorHook) {
+	c.onTurns = append(c.onTurns, turnHook(h))
 }
 
 // EventType names one stage of the agent loop.
@@ -315,7 +315,7 @@ type EventType string
 
 const (
 	EventAgentStart        EventType = "agent_start"
-	EventStepStart         EventType = "step_start"
+	EventTurnStart         EventType = "turn_start"
 	EventAssistantResponse EventType = "assistant_response"
 	EventActionPreflight   EventType = "action_preflight"
 	EventActionStart       EventType = "action_start"
@@ -324,21 +324,21 @@ const (
 	EventApprovalResolved  EventType = "approval_resolved"
 	EventActionDenied      EventType = "action_denied"
 	EventActionEnd         EventType = "action_end"
-	EventStepEnd           EventType = "step_end"
+	EventTurnEnd           EventType = "turn_end"
 	EventFinish            EventType = "finish"
 	EventStopped           EventType = "stopped"
 	EventExhausted         EventType = "exhausted"
 )
 
-// Event is one observable step of the loop.
+// Event is one observable turn of the loop.
 type Event struct {
 	Type     EventType
-	Step     int
+	Turn     int
 	Text     string               // narration: finish reason, stop reason, errors
 	Action   *protocol.Action     // set on action-specific events
 	Result   *protocol.ToolResult // set on action_denied / action_end
 	Tool     *ToolSpec            // registered metadata on action-specific events
-	Actions  []protocol.Action    // set on assistant_response and step_end
+	Actions  []protocol.Action    // set on assistant_response and turn_end
 	Results  []protocol.ToolResult
 	Parts    []AssistantPart // set on assistant_response (ordered assistant content)
 	Decision *ActionDecision // set on decision/approval/denial events
@@ -374,16 +374,16 @@ type RunResult struct {
 	// Answer is the brain's final text (the finish reason). Empty when the
 	// loop stopped early or exhausted its budget.
 	Answer string
-	// Steps executed.
-	Steps int
-	// Exhausted is true when MaxSteps ran out without a finish signal.
+	// Turns executed.
+	Turns int
+	// Exhausted is true when MaxTurns ran out without a finish signal.
 	Exhausted bool
-	// History is the per-step audit trail.
-	History []protocol.StepLog
+	// History is the per-turn audit trail.
+	History []protocol.TurnLog
 }
 
 // Run executes one full task: respond → act → reflect → repeat, until the
-// brain finishes (text-only / finish action) or MaxSteps is exhausted.
+// brain finishes (text-only / finish action) or MaxTurns is exhausted.
 func (c *Core) Run(ctx context.Context, message string) (result RunResult, runErr error) {
 	if c.brain == nil {
 		return RunResult{}, errors.New("pons: no brain plugin installed")
@@ -394,21 +394,21 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 	obs := protocol.Observation{Message: message, Workspace: c.Workspace, Platform: c.Platform}
 	denials := make(map[string]int)
 	recentContext := boundedActionContext(c.RecentActionContext)
-	maxSteps := c.MaxSteps
-	if maxSteps <= 0 {
-		maxSteps = 25
+	maxTurns := c.MaxTurns
+	if maxTurns <= 0 {
+		maxTurns = 25
 	}
-	currentStep := 0
+	currentTurn := 0
 	endReason := AgentEndReason("")
 	agentStopReason := ""
 	agentOpen := false
-	stepOpen := false
+	turnOpen := false
 	defer func() {
-		if stepOpen {
+		if turnOpen {
 			if runErr != nil {
-				event := AgentStepErrorEvent{Step: currentStep, Err: runErr}
-				hookErr := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AgentStepErrorEvent) error {
-					return h.OnAgentStepError
+				event := AgentTurnErrorEvent{Turn: currentTurn, Err: runErr}
+				hookErr := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AgentTurnErrorEvent) error {
+					return h.OnAgentTurnError
 				}, &event)
 				if event.Err != nil {
 					runErr = event.Err
@@ -417,16 +417,16 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 					runErr = errors.Join(runErr, hookErr)
 				}
 			}
-			event := AgentStepEndEvent{Step: currentStep, Run: result}
-			if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AgentStepEndEvent) error {
-				return h.OnAgentStepEnd
+			event := AgentTurnEndEvent{Turn: currentTurn, Run: result}
+			if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AgentTurnEndEvent) error {
+				return h.OnAgentTurnEnd
 			}, &event); err != nil {
 				runErr = errors.Join(runErr, err)
 			}
 		}
 		if agentOpen {
 			if runErr != nil {
-				event := AgentErrorEvent{Step: currentStep, Err: runErr}
+				event := AgentErrorEvent{Turn: currentTurn, Err: runErr}
 				hookErr := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AgentErrorEvent) error {
 					return h.OnAgentError
 				}, &event)
@@ -462,35 +462,35 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 	message = agentStart.Message
 	obs.Message = message
 
-	for step := 1; step <= maxSteps; step++ {
-		obs.Step, obs.Now = step, time.Now()
-		if err := c.emit(Event{Type: EventStepStart, Step: step}); err != nil {
-			return result, fmt.Errorf("event step_start: %w", err)
+	for turn := 1; turn <= maxTurns; turn++ {
+		obs.Turn, obs.Now = turn, time.Now()
+		if err := c.emit(Event{Type: EventTurnStart, Turn: turn}); err != nil {
+			return result, fmt.Errorf("event turn_start: %w", err)
 		}
-		currentStep, stepOpen = step, true
-		stepStart := AgentStepStartEvent{Observation: obs}
-		if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AgentStepStartEvent) error {
-			return h.OnAgentStepStart
-		}, &stepStart); err != nil {
-			return result, fmt.Errorf("agent step start: %w", err)
+		currentTurn, turnOpen = turn, true
+		turnStart := AgentTurnStartEvent{Observation: obs}
+		if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AgentTurnStartEvent) error {
+			return h.OnAgentTurnStart
+		}, &turnStart); err != nil {
+			return result, fmt.Errorf("agent turn start: %w", err)
 		}
-		obs = stepStart.Observation
-		obs.Step, obs.Workspace, obs.Platform = step, c.Workspace, c.Platform
+		obs = turnStart.Observation
+		obs.Turn, obs.Workspace, obs.Platform = turn, c.Workspace, c.Platform
 
 		response, err := brain.Respond(ctx, obs)
 		if err != nil {
-			return result, fmt.Errorf("brain response (step %d): %w", step, err)
+			return result, fmt.Errorf("brain response (turn %d): %w", turn, err)
 		}
-		responseEvent := AssistantResponseEvent{Step: step, Response: response}
+		responseEvent := AssistantResponseEvent{Turn: turn, Response: response}
 		if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AssistantResponseEvent) error {
 			return h.OnAssistantResponse
 		}, &responseEvent); err != nil {
-			return result, fmt.Errorf("assistant response (step %d): %w", step, err)
+			return result, fmt.Errorf("assistant response (turn %d): %w", turn, err)
 		}
 		response = responseEvent.Response
 		actions := response.Actions
 		if len(actions) == 0 {
-			return result, fmt.Errorf("brain returned no actions at step %d", step)
+			return result, fmt.Errorf("brain returned no actions at turn %d", turn)
 		}
 		for _, part := range response.Parts {
 			if part.Type == AssistantPartText {
@@ -504,10 +504,10 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 		var answer string
 		finished := false
 		// Everything before a finish action executes — concurrently. The
-		// model emits independent calls in one step; serializing them would
+		// model emits independent calls in one turn; serializing them would
 		// waste latency. Determinism is preserved where it matters:
 		// starts are emitted in call order, results are indexed by call
-		// order (never completion order), and ActionEnd/step logs replay
+		// order (never completion order), and ActionEnd/turn logs replay
 		// in call order after the last completes.
 		run, finishIdx := actions, -1
 		for i, a := range actions {
@@ -519,13 +519,13 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 		if finishIdx >= 0 {
 			run, finished = actions[:finishIdx], true
 			answer, _ = protocol.StringArg(actions[finishIdx].Args, "reason")
-			c.logf("[step %d] brain signalled finish: answer_chars=%d", step, len(answer))
+			c.logf("[turn %d] brain signalled finish: answer_chars=%d", turn, len(answer))
 		}
 		var parts []AssistantPart
 		if len(run) > 0 {
 			parts, err = normalizeAssistantParts(response.Parts, run)
 			if err != nil {
-				return result, fmt.Errorf("brain response (step %d): %w", step, err)
+				return result, fmt.Errorf("brain response (turn %d): %w", turn, err)
 			}
 		}
 
@@ -535,12 +535,12 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 		for i := range run {
 			a := run[i]
 			decision, action, err := c.evaluateToolCallStart(ctx, ToolCallStartEvent{
-				Step: step, Message: message, Workspace: c.Workspace,
+				Turn: turn, Message: message, Workspace: c.Workspace,
 				Platform: c.Platform, Environment: c.ActionEnvironment,
 				Action: a, Tool: c.toolSpec(a.Kind), RecentContext: boundedActionContext(recentContext),
 			}, denials)
 			if err != nil {
-				return result, fmt.Errorf("tool call start (step %d): %w", step, err)
+				return result, fmt.Errorf("tool call start (turn %d): %w", turn, err)
 			}
 			run[i] = action
 			if decision != nil && decision.Action == DispositionDeny {
@@ -566,7 +566,7 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 					}
 				}
 			}
-			if err := c.emit(Event{Type: EventAssistantResponse, Step: step, Actions: slices.Clone(run), Parts: parts}); err != nil {
+			if err := c.emit(Event{Type: EventAssistantResponse, Turn: turn, Actions: slices.Clone(run), Parts: parts}); err != nil {
 				return result, fmt.Errorf("event assistant_response: %w", err)
 			}
 		}
@@ -575,7 +575,7 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 				continue
 			}
 			a := run[i]
-			if err := c.emit(Event{Type: EventActionStart, Step: step, Action: &a, Tool: c.toolSpec(a.Kind)}); err != nil {
+			if err := c.emit(Event{Type: EventActionStart, Turn: turn, Action: &a, Tool: c.toolSpec(a.Kind)}); err != nil {
 				return result, fmt.Errorf("event action_start: %w", err)
 			}
 		}
@@ -605,7 +605,7 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 		for i := range run {
 			a, tr := run[i], results[i]
 			if !approved[i] {
-				denied := ToolCallDeniedEvent{Step: step, Action: a, Tool: c.toolSpec(a.Kind), Result: tr, Decision: *decisions[i]}
+				denied := ToolCallDeniedEvent{Turn: turn, Action: a, Tool: c.toolSpec(a.Kind), Result: tr, Decision: *decisions[i]}
 				if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *ToolCallDeniedEvent) error {
 					return h.OnToolCallDenied
 				}, &denied); err != nil {
@@ -613,14 +613,14 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 				}
 				results[i] = denied.Result
 				results[i].ActionID, results[i].Kind, results[i].OK = a.ID, string(a.Kind), false
-				if err := c.emit(Event{Type: EventActionDenied, Step: step, Action: &a,
+				if err := c.emit(Event{Type: EventActionDenied, Turn: turn, Action: &a,
 					Result: &results[i], Tool: c.toolSpec(a.Kind), Decision: decisions[i]}); err != nil {
 					return result, fmt.Errorf("event action_denied: %w", err)
 				}
 				continue
 			}
 			if !tr.OK {
-				failure := ToolCallErrorEvent{Step: step, Action: a, Tool: c.toolSpec(a.Kind), Result: tr, Err: fmt.Errorf("tool call failed: %s", tr.Error)}
+				failure := ToolCallErrorEvent{Turn: turn, Action: a, Tool: c.toolSpec(a.Kind), Result: tr, Err: fmt.Errorf("tool call failed: %s", tr.Error)}
 				if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *ToolCallErrorEvent) error {
 					return h.OnToolCallError
 				}, &failure); err != nil {
@@ -628,7 +628,7 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 				}
 				tr = failure.Result
 			}
-			completed := ToolCallEndEvent{Step: step, Action: a, Tool: c.toolSpec(a.Kind), Result: tr}
+			completed := ToolCallEndEvent{Turn: turn, Action: a, Tool: c.toolSpec(a.Kind), Result: tr}
 			if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *ToolCallEndEvent) error {
 				return h.OnToolCallEnd
 			}, &completed); err != nil {
@@ -636,16 +636,16 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 			}
 			results[i] = completed.Result
 			results[i].ActionID, results[i].Kind = a.ID, string(a.Kind)
-			if err := c.emit(Event{Type: EventActionEnd, Step: step, Action: &a, Result: &results[i], Tool: c.toolSpec(a.Kind)}); err != nil {
+			if err := c.emit(Event{Type: EventActionEnd, Turn: turn, Action: &a, Result: &results[i], Tool: c.toolSpec(a.Kind)}); err != nil {
 				return result, fmt.Errorf("event action_end: %w", err)
 			}
-			c.logf("[step %d] ← %s ok=%v err=%q", step, a.Kind, tr.OK, tr.Error)
+			c.logf("[turn %d] ← %s ok=%v err=%q", turn, a.Kind, tr.OK, tr.Error)
 		}
 		if err := errors.Join(toolHookErrors...); err != nil {
 			return result, err
 		}
 
-		stepLog := protocol.StepLog{Step: step, Actions: actions, Results: results}
+		turnLog := protocol.TurnLog{Turn: turn, Actions: actions, Results: results}
 		for i, a := range run {
 			recentContext = append(recentContext,
 				ActionContextItem{Source: ContextAction, ActionID: a.ID, Kind: a.Kind, Text: string(a.Args)},
@@ -653,27 +653,27 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 			)
 		}
 		recentContext = boundedActionContext(recentContext)
-		result.Steps, result.History = step, append(result.History, stepLog)
-		for _, h := range c.onSteps {
-			if err := h(obs, stepLog); err != nil {
-				return result, fmt.Errorf("step hook (step %d): %w", step, err)
+		result.Turns, result.History = turn, append(result.History, turnLog)
+		for _, h := range c.onTurns {
+			if err := h(obs, turnLog); err != nil {
+				return result, fmt.Errorf("turn hook (turn %d): %w", turn, err)
 			}
 		}
-		if err := c.emit(Event{Type: EventStepEnd, Step: step, Actions: actions, Results: results}); err != nil {
-			return result, fmt.Errorf("event step_end: %w", err)
+		if err := c.emit(Event{Type: EventTurnEnd, Turn: turn, Actions: actions, Results: results}); err != nil {
+			return result, fmt.Errorf("event turn_end: %w", err)
 		}
-		stepOpen = false
-		stepEnd := AgentStepEndEvent{Step: step, Run: result}
-		if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AgentStepEndEvent) error {
-			return h.OnAgentStepEnd
-		}, &stepEnd); err != nil {
-			return result, fmt.Errorf("agent step end: %w", err)
+		turnOpen = false
+		turnEnd := AgentTurnEndEvent{Turn: turn, Run: result}
+		if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AgentTurnEndEvent) error {
+			return h.OnAgentTurnEnd
+		}, &turnEnd); err != nil {
+			return result, fmt.Errorf("agent turn end: %w", err)
 		}
 
 		if finished {
 			result.Answer = answer
 			endReason = AgentEndFinished
-			if err := c.emit(Event{Type: EventFinish, Step: step, Text: answer}); err != nil {
+			if err := c.emit(Event{Type: EventFinish, Turn: turn, Text: answer}); err != nil {
 				return result, fmt.Errorf("event finish: %w", err)
 			}
 			return result, nil
@@ -684,7 +684,7 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 		for _, tr := range results {
 			interp, err := brain.Interpret(ctx, obs, tr)
 			if err != nil {
-				return result, fmt.Errorf("brain interpret (step %d): %w", step, err)
+				return result, fmt.Errorf("brain interpret (turn %d): %w", turn, err)
 			}
 			if !interp.Continue && !stopped {
 				stopped = true
@@ -692,12 +692,12 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 			}
 		}
 
-		obs.History = append(obs.History, stepLog)
+		obs.History = append(obs.History, turnLog)
 		if stopped {
 			endReason = AgentEndStopped
 			agentStopReason = stopReason
-			c.logf("[step %d] brain stopped: reason_chars=%d", step, len(stopReason))
-			if err := c.emit(Event{Type: EventStopped, Step: step, Text: stopReason}); err != nil {
+			c.logf("[turn %d] brain stopped: reason_chars=%d", turn, len(stopReason))
+			if err := c.emit(Event{Type: EventStopped, Turn: turn, Text: stopReason}); err != nil {
 				return result, fmt.Errorf("event stopped: %w", err)
 			}
 			return result, nil
@@ -705,7 +705,7 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 	}
 	result.Exhausted = true
 	endReason = AgentEndExhausted
-	if err := c.emit(Event{Type: EventExhausted, Step: maxSteps, Text: fmt.Sprintf("exhausted %d steps", maxSteps)}); err != nil {
+	if err := c.emit(Event{Type: EventExhausted, Turn: maxTurns, Text: fmt.Sprintf("exhausted %d turns", maxTurns)}); err != nil {
 		return result, fmt.Errorf("event exhausted: %w", err)
 	}
 	return result, nil

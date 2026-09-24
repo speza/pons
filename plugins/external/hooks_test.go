@@ -33,8 +33,8 @@ func TestExternalHookHelper(t *testing.T) {
 			if os.Getenv("PONS_EXTERNAL_HOOK_ALL") == "1" {
 				names = []string{
 					external.HookAgentStart, external.HookAgentEnd, external.HookAgentError,
-					external.HookAgentStepStart, external.HookAssistantResponse,
-					external.HookAgentStepEnd, external.HookAgentStepError,
+					external.HookAgentTurnStart, external.HookAssistantResponse,
+					external.HookAgentTurnEnd, external.HookAgentTurnError,
 					external.HookToolCallStart, external.HookToolCallEnd,
 					external.HookToolCallError, external.HookToolCallDenied,
 					external.HookApprovalRequest, external.HookApprovalResolved,

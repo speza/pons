@@ -13,10 +13,10 @@ const (
 	HookAgentStart        = "on_agent_start"
 	HookAgentEnd          = "on_agent_end"
 	HookAgentError        = "on_agent_error"
-	HookAgentStepStart    = "on_agent_step_start"
+	HookAgentTurnStart    = "on_agent_turn_start"
 	HookAssistantResponse = "on_assistant_response"
-	HookAgentStepEnd      = "on_agent_step_end"
-	HookAgentStepError    = "on_agent_step_error"
+	HookAgentTurnEnd      = "on_agent_turn_end"
+	HookAgentTurnError    = "on_agent_turn_error"
 	HookToolCallStart     = "on_tool_call_start"
 	HookToolCallEnd       = "on_tool_call_end"
 	HookToolCallError     = "on_tool_call_error"
@@ -27,8 +27,8 @@ const (
 
 func validHookName(name string) bool {
 	switch name {
-	case HookAgentStart, HookAgentEnd, HookAgentError, HookAgentStepStart,
-		HookAssistantResponse, HookAgentStepEnd, HookAgentStepError,
+	case HookAgentStart, HookAgentEnd, HookAgentError, HookAgentTurnStart,
+		HookAssistantResponse, HookAgentTurnEnd, HookAgentTurnError,
 		HookToolCallStart, HookToolCallEnd, HookToolCallError,
 		HookToolCallDenied, HookApprovalRequest, HookApprovalResolved:
 		return true
@@ -62,14 +62,14 @@ func hookWireEvent(event any) any {
 	switch e := event.(type) {
 	case *pons.AgentErrorEvent:
 		return struct {
-			Step         int
+			Turn         int
 			ErrorMessage string
-		}{e.Step, errorMessage(e.Err)}
-	case *pons.AgentStepErrorEvent:
+		}{e.Turn, errorMessage(e.Err)}
+	case *pons.AgentTurnErrorEvent:
 		return struct {
-			Step         int
+			Turn         int
 			ErrorMessage string
-		}{e.Step, errorMessage(e.Err)}
+		}{e.Turn, errorMessage(e.Err)}
 	case *pons.AgentEndEvent:
 		return struct {
 			Result       pons.RunResult
@@ -79,12 +79,12 @@ func hookWireEvent(event any) any {
 		}{e.Result, errorMessage(e.Err), e.Reason, e.StopReason}
 	case *pons.ToolCallErrorEvent:
 		return struct {
-			Step         int
+			Turn         int
 			Action       protocol.Action
 			Tool         *pons.ToolSpec
 			Result       protocol.ToolResult
 			ErrorMessage string
-		}{e.Step, e.Action, e.Tool, e.Result, errorMessage(e.Err)}
+		}{e.Turn, e.Action, e.Tool, e.Result, errorMessage(e.Err)}
 	default:
 		return event
 	}
@@ -147,14 +147,14 @@ func (p *HookPlugin) Setup(core *pons.Core) error {
 			return err
 		}
 	}
-	if registered[HookAgentStepStart] {
-		hooks.OnAgentStepStart = func(ctx context.Context, e *pons.AgentStepStartEvent) error {
+	if registered[HookAgentTurnStart] {
+		hooks.OnAgentTurnStart = func(ctx context.Context, e *pons.AgentTurnStartEvent) error {
 			patch, err := callPatch[struct {
 				Observation *struct {
 					Message *string
-					History *[]protocol.StepLog
+					History *[]protocol.TurnLog
 				}
-			}](p, ctx, HookAgentStepStart, e)
+			}](p, ctx, HookAgentTurnStart, e)
 			if err == nil && patch.Observation != nil {
 				if patch.Observation.Message != nil {
 					e.Observation.Message = *patch.Observation.Message
@@ -175,15 +175,15 @@ func (p *HookPlugin) Setup(core *pons.Core) error {
 			return err
 		}
 	}
-	if registered[HookAgentStepEnd] {
-		hooks.OnAgentStepEnd = func(ctx context.Context, e *pons.AgentStepEndEvent) error {
-			_, err := callPatch[struct{}](p, ctx, HookAgentStepEnd, e)
+	if registered[HookAgentTurnEnd] {
+		hooks.OnAgentTurnEnd = func(ctx context.Context, e *pons.AgentTurnEndEvent) error {
+			_, err := callPatch[struct{}](p, ctx, HookAgentTurnEnd, e)
 			return err
 		}
 	}
-	if registered[HookAgentStepError] {
-		hooks.OnAgentStepError = func(ctx context.Context, e *pons.AgentStepErrorEvent) error {
-			patch, err := callPatch[struct{ ErrorMessage *string }](p, ctx, HookAgentStepError, e)
+	if registered[HookAgentTurnError] {
+		hooks.OnAgentTurnError = func(ctx context.Context, e *pons.AgentTurnErrorEvent) error {
+			patch, err := callPatch[struct{ ErrorMessage *string }](p, ctx, HookAgentTurnError, e)
 			if err == nil && patch.ErrorMessage != nil {
 				if *patch.ErrorMessage == "" {
 					return errors.New("external: replacement error must be nonempty")

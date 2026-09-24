@@ -13,7 +13,7 @@ import (
 
 // fakeBrain is a minimal ControlPort for core tests.
 type fakeBrain struct {
-	turns [][]protocol.Action // actions per step; empty response is invalid
+	turns [][]protocol.Action // actions per turn; empty response is invalid
 	i     int
 }
 
@@ -129,7 +129,7 @@ func TestFinishStopsLoop(t *testing.T) {
 
 func TestEmptyResponseErrors(t *testing.T) {
 	c := New()
-	setBrain(t, c, &fakeBrain{}) // zero steps → Respond returns no actions
+	setBrain(t, c, &fakeBrain{}) // zero turns → Respond returns no actions
 	if _, err := c.Run(context.Background(), "test goal"); err == nil {
 		t.Fatal("empty response should error")
 	}
@@ -145,7 +145,7 @@ func TestStopOnFailedResult(t *testing.T) {
 	}
 }
 
-func TestOnStepAndWraps(t *testing.T) {
+func TestOnTurnAndWraps(t *testing.T) {
 	c := New()
 	brain := &fakeBrain{turns: [][]protocol.Action{
 		{{Kind: "ping", Args: protocol.MustArgsJSON(map[string]string{"x": "1"})}},
@@ -164,9 +164,9 @@ func TestOnStepAndWraps(t *testing.T) {
 			return next.Execute(ctx, a)
 		})
 	})
-	var steps []protocol.StepLog
-	c.OnStep(func(obs protocol.Observation, step protocol.StepLog) {
-		steps = append(steps, step)
+	var turns []protocol.TurnLog
+	c.OnTurn(func(obs protocol.Observation, turn protocol.TurnLog) {
+		turns = append(turns, turn)
 	})
 
 	if _, err := c.Run(context.Background(), "test goal"); err != nil {
@@ -175,8 +175,8 @@ func TestOnStepAndWraps(t *testing.T) {
 	if len(seen) != 1 || !strings.Contains(seen[0], "ping") {
 		t.Fatalf("middleware not invoked: %v", seen)
 	}
-	if len(steps) != 2 || len(steps[0].Results) != 1 || steps[0].Results[0].Output != "pong:1" {
-		t.Fatalf("step hooks wrong: %+v", steps)
+	if len(turns) != 2 || len(turns[0].Results) != 1 || turns[0].Results[0].Output != "pong:1" {
+		t.Fatalf("turn hooks wrong: %+v", turns)
 	}
 }
 
@@ -210,18 +210,18 @@ func TestSetBrainRejectsNil(t *testing.T) {
 	}
 }
 
-func TestStepErrorHookPropagates(t *testing.T) {
+func TestTurnErrorHookPropagates(t *testing.T) {
 	c := New()
 	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{Finish("done")}}})
-	c.OnStepError(func(protocol.Observation, protocol.StepLog) error {
+	c.OnTurnError(func(protocol.Observation, protocol.TurnLog) error {
 		return errors.New("disk full")
 	})
 	res, err := c.Run(context.Background(), "goal")
 	if err == nil || !strings.Contains(err.Error(), "disk full") {
 		t.Fatalf("hook error = %v", err)
 	}
-	if res.Steps != 1 || len(res.History) != 1 {
-		t.Fatalf("hook failure lost completed step: %+v", res)
+	if res.Turns != 1 || len(res.History) != 1 {
+		t.Fatalf("hook failure lost completed turn: %+v", res)
 	}
 }
 
@@ -240,7 +240,7 @@ func TestAllResultsAreInterpretedBeforeStopping(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(brain.seen) != 2 || res.Steps != 1 || res.Exhausted {
+	if len(brain.seen) != 2 || res.Turns != 1 || res.Exhausted {
 		t.Fatalf("unexpected run: %+v interpretations=%v", res, brain.seen)
 	}
 }
@@ -329,16 +329,16 @@ func TestRunResultAndEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if res.Answer != "the answer" || res.Steps != 2 || res.Exhausted {
+	if res.Answer != "the answer" || res.Turns != 2 || res.Exhausted {
 		t.Fatalf("result: %+v", res)
 	}
 	if len(res.History) != 2 || len(res.History[0].Results) != 1 || res.History[0].Results[0].Output != "pong" {
 		t.Fatalf("history: %+v", res.History)
 	}
 	want := []EventType{
-		EventAgentStart, EventStepStart,
-		EventAssistantResponse, EventActionStart, EventActionEnd, EventStepEnd,
-		EventStepStart, EventStepEnd, EventFinish, // finish step is recorded too
+		EventAgentStart, EventTurnStart,
+		EventAssistantResponse, EventActionStart, EventActionEnd, EventTurnEnd,
+		EventTurnStart, EventTurnEnd, EventFinish, // finish turn is recorded too
 	}
 	if len(types) != len(want) {
 		t.Fatalf("events: %v", types)
@@ -352,7 +352,7 @@ func TestRunResultAndEvents(t *testing.T) {
 
 func TestExhaustedIsResultNotError(t *testing.T) {
 	c := New()
-	c.MaxSteps = 2
+	c.MaxTurns = 2
 	// A brain that keeps calling a tool forever, never finishing.
 	setBrain(t, c, endlessBrain{})
 	c.AddTool("ping", ToolDef{Handler: func(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
@@ -362,12 +362,12 @@ func TestExhaustedIsResultNotError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("exhausted budget should not be an error: %v", err)
 	}
-	if !res.Exhausted || res.Steps != 2 || res.Answer != "" {
+	if !res.Exhausted || res.Turns != 2 || res.Answer != "" {
 		t.Fatalf("result: %+v", res)
 	}
 }
 
-// endlessBrain requests one tool action every step, never finishing.
+// endlessBrain requests one tool action every turn, never finishing.
 type endlessBrain struct{}
 
 func (endlessBrain) Respond(ctx context.Context, obs protocol.Observation) (AssistantResponse, error) {

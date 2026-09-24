@@ -9,20 +9,20 @@ import (
 
 func TestObservationExecutionContextRoundTrip(t *testing.T) {
 	wire, err := json.Marshal(Observation{
-		Step: 2, Workspace: "/remote/repo", Platform: "linux/arm64",
-		History: []StepLog{{Step: 1}},
+		Turn: 2, Workspace: "/remote/repo", Platform: "linux/arm64",
+		History: []TurnLog{{Turn: 1}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(wire, []byte(`"step":2`)) || bytes.Contains(wire, []byte(`"turn"`)) {
-		t.Fatalf("step wire shape: %s", wire)
+	if !bytes.Contains(wire, []byte(`"turn":2`)) || bytes.Contains(wire, []byte(`"step"`)) {
+		t.Fatalf("turn wire shape: %s", wire)
 	}
 	var got Observation
 	if err := json.Unmarshal(wire, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Step != 2 || len(got.History) != 1 || got.History[0].Step != 1 ||
+	if got.Turn != 2 || len(got.History) != 1 || got.History[0].Turn != 1 ||
 		got.Workspace != "/remote/repo" || got.Platform != "linux/arm64" {
 		t.Fatalf("execution context = %+v", got)
 	}

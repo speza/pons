@@ -37,7 +37,7 @@ type serverOptions struct {
 	WorkspaceRoot           string
 	ClientWorkspace         string
 	MaxConcurrent           int
-	MaxSteps                int
+	MaxTurns                int
 	Brain                   llm.Config
 	ProviderSlot            string
 	FSReadBytes             int
@@ -760,12 +760,12 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	core.OnEventError(func(event pons.Event) error {
 		switch event.Type {
 		case pons.EventActionPreflight:
-			runLog.Debug("tool preflight started", "step", event.Step,
+			runLog.Debug("tool preflight started", "turn", event.Turn,
 				"action_id", event.Action.ID, "tool", event.Action.Kind)
 		case pons.EventActionDecision:
 			decision := event.Decision
 			fields := []any{
-				"step", event.Step, "action_id", event.Action.ID, "tool", event.Action.Kind,
+				"turn", event.Turn, "action_id", event.Action.ID, "tool", event.Action.Kind,
 				"disposition", decision.Action, "reason_code", decision.ReasonCode,
 			}
 			if assessment := decision.Assessment; assessment.Classifier != "" {
@@ -780,7 +780,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 				runLog.Debug("tool preflight decided", fields...)
 			}
 		case pons.EventAssistantResponse:
-			runLog.Debug("assistant step", "step", event.Step, "tool_calls", len(event.Actions))
+			runLog.Debug("assistant turn", "turn", event.Turn, "tool_calls", len(event.Actions))
 			parts := make([]ponsruntime.MessagePart, 0, len(event.Parts))
 			for _, part := range event.Parts {
 				switch part.Type {
@@ -797,13 +797,13 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 				Type: ponsruntime.RunEventAssistantTurn, Parts: parts,
 			})
 		case pons.EventActionEnd:
-			runLog.Debug("tool completed", "step", event.Step, "tool", event.Action.Kind,
+			runLog.Debug("tool completed", "turn", event.Turn, "tool", event.Action.Kind,
 				"ok", event.Result.OK)
 			return request.Emit(ponsruntime.RunEvent{
 				Type: ponsruntime.RunEventToolCompleted, ToolCallID: event.Action.ID, Result: event.Result,
 			})
 		case pons.EventActionDenied:
-			runLog.Debug("tool denied", "step", event.Step, "tool", event.Action.Kind)
+			runLog.Debug("tool denied", "turn", event.Turn, "tool", event.Action.Kind)
 			return request.Emit(ponsruntime.RunEvent{
 				Type: ponsruntime.RunEventToolDenied, ToolCallID: event.Action.ID, Result: event.Result,
 			})
@@ -848,9 +848,9 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}
 
 	if runResult.Exhausted {
-		return result, fmt.Errorf("agent exhausted %d steps", runResult.Steps)
+		return result, fmt.Errorf("agent exhausted %d turns", runResult.Turns)
 	}
-	runLog.Debug("answer ready", "steps", runResult.Steps, "answer_chars", len(runResult.Answer))
+	runLog.Debug("answer ready", "turns", runResult.Turns, "answer_chars", len(runResult.Answer))
 	return ponsruntime.RunResult{Answer: runResult.Answer}, nil
 }
 

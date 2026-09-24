@@ -24,7 +24,7 @@ The core package depends on the dependency-free `protocol/` package and owns
 three seams:
 
 - `protocol/` defines the JSON contract: `Action`, `ToolResult`,
-  `Observation`, and `StepLog`.
+  `Observation`, and `TurnLog`.
 - `ControlPort` is the brain interface:
   `Respond`, `Interpret`, and `Close`.
 - `ToolPort` is the hands interface: `Execute` for one action.
@@ -35,7 +35,7 @@ three seams:
 respond -> execute -> interpret -> repeat
 ```
 
-It supplies the step budget, dispatches actions by kind, reserves the
+It supplies the turn budget, dispatches actions by kind, reserves the
 `finish` action, and returns a `RunResult`. It does not contain task-specific
 file, shell, session, provider, or policy behavior.
 
@@ -59,10 +59,10 @@ is additive and conflicts fail during composition:
 - `WrapTool` composes execution middleware explicitly.
 - `RegisterCapability` rejects empty names, nil values, and duplicate names;
   `Capability` lets another trusted plugin resolve a registered value.
-- `AddHooks` composes typed agent, step, tool, and approval callbacks through
+- `AddHooks` composes typed agent, turn, tool, and approval callbacks through
   one plugin registration value. `OnToolCallStart` is the pre-execution policy
   and mutation point.
-- `OnStep` and `OnStepError` attach observational and checked persistence
+- `OnTurn` and `OnTurnError` attach observational and checked persistence
   hooks.
 
 The composing application chooses the plugin set and order. The core does not
@@ -96,23 +96,23 @@ contract is defined by ADR-0003.
 `Run` returns:
 
 - `Answer`, the final text from a finish action;
-- `Steps` and `History`, the completed step records; and
+- `Turns` and `History`, the completed turn records; and
 - `Exhausted`, which reports budget exhaustion without treating it as an
   error.
 
-`OnEvent` exposes the loop stages (`agent_start`, `step_start`, action start
-and end, step end, finish, stopped, and exhausted). Ordinary step observers
-cannot fail a run; checked persistence uses `OnStepError`. Tool calls within a
-step execute concurrently and are recorded in call order, as specified by
+`OnEvent` exposes the loop stages (`agent_start`, `turn_start`, action start
+and end, turn end, finish, stopped, and exhausted). Ordinary turn observers
+cannot fail a run; checked persistence uses `OnTurnError`. Tool calls within a
+turn execute concurrently and are recorded in call order, as specified by
 ADR-0006.
 
-Typed plugin hooks use agent, agent-step, tool-call, and approval phases.
+Typed plugin hooks use agent, agent-turn, tool-call, and approval phases.
 `OnToolCallStart` can allow, ask, deny, or change tool arguments. A denied call
 emits `OnToolCallDenied` without executing; executed calls emit tool end and,
 on failure, tool error. Each hook can observe or apply its event's supported
 effects.
 
-The shipped LLM brain makes one provider call per step, discovers the schemas
+The shipped LLM brain makes one provider call per turn, discovers the schemas
 registered in `Core`, converts tool calls to `Action` values, and treats a
 text-only provider response as the finish signal. Provider translation and
 context compaction remain inside that brain plugin.
