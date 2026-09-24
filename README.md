@@ -121,6 +121,9 @@ installed by trusted host code or the global CLI configuration. The hosted
 adapters require API keys and send the projected request and recent context to
 their provider. The CLI has no interactive approval handler yet: an `ask`
 decision is denied, and the agent can retry after a new user message.
+With `--debug`, the server logs each tool preflight and its decision. A valid
+classifier assessment includes its model, risk, confidence, and reason code;
+action arguments, conversation text, and credentials are omitted.
 
 Action policy is a host-side control-plane check. Shell safety still depends
 on the execution environment's isolation policy.

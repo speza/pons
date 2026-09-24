@@ -317,6 +317,7 @@ const (
 	EventAgentStart        EventType = "agent_start"
 	EventStepStart         EventType = "step_start"
 	EventAssistantResponse EventType = "assistant_response"
+	EventActionPreflight   EventType = "action_preflight"
 	EventActionStart       EventType = "action_start"
 	EventActionDecision    EventType = "action_decision"
 	EventApprovalRequest   EventType = "approval_request"

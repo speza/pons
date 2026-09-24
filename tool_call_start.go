@@ -209,6 +209,9 @@ func (c *Core) evaluateToolCallStart(ctx context.Context, req ToolCallStartEvent
 	if !hasStartHook {
 		return nil, req.Action, nil
 	}
+	if err := c.emit(Event{Type: EventActionPreflight, Step: req.Step, Action: &req.Action, Tool: req.Tool}); err != nil {
+		return nil, req.Action, fmt.Errorf("event action_preflight: %w", err)
+	}
 	decision := ActionDecision{Action: DispositionAllow}
 	for pass := range 8 {
 		key := denialKey(req.Action)

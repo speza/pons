@@ -59,9 +59,11 @@ func TestActionPolicyPreflightAndOrderedResults(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	var started, ended, denied, resultEvents []string
+	var preflight, started, ended, denied, resultEvents []string
 	c.OnEvent(func(e Event) {
 		switch e.Type {
+		case EventActionPreflight:
+			preflight = append(preflight, e.Action.ID)
 		case EventActionStart:
 			started = append(started, e.Action.ID)
 		case EventActionEnd:
@@ -79,11 +81,12 @@ func TestActionPolicyPreflightAndOrderedResults(t *testing.T) {
 	if !reflect.DeepEqual(sequence[:4], []string{"policy:first", "policy:second", "approve:second", "policy:third"}) {
 		t.Fatalf("preflight order: %v", sequence)
 	}
-	if !reflect.DeepEqual(started, []string{"first", "third"}) ||
+	if !reflect.DeepEqual(preflight, []string{"first", "second", "third"}) ||
+		!reflect.DeepEqual(started, []string{"first", "third"}) ||
 		!reflect.DeepEqual(ended, []string{"first", "third"}) ||
 		!reflect.DeepEqual(denied, []string{"second"}) ||
 		!reflect.DeepEqual(resultEvents, []string{"first", "second", "third"}) {
-		t.Fatalf("events: started=%v ended=%v denied=%v results=%v", started, ended, denied, resultEvents)
+		t.Fatalf("events: preflight=%v started=%v ended=%v denied=%v results=%v", preflight, started, ended, denied, resultEvents)
 	}
 	results := res.History[0].Results
 	if len(results) != 3 || results[0].Output != "first" || results[2].Output != "third" ||

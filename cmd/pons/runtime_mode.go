@@ -740,6 +740,26 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		"network", metadata.Network, "workspace", request.Workspace, "tools", len(core.ToolSpecs()))
 	core.OnEventError(func(event pons.Event) error {
 		switch event.Type {
+		case pons.EventActionPreflight:
+			runLog.Debug("tool preflight started", "step", event.Step,
+				"action_id", event.Action.ID, "tool", event.Action.Kind)
+		case pons.EventActionDecision:
+			decision := event.Decision
+			fields := []any{
+				"step", event.Step, "action_id", event.Action.ID, "tool", event.Action.Kind,
+				"disposition", decision.Action, "reason_code", decision.ReasonCode,
+			}
+			if assessment := decision.Assessment; assessment.Classifier != "" {
+				fields = append(fields,
+					"classifier", assessment.Classifier, "risk", assessment.Risk,
+					"confidence", assessment.Confidence,
+					"probability_confidence", assessment.ProbabilityConfidence,
+					"assessment_reason_code", assessment.ReasonCode,
+				)
+				runLog.Debug("classifier assessed tool call", fields...)
+			} else {
+				runLog.Debug("tool preflight decided", fields...)
+			}
 		case pons.EventAssistantResponse:
 			runLog.Debug("assistant step", "step", event.Step, "tool_calls", len(event.Actions))
 			parts := make([]ponsruntime.MessagePart, 0, len(event.Parts))
