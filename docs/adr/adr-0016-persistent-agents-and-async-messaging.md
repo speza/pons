@@ -127,7 +127,8 @@ untrusted content, so labels in message text cannot forge identity.
 
 ### 5. Lineages complete explicitly
 
-A durable lineage row is created with each external submission. It stays
+Each external submission starts a lineage, recorded as events in the root
+conversation's log under ADR-0023. It stays
 `active` while any of its submissions is queued or running, any of its
 delegations is non-terminal, a durable approval is pending under ADR-0021, or
 a delegation result awaits processing.

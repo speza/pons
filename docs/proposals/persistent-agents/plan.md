@@ -181,50 +181,63 @@ the owner told it.
 ## Phase 3: Lineages and explicit outcomes
 
 **Use cases:** all; U1 needs `no_update`. **ADRs:** ADR-0016 sections 4–6;
-ADR-0018 section 3.
+ADR-0018 section 3; ADR-0023.
 
-Make every accepted message a lineage with an explicit ending, and add the
-staged-decision mechanism later phases reuse.
+Make every accepted input part of a lineage with an explicit ending, and add
+the staged-decision mechanism later phases reuse. Under ADR-0023 the event log
+is canonical: lineage state is a set of events in the root conversation's log,
+and any lookup table is an index rebuilt from that log on open.
+
+Already in place from ADR-0023: `InputSource` (kind, adapter, principal,
+source conversation and agent), `CausationID`, `Manager.SubmitInput` for
+internal producers, and the `input.accepted` fact that records them.
 
 Steps:
 
-1. **Envelope.** Add a `Source` struct (`Kind`, `AdapterID`,
-   `ExternalEventID`, `PrincipalID`) plus `RootID` and `CausationID` to
-   `InboundMessage` and `Submission` in `runtime/types.go`. The native HTTP
-   path sets `human`/`native`. Store the fields on `submissions`.
-2. **Lineage rows.** Add a `lineages` table (root ID, root conversation,
-   status, outcome kind, latest final message ID, error, timestamps). `Accept`
-   creates one per external submission in the same transaction.
-3. **Terminal transition.** After `FinishRun` and `FailRun`, end the lineage
-   with a compare-and-set from `active` when nothing in it remains queued or
-   running: `completed` with a final response or `no_update`, otherwise
-   `failed` with `no_final_response` or the run error. An empty answer is no
-   longer a success.
-4. **Staged decisions.** Add a `run_decisions` table (run ID, type, revision,
-   payload) and a store operation that commits a lineage's latest successful
-   root run's decisions inside the terminal transaction.
-5. **Host tools.** Add a host-tool plugin, registered through `Core` with a
-   run-scoped callback instead of store access, and its first tool,
-   `complete_no_update`, offered only when the submission's source kind is
-   `system`.
-6. **Events and API.** Emit `lineage.updated`; include lineage status in
-   `ConversationView`; add `GET /v1/conversations/{id}/lineages/{root_id}`
-   and `POST .../cancel`.
-7. **Client.** `pons client -message` follows its lineage to a terminal
-   status instead of the first final message, and resumes after reconnect.
-8. **System submissions.** Add an internal `Manager.SubmitSystem` entry point
-   used by tests now and by schedules in phase 5.
+1. **Lineage identity.** Add `root_id` to `InputSubmission` and the
+   `input.accepted` payload. External input (human or system) starts a new
+   lineage whose root ID is the accepted input's ID; later agent-sourced input
+   inherits its cause's root ID. Clients cannot set it.
+2. **Lineage events.** Append `lineage.completed`, `lineage.failed`, and
+   `lineage.cancelled` facts (root ID, outcome kind, final assistant output
+   ID, error code) to the root conversation's log. Add a `lineages` index
+   (root ID, conversation, status) that the store rebuilds from events in
+   `rebuild.go`, like submissions and runs.
+3. **Terminal transition.** In the same transaction as `FinishRun` and
+   `FailRun`, end the lineage once nothing with its root ID is queued or
+   running: `completed` with an explicit final response or a committed
+   `no_update`, otherwise `failed` with `no_final_response` or the run error.
+   An empty answer is no longer a success. A terminal lineage accepts no
+   further transitions.
+4. **Staged decisions.** Record a staged decision as a private
+   `agent.decision.staged` event (run ID, type, revision, payload). The
+   terminal transition commits only the latest successful root run's
+   decisions; decisions from failed, cancelled, or superseded runs are
+   ignored.
+5. **Host tools.** Add a host-tool plugin registered through `Core` with a
+   run-scoped callback instead of store access. Its first tool,
+   `complete_no_update`, is offered only when the admitted input's source
+   kind is `system`, and stages a `no_update` decision.
+6. **Views and API.** Project lineage status into `ConversationView` and the
+   web UI; add `GET /v1/conversations/{id}/lineages/{root_id}` and
+   `POST /v1/conversations/{id}/lineages/{root_id}/cancel`. Cancellation
+   appends `lineage.cancelled`, removes its queued input from eligibility,
+   cancels an active run, and fences a late completion.
+7. **Client.** `pons client -message` follows its input's lineage to a
+   terminal status instead of the first final message, and resumes after
+   reconnect from its snapshot cursor.
 
 Tests:
 
 - An empty or turn-exhausted run fails its lineage with a stable code.
-- A system submission can complete with `no_update`; a human one cannot.
+- A `system` input can complete with `no_update`; a `human` one cannot.
 - A decision staged by a failed or superseded run never commits.
 - Cancelling a lineage fences a late run completion.
+- Rebuilding indexes from the log restores lineage status exactly.
 - The client exits on lineage completion and resumes after reconnect.
 
 **Done when:** every conversation shows its lineages with explicit outcomes,
-and an internal system submission can end silently with `no_update`.
+and an internal `system` input can end silently with `no_update`.
 
 ## Phase 4: Principals, a chat connector, and delivery
 
