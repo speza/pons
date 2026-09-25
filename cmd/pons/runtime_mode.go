@@ -23,6 +23,7 @@ import (
 	"github.com/samperrin/pons/environment/e2b"
 	"github.com/samperrin/pons/environment/gitworkspace"
 	"github.com/samperrin/pons/plugins/brain/llm"
+	"github.com/samperrin/pons/plugins/external"
 	"github.com/samperrin/pons/protocol"
 	ponsruntime "github.com/samperrin/pons/runtime"
 	"github.com/samperrin/pons/runtime/agentdir"

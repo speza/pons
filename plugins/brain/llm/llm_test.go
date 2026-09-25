@@ -94,7 +94,10 @@ func newBrain(t *testing.T, c Client) *Brain {
 func TestSeededInstructionCanBeReplacedBeforeFirstResponse(t *testing.T) {
 	fake := &fakeClient{responses: []Turn{{Role: "assistant", Blocks: []Block{Text{Value: "done"}}}}}
 	brain := newBrain(t, fake)
-	brain.Seed([]Turn{{Role: "user", Blocks: []Block{Text{Value: "earlier context"}}}}, "original instruction", "/w", "")
+	if err := brain.Seed([]Turn{{Role: "user", Blocks: []Block{Text{Value: "earlier context"}}}},
+		"original instruction", Hands{Workspace: "/w"}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := brain.Respond(context.Background(), protocol.Observation{Message: "revised instruction", Workspace: "/w"}); err != nil {
 		t.Fatal(err)
 	}
@@ -104,6 +107,30 @@ func TestSeededInstructionCanBeReplacedBeforeFirstResponse(t *testing.T) {
 	text, ok := fake.seen[0][1].Blocks[0].(Text)
 	if !ok || !strings.Contains(text.Value, "revised instruction") || strings.Contains(text.Value, "original instruction") {
 		t.Fatalf("first instruction was not replaced: %+v", fake.seen[0][1])
+	}
+}
+
+func TestSeededInstructionReplacementKeepsMemory(t *testing.T) {
+	fake := &fakeClient{responses: []Turn{{Role: "assistant", Blocks: []Block{Text{Value: "done"}}}}}
+	brain := &Brain{
+		cfg:    Config{Model: "test", Memory: staticMemory(Memory{Index: "- saved fact"})},
+		client: fake,
+		core:   pons.New(),
+	}
+	if err := brain.Seed(nil, "original instruction", Hands{MemoryPath: "/memory"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := brain.Respond(context.Background(), protocol.Observation{Message: "revised instruction"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.seen) != 1 || len(fake.seen[0]) != 1 || len(fake.seen[0][0].Blocks) != 2 {
+		t.Fatalf("seeded turns: %+v", fake.seen)
+	}
+	memory := fake.seen[0][0].Blocks[0].(Text).Value
+	instruction := fake.seen[0][0].Blocks[1].(Text).Value
+	if !strings.Contains(memory, "saved fact") || !strings.Contains(instruction, "revised instruction") ||
+		strings.Contains(instruction, "original instruction") {
+		t.Fatalf("memory or instruction lost: %+v", fake.seen[0][0].Blocks)
 	}
 }
 
