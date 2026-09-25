@@ -185,10 +185,11 @@ corrections, and curation moves to a background memory agent (section 6's
 extraction and consolidation) in phase 7, which revisits sections 3 to 5 for
 multi-principal writes.
 
-The hydrated memory block is per-run context, not conversation history: the
-runtime event log (ADR-0023) records each run's prepared input and compaction
-checkpoints without it, so a later run sees only its own memory, and
-compaction within a run carries the block forward verbatim.
+For now the memory block is hydrated once per conversation, into its first
+user message, and is then ordinary history: the runtime event log (ADR-0023)
+records it immutably with that prepared input, later runs in the conversation
+replay it, and compaction keeps it as the conversation's first turn. A new
+conversation sees memory as it is when that conversation starts.
 
 ## Verification requirements
 

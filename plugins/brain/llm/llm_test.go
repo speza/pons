@@ -3,7 +3,6 @@ package llm
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -423,44 +422,18 @@ func TestMemoryIsShownOncePerRun(t *testing.T) {
 	}
 }
 
-func TestCompactionKeepsMemoryBlock(t *testing.T) {
-	fake := &fakeClient{responses: []Turn{{Role: "assistant", Blocks: []Block{Text{Value: "summary"}}}}}
-	b := newBrain(t, fake)
-	b.cfg.Memory, b.cfg.CompactKeep = &Memory{Index: "- tea"}, 2
-	history := []Turn{
-		{Role: "user", Blocks: []Block{Text{Value: "old question"}}},
-		{Role: "assistant", Blocks: []Block{Text{Value: "old answer"}}},
-	}
-	b.Seed(history, "new question", Hands{MemoryPath: "/memory"})
-	for i := range 4 {
-		b.turns = append(b.turns,
-			Turn{Role: "assistant", Blocks: []Block{Text{Value: fmt.Sprintf("step %d", i)}}},
-			Turn{Role: "user", Blocks: []Block{Text{Value: "ok"}}})
-	}
-	if err := b.compact(context.Background(), 1); err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, turn := range b.turns {
-		for _, block := range turn.Blocks {
-			if text, ok := block.(Text); ok && strings.Contains(text.Value, `<memory path="/memory">`) {
-				found = true
-			}
-		}
-	}
-	if !found {
-		t.Fatalf("compaction dropped the memory block: %+v", b.turns)
-	}
-}
-
-func TestMemoryIsNotPersistedAsHistory(t *testing.T) {
+func TestMemoryIsHistoryFromTheFirstMessage(t *testing.T) {
 	b := &Brain{cfg: Config{Memory: &Memory{Index: "- tea"}}}
 	b.Seed(nil, "hi", Hands{MemoryPath: "/memory"})
 	prepared := b.PreparedInput()
-	if len(prepared.Blocks) != 1 || strings.Contains(prepared.Blocks[0].(Text).Value, "<memory") {
-		t.Fatalf("prepared input keeps memory: %+v", prepared)
+	if len(prepared.Blocks) != 2 || !strings.Contains(prepared.Blocks[0].(Text).Value, `<memory path="/memory">`) {
+		t.Fatalf("first message does not record memory: %+v", prepared)
 	}
-	if len(b.turns[0].Blocks) != 2 {
-		t.Fatalf("the model's own turn lost its memory block: %+v", b.turns[0])
+
+	// A later message in the same conversation replays it as history.
+	later := &Brain{cfg: b.cfg}
+	later.Seed(b.turns, "again", Hands{MemoryPath: "/memory"})
+	if blocks := later.PreparedInput().Blocks; len(blocks) != 1 || strings.Contains(blocks[0].(Text).Value, "<memory") {
+		t.Fatalf("later message repeats memory: %+v", blocks)
 	}
 }

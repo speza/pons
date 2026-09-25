@@ -23,7 +23,6 @@ import (
 	"log"
 	"os"
 	"runtime"
-	"slices"
 	"strings"
 	"time"
 
@@ -173,13 +172,7 @@ type Brain struct {
 	pending     []Result
 	seenMessage string // last message folded into context
 	hands       Hands  // what the seeded run's hands see; shown in <env>
-	// memoryContext is the rendered memory block, kept as its own Text block,
-	// and memoryTurn the index of the turn holding it (-1 when none).
-	// Compaction never summarizes it away, and it is left out of everything
-	// persisted, so later runs see only their own memory.
-	memoryContext string
-	memoryTurn    int
-	logf          func(string, ...any)
+	logf        func(string, ...any)
 }
 
 // New creates the brain plugin (installed with pons.Core.Use).
@@ -534,20 +527,11 @@ func (b *Brain) compact(ctx context.Context, turn int) error {
 	compacted := Turn{Role: "user", Blocks: []Block{Text{Value: fmt.Sprintf(
 		"[Earlier conversation compacted into this summary.]\n\n%s",
 		strings.TrimSpace(summary.String()))}}}
-	memoryTurn := b.memoryTurn
-	switch {
-	case memoryTurn >= 1 && memoryTurn < start:
-		// The memory block was in the summarized middle: carry it verbatim.
-		compacted.Blocks = append(compacted.Blocks, Text{Value: b.memoryContext})
-		memoryTurn = 1
-	case memoryTurn >= start:
-		memoryTurn = memoryTurn - start + 2
-	}
 	context := append([]Turn{b.turns[0], compacted}, tail...)
 	if b.cfg.OnEvent != nil {
 		if err := b.cfg.OnEvent(BrainEvent{
 			Type: "context.compacted", Turn: turn, Summary: compacted.Blocks[0].(Text).Value,
-			CompactedTurns: len(middle), RetainedTurns: len(tail), Turns: b.withoutMemory(context),
+			CompactedTurns: len(middle), RetainedTurns: len(tail), Turns: context,
 		}); err != nil {
 			return fmt.Errorf("%w: %v", errEventPersistence, err)
 		}
@@ -555,25 +539,8 @@ func (b *Brain) compact(ctx context.Context, turn int) error {
 	if b.logf != nil {
 		b.logf("[llm] compacted %d turns into %d-char summary (keeping %d recent)", len(middle), summary.Len(), keep)
 	}
-	b.turns, b.memoryTurn = context, memoryTurn
+	b.turns = context
 	return nil
-}
-
-// withoutMemory copies turns without the run's memory block, which is
-// per-run context rather than conversation history.
-func (b *Brain) withoutMemory(turns []Turn) []Turn {
-	if b.memoryContext == "" {
-		return turns
-	}
-	out := make([]Turn, len(turns))
-	for i, turn := range turns {
-		out[i] = turn
-		out[i].Blocks = slices.DeleteFunc(slices.Clone(turn.Blocks), func(block Block) bool {
-			text, ok := block.(Text)
-			return ok && text.Value == b.memoryContext
-		})
-	}
-	return out
 }
 
 const summarizeSystem = "Summarize this portion of an agent session transcript. " +
@@ -683,23 +650,18 @@ type Hands struct {
 }
 
 // Seed installs a hydrated conversation as the brain's context and the
-// next instruction as the new user turn, with the memory index once per run.
+// next instruction as the new user turn. A conversation's first instruction
+// also carries the memory block, which is then ordinary history: it is
+// recorded with the prepared input, replayed to later runs, and kept by
+// compaction as the first turn.
 // Hydration and compaction interplay for free: if the seeded context exceeds
 // the budget, the next planning call compacts it.
 func (b *Brain) Seed(turns []Turn, message string, hands Hands) {
 	b.pending = nil
 	b.hands = hands
-	context := ""
-	if b.cfg.Memory != nil {
-		context = b.cfg.Memory.render(hands.MemoryPath)
-	}
-	b.memoryContext, b.memoryTurn = context, -1
-	if context != "" {
-		b.memoryTurn = len(turns)
-	}
 	var blocks []Block
-	if context != "" {
-		blocks = append(blocks, Text{Value: context})
+	if b.cfg.Memory != nil && len(turns) == 0 {
+		blocks = append(blocks, Text{Value: b.cfg.Memory.render(hands.MemoryPath)})
 	}
 	blocks = append(blocks, Text{Value: b.userPrompt(protocol.Observation{
 		Message: message, Workspace: hands.Workspace, Platform: hands.Platform, Now: time.Now(),
@@ -711,5 +673,5 @@ func (b *Brain) Seed(turns []Turn, message string, hands Hands) {
 // PreparedInput returns the exact user turn Seed added, including the
 // environment header, for durable context replay.
 func (b *Brain) PreparedInput() Turn {
-	return b.withoutMemory(b.turns[len(b.turns)-1:])[0]
+	return b.turns[len(b.turns)-1]
 }

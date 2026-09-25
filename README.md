@@ -280,9 +280,9 @@ restart the server to change the agent.
 - `PERSONA.md` holds free-form instructions, used verbatim.
 - `memory/` holds the agent's own notes: `MEMORY.md`, an index with one line
   per topic, and one file per topic. The agent keeps these up to date itself,
-  and each run sees `MEMORY.md` (up to 16 KiB) as reference data, never as
-  instructions. You can read or edit the files, but you shouldn't need to.
-  Memory has no history of its own.
+  and each conversation starts with `MEMORY.md` (up to 16 KiB) as reference
+  data, never as instructions. You can read or edit the files, but you
+  shouldn't need to. Memory has no history of its own.
 
 Runs are granted only `memory/`, never the rest of the agent directory.
 The sandbox enforces that, so the agent cannot change `agent.json`,
