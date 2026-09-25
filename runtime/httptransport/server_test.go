@@ -161,7 +161,7 @@ func TestHandlerReportsConfiguredOptions(t *testing.T) {
 
 func TestHandlerUsesIDsOnlyForDurableSSEEvents(t *testing.T) {
 	runtime := &fakeRuntime{events: []ponsruntime.Event{
-		{ID: 7, Type: ponsruntime.EventRunUpdated, ConversationID: "conversation-1", CreatedAt: time.Now()},
+		{ID: 7, Type: ponsruntime.EventRunStarted, ConversationID: "conversation-1", CreatedAt: time.Now()},
 		{Type: ponsruntime.EventAssistantDelta, ConversationID: "conversation-1", Delta: &ponsruntime.TextDelta{MessageID: "draft", PartID: "text", Text: "hi"}, CreatedAt: time.Now()},
 	}}
 	req := httptest.NewRequest(http.MethodGet, "/v1/conversations/conversation-1/events?after=6", nil)
@@ -184,7 +184,7 @@ func TestHandlerUsesIDsOnlyForDurableSSEEvents(t *testing.T) {
 }
 
 func TestScanSSEIgnoresTransportFieldsAndDecodesData(t *testing.T) {
-	input := "id: 3\nevent: run.updated\ndata: {\"cursor\":3,\"type\":\"run.updated\",\"conversation_id\":\"c\",\"created_at\":\"2026-09-19T00:00:00Z\"}\n\n"
+	input := "id: 3\nevent: run.started\ndata: {\"cursor\":3,\"type\":\"run.started\",\"conversation_id\":\"c\",\"created_at\":\"2026-09-19T00:00:00Z\"}\n\n"
 	var events []ponsruntime.Event
 	err := scanSSE(strings.NewReader(input), func(event ponsruntime.Event) error {
 		events = append(events, event)
@@ -193,7 +193,7 @@ func TestScanSSEIgnoresTransportFieldsAndDecodesData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].ID != 3 || events[0].Type != ponsruntime.EventRunUpdated {
+	if len(events) != 1 || events[0].ID != 3 || events[0].Type != ponsruntime.EventRunStarted {
 		t.Fatalf("events = %+v", events)
 	}
 }

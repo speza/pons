@@ -128,6 +128,9 @@ type Config struct {
 	MaxTokens int    // default 4096
 	Persona   string // the agent's identity; empty uses a neutral default
 	Logger    *log.Logger
+	// OnEvent receives completed model output and compaction before the brain
+	// advances. Runtime persistence errors stop the run.
+	OnEvent func(BrainEvent) error
 
 	// Compaction: when the conversation (estimate) exceeds CompactChars,
 	// older turns are summarized into one user message, keeping the last
@@ -141,6 +144,18 @@ type Config struct {
 	// provider configuration; see Fallback.
 	Fallbacks []Fallback
 }
+
+type BrainEvent struct {
+	Type           string
+	Turn           int
+	Blocks         []Block
+	Summary        string
+	CompactedTurns int
+	RetainedTurns  int
+	Turns          []Turn
+}
+
+var errEventPersistence = errors.New("llm: persist event")
 
 // Brain is the LLM-driven ControlPort. It holds the conversation in
 // process and is not safe for concurrent use: drive one Core.Run at a
@@ -345,7 +360,10 @@ func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.Ass
 	b.seenMessage = obs.Message
 
 	if b.shouldCompact() {
-		if err := b.compact(ctx); err != nil {
+		if err := b.compact(ctx, obs.Turn); err != nil {
+			if errors.Is(err, errEventPersistence) {
+				return pons.AssistantResponse{}, err
+			}
 			if b.logf != nil {
 				b.logf("[llm] compaction skipped: %v", err)
 			}
@@ -355,6 +373,11 @@ func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.Ass
 	assistant, err := b.client.Complete(ctx, b.systemPrompt(), b.turns, b.core.ToolSpecs())
 	if err != nil {
 		return pons.AssistantResponse{}, fmt.Errorf("llm: %w", err)
+	}
+	if b.cfg.OnEvent != nil {
+		if err := b.cfg.OnEvent(BrainEvent{Type: "model.completed", Turn: obs.Turn, Blocks: assistant.Blocks}); err != nil {
+			return pons.AssistantResponse{}, fmt.Errorf("llm: record model output: %w", err)
+		}
 	}
 	b.turns = append(b.turns, assistant)
 
@@ -462,7 +485,7 @@ func (b *Brain) shouldCompact() bool {
 // compact summarizes all but the goal and the most recent turns into a
 // single user message. Best effort: a failed summary call leaves the
 // conversation untouched (the next turn simply retries).
-func (b *Brain) compact(ctx context.Context) error {
+func (b *Brain) compact(ctx context.Context, turn int) error {
 	keep := b.cfg.CompactKeep
 	if keep <= 0 {
 		keep = 6
@@ -500,10 +523,19 @@ func (b *Brain) compact(ctx context.Context) error {
 	compacted := Turn{Role: "user", Blocks: []Block{Text{Value: fmt.Sprintf(
 		"[Earlier conversation compacted into this summary.]\n\n%s",
 		strings.TrimSpace(summary.String()))}}}
+	context := append([]Turn{b.turns[0], compacted}, tail...)
+	if b.cfg.OnEvent != nil {
+		if err := b.cfg.OnEvent(BrainEvent{
+			Type: "context.compacted", Turn: turn, Summary: compacted.Blocks[0].(Text).Value,
+			CompactedTurns: len(middle), RetainedTurns: len(tail), Turns: context,
+		}); err != nil {
+			return fmt.Errorf("%w: %v", errEventPersistence, err)
+		}
+	}
 	if b.logf != nil {
 		b.logf("[llm] compacted %d turns into %d-char summary (keeping %d recent)", len(middle), summary.Len(), keep)
 	}
-	b.turns = append([]Turn{b.turns[0], compacted}, tail...)
+	b.turns = context
 	return nil
 }
 
@@ -612,4 +644,10 @@ func (b *Brain) Seed(turns []Turn, message, workspace, platform string) {
 		})}},
 	})
 	b.seenMessage = message
+}
+
+// PreparedInput returns the exact user turn Seed added, including the
+// environment header, for durable context replay.
+func (b *Brain) PreparedInput() Turn {
+	return b.turns[len(b.turns)-1]
 }

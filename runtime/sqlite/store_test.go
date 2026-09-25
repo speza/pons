@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -17,8 +19,16 @@ var (
 	testRevision = testAgent.Revision()
 )
 
+func acceptInput(store *Store, ctx context.Context, conversationID, key string, parts []ponsruntime.TextPart) (ponsruntime.AcceptedMessage, []ponsruntime.Event, error) {
+	return store.Accept(ctx, conversationID, ponsruntime.InputSubmission{
+		IdempotencyKey: key, Parts: parts,
+		Source:        ponsruntime.InputSource{Kind: "human", Adapter: "test"},
+		TargetAgentID: testAgent.ID, AgentRevision: testRevision,
+	})
+}
+
 func TestOpenRejectsOlderExistingDatabase(t *testing.T) {
-	for _, statement := range []string{"PRAGMA user_version = 0", "PRAGMA user_version = 1", "PRAGMA user_version = 2", "PRAGMA user_version = 3", "PRAGMA user_version = 4"} {
+	for _, statement := range []string{"PRAGMA user_version = 0", "PRAGMA user_version = 1", "PRAGMA user_version = 2", "PRAGMA user_version = 3", "PRAGMA user_version = 4", "PRAGMA user_version = 5", "PRAGMA user_version = 6", "PRAGMA user_version = 7", "PRAGMA user_version = 8", "PRAGMA user_version = 9"} {
 		t.Run(statement, func(t *testing.T) {
 			stateDir := t.TempDir()
 			store, err := Open(stateDir)
@@ -79,7 +89,7 @@ func TestConversationGitSelectionSurvivesClaim(t *testing.T) {
 		if err := store.CreateConversation(ctx, conversation); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := store.Accept(ctx, selection.id, "first", testRevision, []ponsruntime.TextPart{{Type: "text", Text: "work"}}); err != nil {
+		if _, _, err := acceptInput(store, ctx, selection.id, "first", []ponsruntime.TextPart{{Type: "text", Text: "work"}}); err != nil {
 			t.Fatal(err)
 		}
 		claim, err := store.ClaimRunnable(ctx)
@@ -92,9 +102,439 @@ func TestConversationGitSelectionSurvivesClaim(t *testing.T) {
 			claim.Conversation.GitAllRepositories != selection.all {
 			t.Fatalf("claim = %+v, want selection %+v", claim, selection)
 		}
-		if _, _, err := store.FinishRun(ctx, claim.Run, "done"); err != nil {
+		if _, err := store.FinishRun(ctx, claim.Run, "done"); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestContentEventsProjectSnapshotAndReplay(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	conversation := ponsruntime.Conversation{ID: "event-log", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	if err := store.CreateConversation(ctx, conversation); err != nil {
+		t.Fatal(err)
+	}
+	first, acceptedEvents, err := acceptInput(store, ctx, conversation.ID, "first", []ponsruntime.TextPart{{Type: "text", Text: "A"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimA, err := store.ClaimRunnable(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimA.Message.ID != first.InboundMessageID || len(claimA.Context) != 0 ||
+		len(claimA.Events) != 2 || claimA.Events[0].Type != ponsruntime.EventInputAdmitted {
+		t.Fatalf("first claim = %+v", claimA)
+	}
+	second, _, err := acceptInput(store, ctx, conversation.ID, "second", []ponsruntime.TextPart{{Type: "text", Text: "B"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinishRun(ctx, claimA.Run, "answer A"); err != nil {
+		t.Fatal(err)
+	}
+	claimB, err := store.ClaimRunnable(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimB.Message.ID != second.InboundMessageID || len(claimB.Context) != 2 ||
+		claimB.Context[0].Content[0].Text != "A" || claimB.Context[1].Content[0].Text != "answer A" {
+		t.Fatalf("second claim history = %+v", claimB.Context)
+	}
+	view, err := store.View(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Messages) != 3 || view.Messages[0].ID != first.InboundMessageID ||
+		view.Messages[1].ID != second.InboundMessageID || view.Messages[2].Role != "assistant" || !view.Messages[2].Final {
+		t.Fatalf("view messages = %+v", view.Messages)
+	}
+	allEvents, err := store.Events(ctx, conversation.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projected []ponsruntime.Message
+	for _, event := range allEvents {
+		switch event.Type {
+		case ponsruntime.EventInputAccepted, ponsruntime.EventAssistantCommitted, ponsruntime.EventToolOutcomeRecorded:
+			message, err := event.ProjectMessage()
+			if err != nil {
+				t.Fatal(err)
+			}
+			projected = append(projected, message)
+		}
+	}
+	if !reflect.DeepEqual(projected, view.Messages) {
+		t.Fatalf("event projection = %+v, snapshot = %+v", projected, view.Messages)
+	}
+	projectedView, err := ponsruntime.ProjectView(view.Conversation, allEvents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectedView.EventCursor = view.EventCursor // private events share the cursor
+	if !reflect.DeepEqual(projectedView, view) {
+		t.Fatalf("event view = %+v, snapshot = %+v", projectedView, view)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE submissions SET status = ?, error = ? WHERE id = ?`,
+		ponsruntime.RunFailed, "stale index", second.InboundMessageID); err != nil {
+		t.Fatal(err)
+	}
+	indexIndependentView, err := store.View(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(indexIndependentView, view) {
+		t.Fatalf("snapshot changed with operational index: %+v", indexIndependentView)
+	}
+	replayed, err := store.Events(ctx, conversation.ID, acceptedEvents[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replayed) == 0 || replayed[len(replayed)-1].ID != view.EventCursor {
+		t.Fatalf("replayed events = %+v; view cursor = %d", replayed, view.EventCursor)
+	}
+	var messageRecords int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE conversation_id = ? AND type IN (?, ?, ?)`,
+		conversation.ID, ponsruntime.EventInputAccepted, ponsruntime.EventAssistantCommitted,
+		ponsruntime.EventToolOutcomeRecorded).Scan(&messageRecords); err != nil {
+		t.Fatal(err)
+	}
+	if messageRecords != len(view.Messages) {
+		t.Fatalf("message records = %d, view messages = %d", messageRecords, len(view.Messages))
+	}
+}
+
+func TestAcceptedInputEnvelopeAndCommonAdmission(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	conversation := ponsruntime.Conversation{ID: "sources", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	if err := store.CreateConversation(ctx, conversation); err != nil {
+		t.Fatal(err)
+	}
+	inputs := []ponsruntime.InputSubmission{
+		{IdempotencyKey: "human-1", Parts: []ponsruntime.TextPart{{Type: "text", Text: "human"}}, Source: ponsruntime.InputSource{Kind: "human", Adapter: "http", PrincipalID: "sam"}, TargetAgentID: testAgent.ID, AgentRevision: testRevision},
+		{IdempotencyKey: "timer-1", Parts: []ponsruntime.TextPart{{Type: "text", Text: "scheduled"}}, Source: ponsruntime.InputSource{Kind: "system", Adapter: "scheduler"}, CausationID: "timer:daily", TargetAgentID: testAgent.ID, AgentRevision: testRevision},
+		{IdempotencyKey: "child-1", Parts: []ponsruntime.TextPart{{Type: "text", Text: "task result"}}, Source: ponsruntime.InputSource{Kind: "agent", Adapter: "delegation", SourceConversationID: "child", SourceAgentID: "agent-child"}, CausationID: "task-1", TargetAgentID: testAgent.ID, AgentRevision: testRevision},
+	}
+	for _, input := range inputs {
+		accepted, events, err := store.Accept(ctx, conversation.ID, input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(events) != 1 || events[0].Input == nil || !reflect.DeepEqual(events[0].Input.InputSubmission, input) {
+			t.Fatalf("accepted event = %+v", events)
+		}
+		duplicate, duplicateEvents, err := store.Accept(ctx, conversation.ID, input)
+		if err != nil || !duplicate.Duplicate || duplicate.InboundMessageID != accepted.InboundMessageID || len(duplicateEvents) != 0 {
+			t.Fatalf("duplicate = %+v, events = %+v, error = %v", duplicate, duplicateEvents, err)
+		}
+		claim, err := store.ClaimRunnable(ctx)
+		if err != nil || claim == nil || claim.Message.ID != accepted.InboundMessageID {
+			t.Fatalf("claim = %+v, error = %v", claim, err)
+		}
+		if len(claim.Events) != 2 || claim.Events[0].Type != ponsruntime.EventInputAdmitted || claim.Events[0].Input != nil || claim.Events[0].InboundMessageID != accepted.InboundMessageID {
+			t.Fatalf("admission = %+v", claim.Events)
+		}
+		if _, err := store.FinishRun(ctx, claim.Run, "done"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := store.Events(ctx, conversation.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var acceptedInputs []ponsruntime.InputSubmission
+	for _, event := range events {
+		if event.Type == ponsruntime.EventInputAccepted {
+			acceptedInputs = append(acceptedInputs, event.Input.InputSubmission)
+		}
+	}
+	if !reflect.DeepEqual(acceptedInputs, inputs) {
+		t.Fatalf("persisted input envelopes = %+v", acceptedInputs)
+	}
+}
+
+func TestAgentEventsShareCursorButStayOutOfClientReplay(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	conversation := ponsruntime.Conversation{ID: "agent-log", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	if err := store.CreateConversation(ctx, conversation); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := acceptInput(store, ctx, conversation.ID, "first", []ponsruntime.TextPart{{Type: "text", Text: "work"}}); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := store.ClaimRunnable(ctx)
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %+v, err = %v", claim, err)
+	}
+	private := ponsruntime.Event{
+		Type: ponsruntime.EventModelCompleted,
+		ModelOutput: &ponsruntime.ModelOutput{
+			Turn:    1,
+			Content: []ponsruntime.AgentContent{{Type: "provider_item", Item: []byte(`{"type":"reasoning","encrypted_content":"secret"}`)}},
+		},
+	}
+	invalid := private
+	invalid.Iteration = &ponsruntime.IterationEvent{Turn: 1}
+	if err := store.AppendAgentEvent(ctx, claim.Run, invalid); err == nil {
+		t.Fatal("accepted an agent event with multiple payload types")
+	}
+	if err := store.AppendAgentEvent(ctx, claim.Run, private); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendAgentEvent(ctx, claim.Run, ponsruntime.Event{
+		Type:          ponsruntime.EventToolExecutionStarted,
+		ToolExecution: &ponsruntime.ToolExecution{Turn: 1, ToolCallID: "call-1", ToolKind: "bash"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinishRun(ctx, claim.Run, "done"); err != nil {
+		t.Fatal(err)
+	}
+	internal, err := store.AgentEvents(ctx, conversation.ID, 0)
+	if err != nil || len(internal) != 2 || internal[0].ModelOutput == nil || internal[0].ModelOutput.Content[0].Type != "provider_item" ||
+		internal[1].Type != ponsruntime.EventToolExecutionStarted || internal[1].ToolExecution == nil || internal[1].ToolExecution.ToolCallID != "call-1" {
+		t.Fatalf("agent events = %+v, err = %v", internal, err)
+	}
+	public, err := store.Events(ctx, conversation.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range public {
+		if event.ID == internal[0].ID || event.ID == internal[1].ID || event.ModelOutput != nil || event.ToolExecution != nil {
+			t.Fatalf("private event leaked into client replay: %+v", event)
+		}
+	}
+	view, err := store.View(ctx, conversation.ID)
+	if err != nil || view.EventCursor != public[len(public)-1].ID {
+		t.Fatalf("view cursor = %d, public tail = %+v, err = %v", view.EventCursor, public[len(public)-1], err)
+	}
+}
+
+func TestClaimReplaysCompactionAndCommittedModelOutput(t *testing.T) {
+	stateDir := t.TempDir()
+	store, err := Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	ctx := context.Background()
+	conversation := ponsruntime.Conversation{ID: "compaction-replay", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	if err := store.CreateConversation(ctx, conversation); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := acceptInput(store, ctx, conversation.ID, "first", []ponsruntime.TextPart{{Type: "text", Text: "first goal"}}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.ClaimRunnable(ctx)
+	if err != nil || first == nil {
+		t.Fatalf("first claim = %+v, err = %v", first, err)
+	}
+	// This input was accepted before compaction but is still queued.
+	if _, _, err := acceptInput(store, ctx, conversation.ID, "second", []ponsruntime.TextPart{{Type: "text", Text: "second goal"}}); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := &ponsruntime.ContextCompaction{
+		Turn: 1, Summary: "summary", Context: []ponsruntime.ContextTurn{
+			{Role: "user", Content: []ponsruntime.AgentContent{{Type: "text", Text: "first goal"}}},
+			{Role: "user", Content: []ponsruntime.AgentContent{{Type: "text", Text: "summary"}}},
+		},
+	}
+	if err := store.AppendAgentEvent(ctx, first.Run, ponsruntime.Event{
+		Type: ponsruntime.EventContextCompacted, Compaction: checkpoint,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendAgentEvent(ctx, first.Run, ponsruntime.Event{
+		Type: ponsruntime.EventModelCompleted,
+		ModelOutput: &ponsruntime.ModelOutput{Turn: 1, Content: []ponsruntime.AgentContent{
+			{Type: "provider_item", Item: []byte(`{"type":"reasoning","encrypted_content":"opaque"}`)},
+			{Type: "text", Text: "first answer"},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinishRun(ctx, first.Run, "first answer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.ClaimRunnable(ctx)
+	if err != nil || second == nil {
+		t.Fatalf("second claim = %+v, err = %v", second, err)
+	}
+	if len(second.Context) != 3 || second.Context[0].Content[0].Text != "first goal" ||
+		second.Context[1].Content[0].Text != "summary" || second.Context[2].Content[0].Type != "provider_item" ||
+		second.Context[2].Content[1].Text != "first answer" {
+		t.Fatalf("compacted context = %+v", second.Context)
+	}
+	if err := store.AppendAgentEvent(ctx, second.Run, ponsruntime.Event{
+		Type: ponsruntime.EventInputPrepared,
+		PreparedInput: &ponsruntime.ContextTurn{
+			Role: "user", Content: []ponsruntime.AgentContent{{Type: "text", Text: "prepared second goal"}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinishRun(ctx, second.Run, "second answer"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := acceptInput(store, ctx, conversation.ID, "third", []ponsruntime.TextPart{{Type: "text", Text: "third goal"}}); err != nil {
+		t.Fatal(err)
+	}
+	third, err := store.ClaimRunnable(ctx)
+	if err != nil || third == nil {
+		t.Fatalf("third claim = %+v, err = %v", third, err)
+	}
+	if len(third.Context) != 5 || third.Context[3].Content[0].Text != "prepared second goal" ||
+		third.Context[4].Content[0].Text != "second answer" {
+		t.Fatalf("context tail after queued input admission = %+v", third.Context)
+	}
+	if err := store.AppendAgentEvent(ctx, third.Run, ponsruntime.Event{
+		Type:        ponsruntime.EventModelCompleted,
+		ModelOutput: &ponsruntime.ModelOutput{Turn: 1, Content: []ponsruntime.AgentContent{{Type: "text", Text: "uncommitted answer"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FailRun(ctx, third.Run, "failed before assistant commit"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := acceptInput(store, ctx, conversation.ID, "fourth", []ponsruntime.TextPart{{Type: "text", Text: "fourth goal"}}); err != nil {
+		t.Fatal(err)
+	}
+	fourth, err := store.ClaimRunnable(ctx)
+	if err != nil || fourth == nil {
+		t.Fatalf("fourth claim = %+v, err = %v", fourth, err)
+	}
+	for _, turn := range fourth.Context {
+		for _, part := range turn.Content {
+			if part.Text == "uncommitted answer" {
+				t.Fatal("uncommitted model response entered context")
+			}
+		}
+	}
+}
+
+func TestClaimProjectsContextFromStartOfLog(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	conversation := ponsruntime.Conversation{ID: "full-context", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	if err := store.CreateConversation(ctx, conversation); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := acceptInput(store, ctx, conversation.ID, "first", []ponsruntime.TextPart{{Type: "text", Text: "first"}}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.ClaimRunnable(ctx)
+	if err != nil || first == nil {
+		t.Fatalf("first claim = %+v, err = %v", first, err)
+	}
+	if err := store.AppendAgentEvent(ctx, first.Run, ponsruntime.Event{
+		Type:          ponsruntime.EventInputPrepared,
+		PreparedInput: &ponsruntime.ContextTurn{Role: "user", Content: []ponsruntime.AgentContent{{Type: "text", Text: "prepared first"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendAgentEvent(ctx, first.Run, ponsruntime.Event{
+		Type: ponsruntime.EventModelCompleted,
+		ModelOutput: &ponsruntime.ModelOutput{Turn: 1, Content: []ponsruntime.AgentContent{
+			{Type: "provider_item", Item: []byte(`{"type":"reasoning","encrypted_content":"opaque"}`)},
+			{Type: "text", Text: "answer"},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinishRun(ctx, first.Run, "answer"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := acceptInput(store, ctx, conversation.ID, "second", []ponsruntime.TextPart{{Type: "text", Text: "next"}}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.ClaimRunnable(ctx)
+	if err != nil || second == nil {
+		t.Fatalf("second claim = %+v, err = %v", second, err)
+	}
+	if len(second.Context) != 2 || second.Context[0].Content[0].Text != "prepared first" ||
+		second.Context[1].Content[0].Type != "provider_item" {
+		t.Fatalf("projected context = %+v", second.Context)
+	}
+}
+
+func TestProjectedContextGroupsParallelToolResults(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	conversation := ponsruntime.Conversation{ID: "tool-tail", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	if err := store.CreateConversation(ctx, conversation); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := acceptInput(store, ctx, conversation.ID, "first", []ponsruntime.TextPart{{Type: "text", Text: "work"}}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.ClaimRunnable(ctx)
+	if err != nil || first == nil {
+		t.Fatalf("first claim = %+v, err = %v", first, err)
+	}
+	if err := store.AppendAgentEvent(ctx, first.Run, ponsruntime.Event{
+		Type: ponsruntime.EventContextCompacted,
+		Compaction: &ponsruntime.ContextCompaction{Turn: 1, Context: []ponsruntime.ContextTurn{
+			{Role: "user", Content: []ponsruntime.AgentContent{{Type: "text", Text: "summary"}}},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	parts := []ponsruntime.MessagePart{
+		{Type: "tool_call", ToolCallID: "a", ToolKind: "fake", Arguments: []byte(`{}`)},
+		{Type: "tool_call", ToolCallID: "b", ToolKind: "fake", Arguments: []byte(`{}`)},
+	}
+	if _, err := store.CommitAssistantTurn(ctx, first.Run, parts); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"a", "b"} {
+		if _, err := store.ToolCompleted(ctx, first.Run, protocol.ToolResult{ActionID: id, Kind: "fake", OK: true, Output: id + " result"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.FinishRun(ctx, first.Run, "done"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := acceptInput(store, ctx, conversation.ID, "second", []ponsruntime.TextPart{{Type: "text", Text: "next"}}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.ClaimRunnable(ctx)
+	if err != nil || second == nil {
+		t.Fatalf("second claim = %+v, err = %v", second, err)
+	}
+	if len(second.Context) != 4 || len(second.Context[2].Content) != 2 ||
+		second.Context[2].Content[0].ToolCallID != "a" ||
+		second.Context[2].Content[1].ToolCallID != "b" {
+		t.Fatalf("tool result tail = %+v", second.Context)
 	}
 }
 
@@ -112,7 +552,7 @@ func TestIndependentRemoteWorkspacesCanBeClaimedTogether(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := store.Accept(ctx, id, "first", testRevision, []ponsruntime.TextPart{{Type: "text", Text: "work"}}); err != nil {
+		if _, _, err := acceptInput(store, ctx, id, "first", []ponsruntime.TextPart{{Type: "text", Text: "work"}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -149,7 +589,6 @@ func TestTimestampColumnsUseIntegerStorage(t *testing.T) {
 	defer store.Close()
 	for table, columns := range map[string][]string{
 		"conversations":          {"created_at"},
-		"messages":               {"created_at"},
 		"submissions":            {"accepted_at"},
 		"runs":                   {"started_at", "completed_at"},
 		"tool_calls":             {"updated_at"},
@@ -407,7 +846,7 @@ func TestToolCallIDsAreScopedToTheirRun(t *testing.T) {
 	}
 	var runIDs []string
 	for _, key := range []string{"first", "second"} {
-		if _, _, err := store.Accept(ctx, conversation.ID, key, testRevision, []ponsruntime.TextPart{{Type: "text", Text: key}}); err != nil {
+		if _, _, err := acceptInput(store, ctx, conversation.ID, key, []ponsruntime.TextPart{{Type: "text", Text: key}}); err != nil {
 			t.Fatal(err)
 		}
 		claim, err := store.ClaimRunnable(ctx)
@@ -423,7 +862,7 @@ func TestToolCallIDsAreScopedToTheirRun(t *testing.T) {
 		if _, err := store.ToolCompleted(ctx, claim.Run, protocol.ToolResult{ActionID: "call_1", Kind: "fake", OK: true}); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := store.FinishRun(ctx, claim.Run, "done"); err != nil {
+		if _, err := store.FinishRun(ctx, claim.Run, "done"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -438,6 +877,145 @@ func TestToolCallIDsAreScopedToTheirRun(t *testing.T) {
 		if tool.ID != "call_1" || tool.RunID != runIDs[i] {
 			t.Fatalf("tool call %d = %+v, want id call_1 in run %s", i, tool, runIDs[i])
 		}
+	}
+	events, err := store.Events(ctx, conversation.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projected, err := ponsruntime.ProjectView(view.Conversation, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projected.EventCursor = view.EventCursor
+	if !reflect.DeepEqual(projected, view) {
+		t.Fatalf("tool replay view = %+v, snapshot = %+v", projected, view)
+	}
+}
+
+func TestOpenRebuildsIndexesAndRecoversUncertainTool(t *testing.T) {
+	stateDir := t.TempDir()
+	store, err := Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	conversation := ponsruntime.Conversation{ID: "rebuild", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	if err := store.CreateConversation(ctx, conversation); err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := acceptInput(store, ctx, conversation.ID, "first", []ponsruntime.TextPart{{Type: "text", Text: "first"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := store.ClaimRunnable(ctx)
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %+v, error = %v", claim, err)
+	}
+	if _, err := store.CommitAssistantTurn(ctx, claim.Run, []ponsruntime.MessagePart{
+		{Type: "tool_call", ToolCallID: "finished", ToolKind: "fake", Arguments: protocol.MustArgsJSON(map[string]any{})},
+		{Type: "tool_call", ToolCallID: "uncertain", ToolKind: "fake", Arguments: protocol.MustArgsJSON(map[string]any{})},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ToolCompleted(ctx, claim.Run, protocol.ToolResult{ActionID: "finished", Kind: "fake", OK: true}); err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := acceptInput(store, ctx, conversation.ID, "second", []ponsruntime.TextPart{{Type: "text", Text: "second"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"tool_calls", "runs", "submissions"} {
+		if _, err := store.db.ExecContext(ctx, "DELETE FROM "+table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE conversations SET next_event_cursor = 1 WHERE id = ?`, conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	assertStoredStatus(t, store, "submissions", first.InboundMessageID, ponsruntime.RunRunning)
+	assertStoredStatus(t, store, "submissions", second.InboundMessageID, ponsruntime.RunQueued)
+	assertStoredStatus(t, store, "runs", claim.Run.ID, ponsruntime.RunRunning)
+	assertToolStatus(t, store, claim.Run.ID, "finished", ponsruntime.ToolCompleted)
+	assertToolStatus(t, store, claim.Run.ID, "uncertain", ponsruntime.ToolRequested)
+	duplicate, duplicateEvents, err := acceptInput(store, ctx, conversation.ID, "first", []ponsruntime.TextPart{{Type: "text", Text: "first"}})
+	if err != nil || !duplicate.Duplicate || duplicate.InboundMessageID != first.InboundMessageID || len(duplicateEvents) != 0 {
+		t.Fatalf("duplicate after rebuild = %+v, events = %+v, error = %v", duplicate, duplicateEvents, err)
+	}
+	if err := store.RecoverRunning(ctx); err != nil {
+		t.Fatal(err)
+	}
+	assertStoredStatus(t, store, "runs", claim.Run.ID, ponsruntime.RunFailed)
+	assertToolStatus(t, store, claim.Run.ID, "finished", ponsruntime.ToolCompleted)
+	assertToolStatus(t, store, claim.Run.ID, "uncertain", ponsruntime.ToolInterrupted)
+	events, err := store.Events(ctx, conversation.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var finished, interrupted int
+	for _, event := range events {
+		if event.Type != ponsruntime.EventToolOutcomeRecorded {
+			continue
+		}
+		switch event.ToolOutcome.ToolCallID {
+		case "finished":
+			finished++
+		case "uncertain":
+			interrupted++
+		}
+	}
+	if finished != 1 || interrupted != 1 {
+		t.Fatalf("tool outcomes after recovery: finished=%d uncertain=%d", finished, interrupted)
+	}
+	next, err := store.ClaimRunnable(ctx)
+	if err != nil || next == nil || next.Message.ID != second.InboundMessageID {
+		t.Fatalf("next claim = %+v, error = %v", next, err)
+	}
+}
+
+func TestIndexRebuildRollsBackWhenLogIsInvalid(t *testing.T) {
+	stateDir := t.TempDir()
+	store, err := Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	conversation := ponsruntime.Conversation{ID: "invalid-log", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	if err := store.CreateConversation(ctx, conversation); err != nil {
+		t.Fatal(err)
+	}
+	accepted, events, err := acceptInput(store, ctx, conversation.ID, "key", []ponsruntime.TextPart{{Type: "text", Text: "hello"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := events[0]
+	bad.ConversationID = "wrong-conversation"
+	payload, err := json.Marshal(bad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE events SET payload = ? WHERE conversation_id = ? AND cursor = ?`,
+		payload, conversation.ID, events[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.rebuildIndexes(ctx); err == nil {
+		t.Fatal("rebuilt indexes from an invalid event")
+	}
+	assertStoredStatus(t, store, "submissions", accepted.InboundMessageID, ponsruntime.RunQueued)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened, err := Open(stateDir); err == nil {
+		_ = reopened.Close()
+		t.Fatal("opened a store with an invalid event log")
 	}
 }
 
@@ -454,7 +1032,7 @@ func TestFailRunAtomicallyInterruptsRequestedTools(t *testing.T) {
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Accept(ctx, conversation.ID, "key", testRevision, []ponsruntime.TextPart{{Type: "text", Text: "go"}}); err != nil {
+	if _, _, err := acceptInput(store, ctx, conversation.ID, "key", []ponsruntime.TextPart{{Type: "text", Text: "go"}}); err != nil {
 		t.Fatal(err)
 	}
 	claim, err := store.ClaimRunnable(ctx)
@@ -483,7 +1061,7 @@ END`); err != nil {
 	assertToolStatus(t, store, claim.Run.ID, "call_1", ponsruntime.ToolRequested)
 	var toolMessages int
 	if err := store.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM messages WHERE run_id = ? AND role = 'tool'`, claim.Run.ID,
+		`SELECT COUNT(*) FROM events WHERE conversation_id = ? AND type = ?`, conversation.ID, ponsruntime.EventToolOutcomeRecorded,
 	).Scan(&toolMessages); err != nil {
 		t.Fatal(err)
 	}
@@ -497,8 +1075,9 @@ END`); err != nil {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 4 {
-		t.Fatalf("failure events = %d, want 4", len(events))
+	if len(events) != 2 || events[0].Type != ponsruntime.EventToolOutcomeRecorded ||
+		events[0].ToolOutcome.Status != ponsruntime.ToolInterrupted || events[1].Type != ponsruntime.EventRunFailed {
+		t.Fatalf("failure events = %+v, want interrupted tool outcome and failed run", events)
 	}
 	assertStoredStatus(t, store, "runs", claim.Run.ID, ponsruntime.RunFailed)
 	assertStoredStatus(t, store, "submissions", claim.Run.InboundMessageID, ponsruntime.RunFailed)
@@ -544,10 +1123,13 @@ func TestAgentRevisionIsRecordedOnSubmissionAndRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	parts := []ponsruntime.TextPart{{Type: "text", Text: "go"}}
-	if _, _, err := store.Accept(ctx, conversation.ID, "empty", "", parts); err == nil {
+	if _, _, err := store.Accept(ctx, conversation.ID, ponsruntime.InputSubmission{
+		IdempotencyKey: "empty", Parts: parts,
+		Source: ponsruntime.InputSource{Kind: "human", Adapter: "test"}, TargetAgentID: testAgent.ID,
+	}); err == nil {
 		t.Fatal("accepted a submission without an agent revision")
 	}
-	if _, _, err := store.Accept(ctx, conversation.ID, "key", testRevision, parts); err != nil {
+	if _, _, err := acceptInput(store, ctx, conversation.ID, "key", parts); err != nil {
 		t.Fatal(err)
 	}
 	claim, err := store.ClaimRunnable(ctx)
@@ -557,7 +1139,7 @@ func TestAgentRevisionIsRecordedOnSubmissionAndRun(t *testing.T) {
 	if claim.Run.AgentRevision != testRevision || claim.Conversation.AgentID != testAgent.ID {
 		t.Fatalf("claim run = %+v, conversation = %+v", claim.Run, claim.Conversation)
 	}
-	if _, _, err := store.FinishRun(ctx, claim.Run, "done"); err != nil {
+	if _, err := store.FinishRun(ctx, claim.Run, "done"); err != nil {
 		t.Fatal(err)
 	}
 	view, err := store.View(ctx, conversation.ID)

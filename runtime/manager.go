@@ -168,10 +168,16 @@ func (m *Manager) Conversations(ctx context.Context) ([]Conversation, error) {
 }
 
 func (m *Manager) Submit(ctx context.Context, conversationID, key string, parts []TextPart) (AcceptedMessage, error) {
-	if strings.TrimSpace(key) == "" {
-		return AcceptedMessage{}, errors.New("runtime: idempotency key is required")
-	}
-	if err := validateParts(parts); err != nil {
+	return m.SubmitInput(ctx, conversationID, InputSubmission{
+		IdempotencyKey: key, Parts: parts,
+		Source: InputSource{Kind: "human", Adapter: "http"},
+	})
+}
+
+// SubmitInput is the common admission path for trusted ingress adapters.
+// The HTTP transport uses Submit so clients cannot forge system or agent input.
+func (m *Manager) SubmitInput(ctx context.Context, conversationID string, input InputSubmission) (AcceptedMessage, error) {
+	if err := ValidateInputSubmission(input); err != nil {
 		return AcceptedMessage{}, err
 	}
 
@@ -184,7 +190,17 @@ func (m *Manager) Submit(ctx context.Context, conversationID, key string, parts 
 		c.mu.Unlock()
 		return AcceptedMessage{}, fmt.Errorf("runtime: conversation agent %q is not configured", c.conversation.AgentID)
 	}
-	accepted, events, err := m.store.Accept(ctx, conversationID, key, m.revision, parts)
+	if input.TargetAgentID != "" && input.TargetAgentID != c.conversation.AgentID {
+		c.mu.Unlock()
+		return AcceptedMessage{}, errors.New("runtime: input targets another agent")
+	}
+	if input.AgentRevision != "" && input.AgentRevision != m.revision {
+		c.mu.Unlock()
+		return AcceptedMessage{}, errors.New("runtime: input selects another agent revision")
+	}
+	input.TargetAgentID = c.conversation.AgentID
+	input.AgentRevision = m.revision
+	accepted, events, err := m.store.Accept(ctx, conversationID, input)
 	if err != nil {
 		c.mu.Unlock()
 		return AcceptedMessage{}, err
@@ -196,6 +212,33 @@ func (m *Manager) Submit(ctx context.Context, conversationID, key string, parts 
 		m.notify()
 	}
 	return accepted, nil
+}
+
+// ValidateInputSubmission checks the shared contract before an ingress fact is
+// appended. The store repeats this check for callers outside Manager.
+func ValidateInputSubmission(input InputSubmission) error {
+	if strings.TrimSpace(input.IdempotencyKey) == "" {
+		return errors.New("runtime: idempotency key is required")
+	}
+	if err := validateParts(input.Parts); err != nil {
+		return err
+	}
+	if strings.TrimSpace(input.Source.Adapter) == "" {
+		return errors.New("runtime: input source adapter is required")
+	}
+	switch input.Source.Kind {
+	case "human":
+		return nil
+	case "system":
+		return nil
+	case "agent":
+		if input.Source.SourceConversationID == "" || input.Source.SourceAgentID == "" || input.CausationID == "" {
+			return errors.New("runtime: agent input requires source conversation, agent, and causation")
+		}
+		return nil
+	default:
+		return fmt.Errorf("runtime: unsupported input source %q", input.Source.Kind)
+	}
 }
 
 func validateParts(parts []TextPart) error {

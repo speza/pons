@@ -265,7 +265,14 @@ func TestCompactionCollapsesMiddleTurns(t *testing.T) {
 		{Role: "assistant", Blocks: []Block{Text{Value: "SUMMARY: two pings ran; state is fine."}}},
 		{Role: "assistant", Blocks: []Block{Text{Value: "all done"}}},
 	}}
-	b := &Brain{cfg: Config{CompactChars: 10, CompactKeep: 2}, client: fake, core: pons.New()}
+	var recorded []BrainEvent
+	b := &Brain{cfg: Config{
+		CompactChars: 10, CompactKeep: 2,
+		OnEvent: func(event BrainEvent) error {
+			recorded = append(recorded, event)
+			return nil
+		},
+	}, client: fake, core: pons.New()}
 
 	ctx := context.Background()
 	obs := protocol.Observation{Turn: 1, Message: "test goal"}
@@ -284,6 +291,12 @@ func TestCompactionCollapsesMiddleTurns(t *testing.T) {
 	// collapsed context.
 	if _, err := b.Respond(ctx, obs); err != nil {
 		t.Fatal(err)
+	}
+	if len(recorded) != 4 || recorded[2].Type != "context.compacted" ||
+		!strings.Contains(recorded[2].Summary, "SUMMARY: two pings ran") ||
+		len(recorded[2].Turns) < 2 ||
+		recorded[3].Type != "model.completed" || recorded[3].Turn != 1 {
+		t.Fatalf("brain events = %+v", recorded)
 	}
 
 	// seen[2] is the summarizer request: it carries the collapsed middle
