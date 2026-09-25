@@ -68,3 +68,19 @@ test("tool calls retain run-scoped identity during replay", () => {
   });
   assert.deepEqual(live.messages.map((message) => message.id), ["m", "result", "m2", "result2"]);
 });
+
+test("failed and stopped runs add notice messages", () => {
+  const created_at = "2026-09-25T00:00:00Z";
+  const empty = { conversation: { conversation_id: "c" }, messages: [], submissions: [], tool_calls: [], event_cursor: 0 };
+  const run = (id, status, error) => ({ id, conversation_id: "c", inbound_message_id: id, status, error, started_at: created_at });
+  const events = [
+    { cursor: 1, type: "run.failed", conversation_id: "c", run_id: "a", inbound_message_id: "a", run: run("a", "failed", "provider down"), created_at },
+    { cursor: 2, type: "run.stopped", conversation_id: "c", run_id: "b", inbound_message_id: "b", run: run("b", "stopped", "stopped by request"), created_at },
+  ];
+  const live = events.reduce(applyEvent, empty);
+  assert.deepEqual(live.messages.map((message) => [message.id, message.role, message.notice.status, message.parts[0].text]), [
+    ["a:notice", "notice", "failed", "An error occurred while generating a response. Try again."],
+    ["b:notice", "notice", "stopped", "Stopped. The response was not finished."],
+  ]);
+  assert.equal(live.messages[0].notice.error, "provider down");
+});

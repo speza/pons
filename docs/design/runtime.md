@@ -125,6 +125,15 @@ provider emits multiple output blocks. `complete` marks the durable semantic
 boundary; `final` is reserved for the terminal text response which completes
 an inbound submission.
 
+### Notice
+
+The chat entry for a run that ended without an answer. A `run.failed` or
+`run.stopped` event projects one notice message (role `notice`) with fixed
+text, "An error occurred while generating a response. Try again." or "Stopped.
+The response was not finished.", and a `notice` object holding the status and
+the technical error. The terminal run event is the durable record; snapshots
+and live replay derive the same message from it.
+
 ### Tool result
 
 The observation for one tool call. It is correlated by the tool-call ID within
@@ -467,6 +476,7 @@ tool.outcome.recorded
 run.started
 run.completed
 run.failed
+run.stopped
 environment.progress
 ```
 
@@ -528,6 +538,19 @@ The server durably accepts the message before returning:
 
 with the conversation and inbound message IDs. Retrying with the same
 idempotency key must not append a duplicate user message.
+
+### Stop the active run
+
+```http
+POST /v1/conversations/{conversation_id}/stop
+```
+
+Cancels the conversation's running run and returns `202 Accepted` with it, or
+`409 Conflict` when nothing is running. The runner unwinds through normal
+cancellation; the runtime then marks still-requested tools interrupted and
+appends `run.stopped` in one transaction. A run that finishes its answer before
+noticing the stop completes normally. Queued messages are not affected, and
+disconnecting a client stops nothing.
 
 The CLI wraps the API as:
 

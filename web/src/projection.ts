@@ -1,5 +1,10 @@
 import type { ConversationView, RuntimeEvent, ToolCall } from "./types";
 
+// These match the runtime's NoticeFailedText and NoticeStoppedText so live
+// replay renders the same message as a snapshot.
+const noticeFailedText = "An error occurred while generating a response. Try again.";
+const noticeStoppedText = "Stopped. The response was not finished.";
+
 function upsert<T extends { id: string }>(items: T[], item: T): T[] {
   const index = items.findIndex((existing) => existing.id === item.id);
   if (index < 0) return [...items, item];
@@ -80,6 +85,17 @@ export function applyEvent(view: ConversationView, event: RuntimeEvent): Convers
     case "run.started":
     case "run.completed":
     case "run.failed":
+    case "run.stopped":
+      if ((event.type === "run.failed" || event.type === "run.stopped") && event.run && event.run_id) {
+        const stopped = event.type === "run.stopped";
+        next.messages = upsert(next.messages, {
+          id: `${event.run_id}:notice`, conversation_id: event.conversation_id,
+          inbound_message_id: event.inbound_message_id, run_id: event.run_id,
+          role: "notice", complete: true, created_at: event.created_at,
+          notice: { status: stopped ? "stopped" : "failed", error: event.run.error },
+          parts: [{ type: "text", text: stopped ? noticeStoppedText : noticeFailedText }],
+        });
+      }
       next.active_run = event.type === "run.started" ? event.run : undefined;
       if (event.run) {
         const submission = next.submissions?.find((item) => item.id === event.run?.inbound_message_id);

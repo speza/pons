@@ -3,6 +3,7 @@ package httptransport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -164,5 +165,23 @@ func TestSendCreatesConversationWithWorkspaceSelection(t *testing.T) {
 	if runtime.createdOptions != selection || len(runtime.submitted) != 1 || runtime.submitted[0].Text != "hello" ||
 		result.ConversationID != "new-conversation" || result.Answer != "done" {
 		t.Fatalf("selection=%+v submitted=%+v result=%+v", runtime.createdOptions, runtime.submitted, result)
+	}
+}
+
+func TestSendReportsStoppedRun(t *testing.T) {
+	runtime := &fakeRuntime{
+		created:  ponsruntime.Conversation{ID: "conversation"},
+		accepted: ponsruntime.AcceptedMessage{ConversationID: "conversation", InboundMessageID: "input"},
+		events: []ponsruntime.Event{{
+			Type: ponsruntime.EventRunStopped, InboundMessageID: "input", RunID: "run",
+			Run: &ponsruntime.Run{ID: "run", InboundMessageID: "input", Status: ponsruntime.RunStopped},
+		}},
+	}
+	server := httptest.NewServer(Handler(runtime))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := (Client{BaseURL: server.URL}).Send(ctx, "", "key", "hello", ponsruntime.ConversationOptions{}, nil, nil); !errors.Is(err, ErrRunStopped) {
+		t.Fatalf("send error = %v, want ErrRunStopped", err)
 	}
 }

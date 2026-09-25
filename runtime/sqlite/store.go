@@ -970,6 +970,22 @@ func (s *Store) FinishRun(ctx context.Context, run ponsruntime.Run, answer strin
 }
 
 func (s *Store) FailRun(ctx context.Context, run ponsruntime.Run, message string) ([]ponsruntime.Event, error) {
+	return s.endRun(ctx, run, ponsruntime.RunFailed, ponsruntime.EventRunFailed, message)
+}
+
+// StopRun records a run ended at the owner's request. Like FailRun, it
+// resolves still-requested tools as interrupted in the same transaction.
+func (s *Store) StopRun(ctx context.Context, run ponsruntime.Run) ([]ponsruntime.Event, error) {
+	return s.endRun(ctx, run, ponsruntime.RunStopped, ponsruntime.EventRunStopped, "stopped by request")
+}
+
+func (s *Store) endRun(
+	ctx context.Context,
+	run ponsruntime.Run,
+	status string,
+	eventType string,
+	message string,
+) ([]ponsruntime.Event, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return nil, err
@@ -980,17 +996,17 @@ func (s *Store) FailRun(ctx context.Context, run ponsruntime.Run, message string
 	if err != nil {
 		return nil, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE submissions SET status = ?, error = ? WHERE id = ?`, ponsruntime.RunFailed, message, run.InboundMessageID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE submissions SET status = ?, error = ? WHERE id = ?`, status, message, run.InboundMessageID); err != nil {
 		return nil, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE runs SET status = ?, error = ?, completed_at = ? WHERE id = ?`, ponsruntime.RunFailed, message, encodeTime(now), run.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET status = ?, error = ?, completed_at = ? WHERE id = ?`, status, message, encodeTime(now), run.ID); err != nil {
 		return nil, err
 	}
-	failed := run
-	failed.Status, failed.Error, failed.CompletedAt = ponsruntime.RunFailed, message, &now
+	ended := run
+	ended.Status, ended.Error, ended.CompletedAt = status, message, &now
 	runEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
-		Type: ponsruntime.EventRunFailed, ConversationID: run.ConversationID, RunID: run.ID,
-		InboundMessageID: run.InboundMessageID, Run: &failed, CreatedAt: now,
+		Type: eventType, ConversationID: run.ConversationID, RunID: run.ID,
+		InboundMessageID: run.InboundMessageID, Run: &ended, CreatedAt: now,
 	})
 	if err != nil {
 		return nil, err

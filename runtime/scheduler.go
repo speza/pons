@@ -41,12 +41,18 @@ func (m *Manager) dispatch() {
 			return
 		}
 
+		// Register the run before announcing it, so a client that sees
+		// run.started can always stop it.
+		ctx, cancel := context.WithCancel(m.ctx)
+		m.mu.Lock()
+		m.runs[claim.Run.ConversationID] = &activeRun{run: claim.Run, cancel: cancel}
+		m.mu.Unlock()
+
 		live := m.ensureLiveConversation(claim.Conversation)
 		live.mu.Lock()
 		live.broadcastLocked(claim.Events...)
 		live.mu.Unlock()
 
-		ctx, cancel := context.WithCancel(m.ctx)
 		m.wg.Add(1)
 		go live.work(ctx, cancel, claim)
 	}
@@ -69,13 +75,24 @@ func (c *liveConversation) work(ctx context.Context, cancel context.CancelFunc, 
 		result, runErr = c.execute(ctx, agent, claim)
 	}
 	cancel()
+	c.manager.mu.Lock()
+	stopped := c.manager.runs[claim.Run.ConversationID].stopped
+	delete(c.manager.runs, claim.Run.ConversationID)
+	c.manager.mu.Unlock()
 
 	c.mu.Lock()
 	var backgroundErr error
 	// Terminal persistence deliberately outlives the canceled run context. On
 	// shutdown or runner cancellation we still need to durably resolve the run
 	// and mark any requested tool outcome as unknown rather than strand it.
-	if runErr != nil {
+	if runErr != nil && stopped {
+		events, persistErr := c.manager.store.StopRun(context.Background(), claim.Run)
+		if persistErr == nil {
+			c.broadcastLocked(events...)
+		} else {
+			backgroundErr = fmt.Errorf("runtime: persist stopped run %s: %w", claim.Run.ID, persistErr)
+		}
+	} else if runErr != nil {
 		events, persistErr := c.manager.store.FailRun(context.Background(), claim.Run, runErr.Error())
 		if persistErr == nil {
 			c.broadcastLocked(events...)

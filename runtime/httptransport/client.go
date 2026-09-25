@@ -326,6 +326,9 @@ func (c Client) Send(ctx context.Context, conversationID, idempotencyKey, text s
 			if submission.ID == accepted.InboundMessageID && submission.Status == ponsruntime.RunFailed {
 				return SendResult{}, errors.New(submission.Error)
 			}
+			if submission.ID == accepted.InboundMessageID && submission.Status == ponsruntime.RunStopped {
+				return SendResult{}, ErrRunStopped
+			}
 		}
 	}
 
@@ -367,10 +370,15 @@ func (c Client) Send(ctx context.Context, conversationID, idempotencyKey, text s
 				if event.Run != nil && event.Run.Status == ponsruntime.RunFailed {
 					return SendResult{}, errors.New(event.Run.Error)
 				}
+			case ponsruntime.EventRunStopped:
+				return SendResult{}, ErrRunStopped
 			}
 		}
 	}
 }
+
+// ErrRunStopped reports that the owner stopped the run before it answered.
+var ErrRunStopped = errors.New("runtime HTTP client: the run was stopped")
 
 type answerMessage struct{ id, text string }
 

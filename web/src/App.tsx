@@ -18,6 +18,7 @@ import {
   getConversation,
   listConversations,
   newIdempotencyKey,
+  stopRun,
   submitMessage,
 } from "./api";
 import { applyEvent } from "./projection";
@@ -29,7 +30,6 @@ import type {
   MessagePart,
   RuntimeOptions,
   RuntimeEvent,
-  Submission,
   ToolCall,
   ToolResult,
 } from "./types";
@@ -330,13 +330,6 @@ function App() {
     }
     return grouped;
   }, [view?.environment_events]);
-  const failedSubmissionsByMessage = useMemo(() => {
-    const failures = new Map<string, Submission>();
-    for (const submission of view?.submissions ?? []) {
-      if (submission.status === "failed") failures.set(submission.message_id, submission);
-    }
-    return failures;
-  }, [view?.submissions]);
   const firstSetupMessageId = visibleMessages.find(
     (message) => message.role === "user" && environmentLogsByMessage.has(message.id),
   )?.id;
@@ -392,6 +385,18 @@ function App() {
       setError(`${cause instanceof Error ? cause.message : "Could not submit message"}. Retry is safe.`);
     } finally {
       setSending(false);
+    }
+  };
+
+  // The stop is recorded when the run unwinds and arrives as run.stopped on
+  // the event stream, so the view updates from the log, not this response.
+  const stopActiveRun = async () => {
+    if (!activeId) return;
+    setError("");
+    try {
+      await stopRun(activeId);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not stop the run");
     }
   };
 
@@ -607,6 +612,11 @@ function App() {
                 {runStatus === "queued" ? "Queued" : `Running${runStage ? ` · ${runStage}` : ""}`}
               </span>
             )}
+            {runStatus === "running" && (
+              <button className="stop-button" type="button" onClick={() => void stopActiveRun()}>
+                Stop
+              </button>
+            )}
           </div>
         </header>
 
@@ -654,7 +664,6 @@ function App() {
                     toolProgress={toolProgress}
                     toolCallsByKey={toolCallsByKey}
                     toolResultsByKey={toolResultsByKey}
-                    failure={message.role === "user" ? failedSubmissionsByMessage.get(message.id) : undefined}
                   />
                   {message.role === "user" && environmentLogsByMessage.has(message.id) && (
                     <EnvironmentSetupLog
@@ -740,15 +749,15 @@ function agentName(agent?: AgentSummary): string {
 }
 
 function MessageBubble({
-  message, agentName, toolProgress, toolCallsByKey, toolResultsByKey, failure,
+  message, agentName, toolProgress, toolCallsByKey, toolResultsByKey,
 }: {
   message: Message;
   agentName: string;
   toolProgress: Record<string, string>;
   toolCallsByKey: Map<string, ToolCall>;
   toolResultsByKey: Map<string, ToolResult>;
-  failure?: Submission;
 }) {
+  if (message.role === "notice") return <NoticeView message={message} />;
   const role = message.role === "user" ? "user" : message.role === "tool" ? "tool" : "assistant";
   return (
     <article className={`message message--${role}`}>
@@ -770,13 +779,24 @@ function MessageBubble({
             />
           ))}
         </div>
-        {failure && (
-          <div className="run-failure" role="alert">
-            <strong>Run failed</strong>
-            <span>{failure.error || "The run failed before pons could respond."}</span>
-          </div>
-        )}
       </div>
+    </article>
+  );
+}
+
+// NoticeView is the chat entry for a run that failed or was stopped. The
+// technical error stays one click away.
+function NoticeView({ message }: { message: Message }) {
+  const failed = message.notice?.status === "failed";
+  return (
+    <article className={`notice notice--${failed ? "failed" : "stopped"}`} role={failed ? "alert" : "status"}>
+      <span>{message.parts.map((part) => part.text).join("")}</span>
+      {failed && message.notice?.error && (
+        <details>
+          <summary>Details</summary>
+          <code>{message.notice.error}</code>
+        </details>
+      )}
     </article>
   );
 }

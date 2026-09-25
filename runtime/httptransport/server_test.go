@@ -22,6 +22,7 @@ type fakeRuntime struct {
 	createdOptions ponsruntime.ConversationOptions
 	conversations  []ponsruntime.Conversation
 	createdEnv     string
+	stopErr        error
 }
 
 func (f *fakeRuntime) CreateConversation(_ context.Context, options ponsruntime.ConversationOptions) (ponsruntime.Conversation, error) {
@@ -52,6 +53,35 @@ func (f *fakeRuntime) Subscribe(_ context.Context, _ string, after uint64) (<-ch
 	}
 	close(stream)
 	return stream, nil
+}
+
+func (f *fakeRuntime) StopRun(_ context.Context, conversationID string) (ponsruntime.Run, error) {
+	if f.stopErr != nil {
+		return ponsruntime.Run{}, f.stopErr
+	}
+	return ponsruntime.Run{ID: "run", ConversationID: conversationID, Status: ponsruntime.RunRunning}, nil
+}
+
+func TestHandlerStopsActiveRun(t *testing.T) {
+	runtime := &fakeRuntime{}
+	handler := Handler(runtime)
+	stop := func() *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/conversations/c/stop", nil))
+		return recorder
+	}
+
+	if response := stop(); response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), `"id":"run"`) {
+		t.Fatalf("stop = %d %s", response.Code, response.Body)
+	}
+	runtime.stopErr = ponsruntime.ErrNoActiveRun
+	if response := stop(); response.Code != http.StatusConflict {
+		t.Fatalf("stop without an active run = %d %s", response.Code, response.Body)
+	}
+	runtime.stopErr = ponsruntime.ErrNotFound
+	if response := stop(); response.Code != http.StatusNotFound {
+		t.Fatalf("stop in a missing conversation = %d %s", response.Code, response.Body)
+	}
 }
 
 func TestHandlerReturnsConversationSnapshot(t *testing.T) {

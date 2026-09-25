@@ -12,6 +12,10 @@ import (
 
 var ErrClosed = errors.New("runtime: manager is closed")
 
+// ErrNoActiveRun reports a stop request for a conversation with nothing
+// running.
+var ErrNoActiveRun = errors.New("runtime: conversation has no active run")
+
 type Config struct {
 	// Agent is the current definition of the server's agent; new
 	// conversations and submissions use it. AgentRevisions must already
@@ -42,13 +46,21 @@ type Manager struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	wake     chan struct{}
-	// mu protects convs, active, and closed. It is never held across store calls
-	// or while acquiring a liveConversation mutex.
-	mu     sync.Mutex
-	convs  map[string]*liveConversation
+	// mu protects convs, runs, active, and closed. It is never held across
+	// store calls or while acquiring a liveConversation mutex.
+	mu    sync.Mutex
+	convs map[string]*liveConversation
+	// runs holds this process's executing run for each conversation.
+	runs   map[string]*activeRun
 	active int
 	closed bool
 	wg     sync.WaitGroup
+}
+
+type activeRun struct {
+	run     Run
+	cancel  context.CancelFunc
+	stopped bool
 }
 
 func New(cfg Config) (*Manager, error) {
@@ -83,6 +95,7 @@ func New(cfg Config) (*Manager, error) {
 	m := &Manager{
 		cfg: cfg, store: cfg.Store, revision: cfg.Agent.Revision(), ctx: ctx, cancel: cancel,
 		wake: make(chan struct{}, 1), convs: make(map[string]*liveConversation),
+		runs: make(map[string]*activeRun),
 	}
 	// The scheduler remains in the wait group for the Manager's whole open
 	// lifetime. Runs are added only by that scheduler, so Close cannot race a
@@ -212,6 +225,25 @@ func (m *Manager) SubmitInput(ctx context.Context, conversationID string, input 
 		m.notify()
 	}
 	return accepted, nil
+}
+
+// StopRun asks the conversation's active run to stop. The run's context is
+// cancelled and, once the runner returns, the run is recorded as stopped:
+// requested tools are marked interrupted and run.stopped is appended to the
+// log. A run that finishes its answer before noticing still completes.
+func (m *Manager) StopRun(ctx context.Context, conversationID string) (Run, error) {
+	if _, err := m.conversation(ctx, conversationID); err != nil {
+		return Run{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	active := m.runs[conversationID]
+	if active == nil {
+		return Run{}, ErrNoActiveRun
+	}
+	active.stopped = true
+	active.cancel()
+	return active.run, nil
 }
 
 // ValidateInputSubmission checks the shared contract before an ingress fact is
