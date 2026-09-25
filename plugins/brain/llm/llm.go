@@ -23,6 +23,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -127,9 +128,10 @@ type Config struct {
 	BaseURL   string // override the provider endpoint
 	MaxTokens int    // default 4096
 	Persona   string // the agent's identity; empty uses a neutral default
-	// Memory, when set, adds the harness rules for keeping memory and
-	// hydrates the run's memory index as attributed data.
-	Memory *Memory
+	// Memory, when set, adds the harness rules for keeping memory and loads
+	// the memory index, hydrated as attributed data into a conversation's
+	// first message and again after each compaction.
+	Memory func() (Memory, error)
 	Logger *log.Logger
 	// OnEvent receives completed model output and compaction before the brain
 	// advances. Runtime persistence errors stop the run.
@@ -527,7 +529,18 @@ func (b *Brain) compact(ctx context.Context, turn int) error {
 	compacted := Turn{Role: "user", Blocks: []Block{Text{Value: fmt.Sprintf(
 		"[Earlier conversation compacted into this summary.]\n\n%s",
 		strings.TrimSpace(summary.String()))}}}
-	context := append([]Turn{b.turns[0], compacted}, tail...)
+	first := b.turns[0]
+	if b.cfg.Memory != nil {
+		// Compaction invalidates the prompt cache anyway, so replace the
+		// conversation's original memory block with memory as it is now.
+		block, err := b.memoryBlock()
+		if err != nil {
+			return err
+		}
+		first.Blocks = slices.DeleteFunc(slices.Clone(first.Blocks), isMemoryBlock)
+		compacted.Blocks = append(compacted.Blocks, block)
+	}
+	context := append([]Turn{first, compacted}, tail...)
 	if b.cfg.OnEvent != nil {
 		if err := b.cfg.OnEvent(BrainEvent{
 			Type: "context.compacted", Turn: turn, Summary: compacted.Blocks[0].(Text).Value,
@@ -652,22 +665,44 @@ type Hands struct {
 // Seed installs a hydrated conversation as the brain's context and the
 // next instruction as the new user turn. A conversation's first instruction
 // also carries the memory block, which is then ordinary history: it is
-// recorded with the prepared input, replayed to later runs, and kept by
-// compaction as the first turn.
-// Hydration and compaction interplay for free: if the seeded context exceeds
-// the budget, the next planning call compacts it.
-func (b *Brain) Seed(turns []Turn, message string, hands Hands) {
+// recorded with the prepared input and replayed to later runs until a
+// compaction replaces it with a freshly loaded block. Hydration and
+// compaction interplay for free: if the seeded context exceeds the budget,
+// the next planning call compacts it.
+func (b *Brain) Seed(turns []Turn, message string, hands Hands) error {
 	b.pending = nil
 	b.hands = hands
 	var blocks []Block
 	if b.cfg.Memory != nil && len(turns) == 0 {
-		blocks = append(blocks, Text{Value: b.cfg.Memory.render(hands.MemoryPath)})
+		block, err := b.memoryBlock()
+		if err != nil {
+			return err
+		}
+		blocks = append(blocks, block)
 	}
 	blocks = append(blocks, Text{Value: b.userPrompt(protocol.Observation{
 		Message: message, Workspace: hands.Workspace, Platform: hands.Platform, Now: time.Now(),
 	})})
 	b.turns = append(append([]Turn(nil), turns...), Turn{Role: "user", Blocks: blocks})
 	b.seenMessage = message
+	return nil
+}
+
+// memoryBlock loads the memory index and renders it where the hands see
+// the memory directory.
+func (b *Brain) memoryBlock() (Block, error) {
+	memory, err := b.cfg.Memory()
+	if err != nil {
+		return nil, fmt.Errorf("llm: load memory: %w", err)
+	}
+	return Text{Value: memory.render(b.hands.MemoryPath)}, nil
+}
+
+// isMemoryBlock reports whether a block is a rendered memory block. Memory
+// text cannot open its own frame, and instructions start with <env>.
+func isMemoryBlock(block Block) bool {
+	text, ok := block.(Text)
+	return ok && strings.HasPrefix(text.Value, memoryFrameOpen)
 }
 
 // PreparedInput returns the exact user turn Seed added, including the

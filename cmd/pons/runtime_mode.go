@@ -591,8 +591,14 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		if err != nil {
 			return result, err
 		}
-		brainConfig.Memory = &llm.Memory{Index: memory.Index, Truncated: memory.Truncated}
 		memoryGrant = []string{memory.Path}
+		// Loaded from the host copy for a conversation's first message and
+		// after each compaction. On E2B the host copy gains this run's own
+		// edits only when the run ends.
+		brainConfig.Memory = func() (llm.Memory, error) {
+			memory, err := r.agents.Memory(agent.ID, agentdir.DefaultMemoryBudget)
+			return llm.Memory{Index: memory.Index, Truncated: memory.Truncated}, err
+		}
 	}
 	// Build the brain before provisioning hands so configuration errors fail
 	// fast; what the hands see arrives with Seed.
@@ -699,7 +705,9 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}
 	core.Workspace, core.Platform = metadata.WorkspacePath, metadata.Platform
 
-	brain.Seed(turns, request.Text, hands)
+	if err := brain.Seed(turns, request.Text, hands); err != nil {
+		return result, err
+	}
 	prepared := brain.PreparedInput()
 	preparedContent, err := runtimeAgentContent(prepared.Blocks)
 	if err != nil {

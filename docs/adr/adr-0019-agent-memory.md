@@ -188,7 +188,9 @@ multi-principal writes.
 For now the memory block is hydrated once per conversation, into its first
 user message, and is then ordinary history: the runtime event log (ADR-0023)
 records it immutably with that prepared input, later runs in the conversation
-replay it, and compaction keeps it as the conversation's first turn. A new
+replay it. Compaction, which invalidates the prompt cache anyway, drops that
+block and adds memory as it is at that point to the compaction checkpoint,
+so a long conversation refreshes its memory whenever it is compacted. A new
 conversation sees memory as it is when that conversation starts.
 
 ## Verification requirements
