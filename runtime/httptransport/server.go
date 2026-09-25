@@ -66,10 +66,7 @@ func HandlerWithOptions(runtime Runtime, options HandlerOptions) http.Handler {
 
 func cloneHandlerOptions(options HandlerOptions) HandlerOptions {
 	options.Environments = append([]string(nil), options.Environments...)
-	if len(options.Environments) == 0 {
-		options.Environments = []string{"none"}
-	}
-	if strings.TrimSpace(options.DefaultEnvironment) == "" {
+	if strings.TrimSpace(options.DefaultEnvironment) == "" && len(options.Environments) != 0 {
 		options.DefaultEnvironment = options.Environments[0]
 	}
 	return options

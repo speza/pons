@@ -271,19 +271,14 @@ func testProvisionGitWorkspace(t *testing.T, revision string) {
 		switch {
 		case r.URL.Path == "/process.Process/Start":
 			body, _ := io.ReadAll(r.Body)
-			var request struct {
-				Process struct {
-					Cmd  string
-					Args []string
-				}
-			}
-			if len(body) < 5 || json.Unmarshal(body[5:], &request) != nil {
+			request, ok := decodeStart(body)
+			if !ok {
 				t.Error("invalid process frame")
 				return
 			}
 			commands = append(commands, strings.Join(append([]string{request.Process.Cmd}, request.Process.Args...), " "))
 			w.Header().Set("Content-Type", "application/connect+json")
-			_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"end": map[string]string{"status": "exit status 0"}}})
+			writeEnd(w)
 		case r.URL.Path == "/files" && r.Method == http.MethodGet:
 			_, _ = w.Write(archive)
 		default:
@@ -348,10 +343,8 @@ func TestProvisionGitWorkspaceRedactsAuthenticatedFetchFailure(t *testing.T) {
 			return
 		}
 		body, _ := io.ReadAll(r.Body)
-		var request struct {
-			Process struct{ Args []string }
-		}
-		if len(body) < 5 || json.Unmarshal(body[5:], &request) != nil {
+		request, ok := decodeStart(body)
+		if !ok {
 			t.Error("invalid process frame")
 			return
 		}
@@ -363,7 +356,7 @@ func TestProvisionGitWorkspaceRedactsAuthenticatedFetchFailure(t *testing.T) {
 			_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"end": map[string]string{"status": "exit status 1"}}})
 			return
 		}
-		_ = writeConnectFrame(w, map[string]any{"event": map[string]any{"end": map[string]string{"status": "exit status 0"}}})
+		writeEnd(w)
 	}))
 	defer server.Close()
 	store := &recordingStateStore{}

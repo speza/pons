@@ -32,6 +32,7 @@ type e2bSession struct {
 	onError           func(error)
 	onDebug           func(string)
 	credentials       gitworkspace.Credentials
+	synced            []syncedDirectory
 	metadata          environment.Metadata
 	keepaliveCancel   context.CancelFunc
 	keepaliveDone     chan struct{}
@@ -179,6 +180,7 @@ func (s *e2bSession) Close() error {
 		}
 		s.closeErr = s.host.Close()
 		retain := s.store != nil
+		s.syncDirectoriesOut()
 		// Stop active-state writes before publishing the recovery reservation.
 		// A past heartbeat failure does not prevent a fresh checkpoint attempt.
 		s.stopKeepalive()

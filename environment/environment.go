@@ -51,7 +51,12 @@ type WorkspacePlan struct {
 // Spec is the explicit policy and launch input for one hands environment.
 // WorkspaceID is the independent logical workspace identity. WorkspacePath is
 // the host-local path used directly by local providers or once as an archive
-// source. Command[0] must be an absolute pons-hands executable path.
+// source. ReadWrite grants further host directories, such as the agent's
+// memory: local providers grant them in place, and remote providers copy them
+// in at start and apply the run's changes back when the session closes.
+// Hands file tools accept any absolute path, so the grant is the
+// environment's alone.
+// Command[0] must be an absolute pons-hands executable path.
 // Environment is a clean, explicit list of KEY=VALUE entries; the parent
 // environment is never inherited.
 type Spec struct {
@@ -60,6 +65,7 @@ type Spec struct {
 	RunID              string
 	Command            []string
 	ReadOnly           []string
+	ReadWrite          []string
 	Network            NetworkPolicy
 	Environment        []string
 	Limits             ResourceLimits
@@ -76,8 +82,11 @@ type Metadata struct {
 	EnvironmentID string
 	WorkspaceID   string
 	WorkspacePath string
-	Platform      string // GOOS/GOARCH of the execution environment
-	Network       NetworkPolicy
+	// ReadWrite holds the hands-side path of each Spec.ReadWrite directory,
+	// in order.
+	ReadWrite []string
+	Platform  string // GOOS/GOARCH of the execution environment
+	Network   NetworkPolicy
 }
 
 // Provider provisions a hands environment and establishes its endpoint.

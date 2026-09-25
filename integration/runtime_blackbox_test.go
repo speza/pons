@@ -29,12 +29,13 @@ const (
 	fixtureContent = "fixture-content-42"
 )
 
+// TestRuntimeBlackBox drives the compiled server with hands under Seatbelt.
+// Hands only run in a sandbox, and Seatbelt is the local one, so the test
+// needs macOS.
 func TestRuntimeBlackBox(t *testing.T) {
-	exerciseRuntime(t, false)
-}
-
-func exerciseRuntime(t *testing.T, seatbelt bool) {
-	t.Helper()
+	if runtime.GOOS != "darwin" {
+		t.Skip("hands run only in a sandbox; the local Seatbelt sandbox requires macOS")
+	}
 	provider := newFakeOpenAI(t)
 	workspace := t.TempDir()
 	stateDir := t.TempDir()
@@ -42,8 +43,8 @@ func exerciseRuntime(t *testing.T, seatbelt bool) {
 		t.Fatal(err)
 	}
 
-	binaries := buildBinaries(t, seatbelt)
-	server := startRuntimeServer(t, binaries.pons, binaries.hands, provider.URL()+"/v1", workspace, stateDir, seatbelt)
+	binaries := buildBinaries(t)
+	server := startRuntimeServer(t, binaries.pons, binaries.hands, provider.URL()+"/v1", workspace, stateDir)
 	defer server.Stop()
 
 	if body := getHealth(t, server.URL()); body != `{"status":"ok"}` {
@@ -78,7 +79,7 @@ func exerciseRuntime(t *testing.T, seatbelt bool) {
 	}
 
 	server.Stop()
-	server = startRuntimeServer(t, binaries.pons, binaries.hands, provider.URL()+"/v1", workspace, stateDir, seatbelt)
+	server = startRuntimeServer(t, binaries.pons, binaries.hands, provider.URL()+"/v1", workspace, stateDir)
 
 	restartedView := getConversation(t, server.URL(), conversation.ID)
 	if restartedView.EventCursor != firstCursor {
@@ -136,7 +137,7 @@ type builtBinaries struct {
 	hands string
 }
 
-func buildBinaries(t *testing.T, hands bool) builtBinaries {
+func buildBinaries(t *testing.T) builtBinaries {
 	t.Helper()
 	repoRoot := repositoryRoot(t)
 	binDir := t.TempDir()
@@ -149,10 +150,8 @@ func buildBinaries(t *testing.T, hands bool) builtBinaries {
 		}
 	}
 	build(result.pons, "./cmd/pons")
-	if hands {
-		result.hands = filepath.Join(binDir, "pons-hands")
-		build(result.hands, "./cmd/pons-hands")
-	}
+	result.hands = filepath.Join(binDir, "pons-hands")
+	build(result.hands, "./cmd/pons-hands")
 	return result
 }
 
@@ -173,7 +172,7 @@ type runtimeServer struct {
 	stderrBuf bytes.Buffer
 }
 
-func startRuntimeServer(t *testing.T, ponsBinary, handsBinary, providerURL, workspace, stateDir string, seatbelt bool) *runtimeServer {
+func startRuntimeServer(t *testing.T, ponsBinary, handsBinary, providerURL, workspace, stateDir string) *runtimeServer {
 	t.Helper()
 	args := []string{
 		"serve",
@@ -185,9 +184,8 @@ func startRuntimeServer(t *testing.T, ponsBinary, handsBinary, providerURL, work
 		"-addr", "127.0.0.1:0",
 		"-max-turns", "4",
 		"-runtime-concurrency", "1",
-	}
-	if seatbelt {
-		args = append(args, "-sandbox", "seatbelt", "-hands-command", handsBinary)
+		"-sandbox", "seatbelt",
+		"-hands-command", handsBinary,
 	}
 	cmd := exec.Command(ponsBinary, args...)
 	cmd.Dir = workspace

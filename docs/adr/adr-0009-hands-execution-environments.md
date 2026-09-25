@@ -1,7 +1,7 @@
 # ADR-0009: Hands execute inside provider-backed environments
 
 **Status:** Accepted
-**Implementation:** Environment contract, Seatbelt, and E2B providers implemented
+**Implementation:** Environment contract, Seatbelt, and E2B providers implemented; in-process hands removed from the server (persistent-agents plan phase 2)
 **Date:** 2026-09-18
 **Related:** ADR-0004, ADR-0007, ADR-0008
 
@@ -47,6 +47,11 @@ any one remote service. An environment provider owns provisioning, policy,
 connectivity, health, and teardown. The host continues to own action
 correlation and execution deadlines.
 
+Every run executes its hands in an environment. The server has no in-process
+hands composition and refuses to start without a provider: Seatbelt is the
+default on macOS, and E2B is required elsewhere until a local Linux provider
+exists.
+
 ### 2. One complete tool host runs inside an environment
 
 The environment contains one `pons-hands` tool host with the built-in hands
@@ -56,6 +61,10 @@ registers the tool host's discovered catalog as proxy tools in `Core`.
 Individual tools are not independently sandboxed in v1. A single environment
 provides the workspace and process context shared by the hands in one active
 agent burst. The brain and its conversation remain outside the environment.
+Inside it, file tools resolve relative paths in the workspace but accept any
+absolute path, as `bash` already can: the environment alone decides what is
+reachable, including host directories it grants beyond the workspace, such
+as an agent's memory.
 
 ### 3. `tool_provider/v1` remains the communication contract
 

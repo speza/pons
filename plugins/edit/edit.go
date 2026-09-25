@@ -58,7 +58,8 @@ func Patch(path, patch string) protocol.Action {
 
 // Edit is the edit_file tool plugin.
 type Edit struct {
-	root string // resolved jail root
+	root    string // resolved jail root
+	resolve func(root, path string) (string, error)
 	// The operation is a read-modify-write. Serialize edits so concurrent
 	// actions cannot lose one another's changes (ADR-0006).
 	mu sync.Mutex
@@ -67,6 +68,10 @@ type Edit struct {
 // Config tunes the plugin.
 type Config struct {
 	Root string // jail root; "" = process cwd
+	// Unconfined accepts absolute paths outside Root, for hands running in an
+	// execution environment that alone decides what is reachable (ADR-0004).
+	// Relative paths still resolve under Root.
+	Unconfined bool
 }
 
 // New creates the plugin (installed with pons.Core.Use).
@@ -75,7 +80,7 @@ func New(cfg Config) (*Edit, error) {
 	if err != nil {
 		return nil, fmt.Errorf("edit: %w", err)
 	}
-	return &Edit{root: root}, nil
+	return &Edit{root: root, resolve: jail.Resolver(cfg.Unconfined)}, nil
 }
 
 // Setup registers the edit tool.
@@ -84,7 +89,7 @@ func (p *Edit) Setup(c *pons.Core) error {
 		Handler:     p.apply,
 		Description: "Edit a single file by applying SEARCH/REPLACE patch blocks. Every SEARCH text must match a unique region of the file (exact match; trailing whitespace and unicode quotes are normalized as a fallback). Do not include large unchanged regions.",
 		Params: []pons.ToolParam{
-			{Name: "path", Type: "string", Description: "File to edit (relative to the workspace root, or absolute within it)", Required: true},
+			{Name: "path", Type: "string", Description: "File to edit (relative to the workspace root, or an absolute path you have access to)", Required: true},
 			{Name: "patch", Type: "string", Description: "One or more blocks: '<<<<<<< SEARCH' / old text / '=======' / new text / '>>>>>>> REPLACE'", Required: true},
 		},
 	})
@@ -158,7 +163,7 @@ func (p *Edit) apply(ctx context.Context, a protocol.Action) (protocol.ToolResul
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: "invalid arguments: " + err.Error()}, nil
 	}
 
-	path, err := jail.ResolvePath(p.root, pathArg)
+	path, err := p.resolve(p.root, pathArg)
 	if err != nil {
 		return protocol.ToolResult{ActionID: a.ID, OK: false, Error: err.Error()}, nil
 	}

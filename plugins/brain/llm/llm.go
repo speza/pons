@@ -23,6 +23,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -127,7 +128,11 @@ type Config struct {
 	BaseURL   string // override the provider endpoint
 	MaxTokens int    // default 4096
 	Persona   string // the agent's identity; empty uses a neutral default
-	Logger    *log.Logger
+	// Memory, when set, adds the harness rules for keeping memory and loads
+	// the memory index, hydrated as attributed data into a conversation's
+	// first message and again after each compaction.
+	Memory func() (Memory, error)
+	Logger *log.Logger
 	// OnEvent receives completed model output and compaction before the brain
 	// advances. Runtime persistence errors stop the run.
 	OnEvent func(BrainEvent) error
@@ -168,6 +173,7 @@ type Brain struct {
 	turns       []Turn
 	pending     []Result
 	seenMessage string // last message folded into context
+	hands       Hands  // what the seeded run's hands see; shown in <env>
 	logf        func(string, ...any)
 }
 
@@ -349,13 +355,13 @@ func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.Ass
 	}
 	if len(b.turns) == 0 {
 		// First turn: the goal as the opening user message.
-		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: userPrompt(obs)}}})
+		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: b.userPrompt(obs)}}})
 	} else if obs.Message != "" && obs.Message != b.seenMessage {
 		// A new instruction arrived (interactive follow-up, resumed run
 		// with a fresh goal): append it with a fresh <env> block. This is
 		// intentionally independent of pending results: an instruction
 		// arriving after an exhausted run must not be discarded.
-		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: userPrompt(obs)}}})
+		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: b.userPrompt(obs)}}})
 	}
 	b.seenMessage = obs.Message
 
@@ -523,7 +529,18 @@ func (b *Brain) compact(ctx context.Context, turn int) error {
 	compacted := Turn{Role: "user", Blocks: []Block{Text{Value: fmt.Sprintf(
 		"[Earlier conversation compacted into this summary.]\n\n%s",
 		strings.TrimSpace(summary.String()))}}}
-	context := append([]Turn{b.turns[0], compacted}, tail...)
+	first := b.turns[0]
+	if b.cfg.Memory != nil {
+		// Compaction invalidates the prompt cache anyway, so replace the
+		// conversation's original memory block with memory as it is now.
+		block, err := b.memoryBlock()
+		if err != nil {
+			return err
+		}
+		first.Blocks = slices.DeleteFunc(slices.Clone(first.Blocks), isMemoryBlock)
+		compacted.Blocks = append(compacted.Blocks, block)
+	}
+	context := append([]Turn{first, compacted}, tail...)
 	if b.cfg.OnEvent != nil {
 		if err := b.cfg.OnEvent(BrainEvent{
 			Type: "context.compacted", Turn: turn, Summary: compacted.Blocks[0].(Text).Value,
@@ -583,8 +600,8 @@ func truncText(s string, n int) string {
 
 // userPrompt renders a new instruction with the environment the brain is
 // working in: the jailed workspace (the model is blind to everything not
-// stated here), the platform, and the date.
-func userPrompt(obs protocol.Observation) string {
+// stated here), the platform, the hands' network policy, and the date.
+func (b *Brain) userPrompt(obs protocol.Observation) string {
 	now := obs.Now
 	if now.IsZero() {
 		now = time.Now()
@@ -597,6 +614,9 @@ func userPrompt(obs protocol.Observation) string {
 		platform = runtime.GOOS + "/" + runtime.GOARCH
 	}
 	fmt.Fprintf(&sb, "os: %s\n", platform)
+	if b.hands.Network != "" {
+		fmt.Fprintf(&sb, "network: %s\n", b.hands.Network)
+	}
 	fmt.Fprintf(&sb, "date: %s\n", now.Format("2006-01-02"))
 	sb.WriteString("</env>\n\n")
 	sb.WriteString(obs.Message)
@@ -632,18 +652,57 @@ func stringify(in map[string]any) json.RawMessage {
 	return b
 }
 
+// Hands is what a run's hands report once their environment starts.
+type Hands struct {
+	Workspace string
+	Platform  string
+	Network   string
+	// MemoryPath is where the hands see the memory directory; it is used
+	// only when Config.Memory is set.
+	MemoryPath string
+}
+
 // Seed installs a hydrated conversation as the brain's context and the
-// next instruction as the new user turn. Hydration and compaction interplay
-// for free: if the seeded context exceeds the budget, the next planning
-// call compacts it.
-func (b *Brain) Seed(turns []Turn, message, workspace, platform string) {
+// next instruction as the new user turn. A conversation's first instruction
+// also carries the memory block, which is then ordinary history: it is
+// recorded with the prepared input and replayed to later runs until a
+// compaction replaces it with a freshly loaded block. Hydration and
+// compaction interplay for free: if the seeded context exceeds the budget,
+// the next planning call compacts it.
+func (b *Brain) Seed(turns []Turn, message string, hands Hands) error {
 	b.pending = nil
-	b.turns = append(append([]Turn(nil), turns...), Turn{
-		Role: "user", Blocks: []Block{Text{Value: userPrompt(protocol.Observation{
-			Message: message, Workspace: workspace, Platform: platform, Now: time.Now(),
-		})}},
-	})
+	b.hands = hands
+	var blocks []Block
+	if b.cfg.Memory != nil && len(turns) == 0 {
+		block, err := b.memoryBlock()
+		if err != nil {
+			return err
+		}
+		blocks = append(blocks, block)
+	}
+	blocks = append(blocks, Text{Value: b.userPrompt(protocol.Observation{
+		Message: message, Workspace: hands.Workspace, Platform: hands.Platform, Now: time.Now(),
+	})})
+	b.turns = append(append([]Turn(nil), turns...), Turn{Role: "user", Blocks: blocks})
 	b.seenMessage = message
+	return nil
+}
+
+// memoryBlock loads the memory index and renders it where the hands see
+// the memory directory.
+func (b *Brain) memoryBlock() (Block, error) {
+	memory, err := b.cfg.Memory()
+	if err != nil {
+		return nil, fmt.Errorf("llm: load memory: %w", err)
+	}
+	return Text{Value: memory.render(b.hands.MemoryPath)}, nil
+}
+
+// isMemoryBlock reports whether a block is a rendered memory block. Memory
+// text cannot open its own frame, and instructions start with <env>.
+func isMemoryBlock(block Block) bool {
+	text, ok := block.(Text)
+	return ok && strings.HasPrefix(text.Value, memoryFrameOpen)
 }
 
 // PreparedInput returns the exact user turn Seed added, including the

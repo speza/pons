@@ -33,11 +33,11 @@ and SSE path.
 
 Runs are globally bounded and SQLite claims runnable work only when its
 conversation and workspace have no active run. This is transactional local
-exclusion, not a renewable distributed lease. When an
-execution-environment provider is configured, each run starts a fresh hands
-session, registers only its discovered proxy tools, and closes the session
-before becoming idle. The Seatbelt provider launches `pons-hands`; the
-unsandboxed development composition registers in-process tools explicitly.
+exclusion, not a renewable distributed lease. Each run starts a fresh hands
+session in the configured execution environment, registers only its
+discovered proxy tools, and closes the session before becoming idle. The
+Seatbelt and E2B providers both launch `pons-hands`; the server has no
+in-process hands and refuses to start without a provider.
 
 The runtime persists one durable conversation event log and indexed
 operational state in SQLite. Complete semantic messages are event log entries
@@ -59,15 +59,16 @@ make test-integration
 make test-integration-race
 ```
 
-It builds `cmd/pons` and launches that binary against a local,
-OpenAI-compatible fake provider. The test then uses the real loopback API and
+It builds `cmd/pons` and `cmd/pons-hands` and launches the server, with hands
+under Seatbelt, against a local, OpenAI-compatible fake provider, so it needs
+macOS; on other platforms the targets fail rather than skip. The test then uses the real loopback API and
 SSE stream, persists through SQLite, performs a real `read_file` tool
 round-trip, kills and restarts the server, replays the durable event cursor,
 checks idempotency, and continues the conversation through the compiled CLI.
-It has no API-key or external-network dependency. On macOS, the opt-in
-`make test-integration-seatbelt` target repeats the same flow with a compiled
-`pons-hands` process under Seatbelt. The live model/provider and Seatbelt smoke
-path remains intentionally separate under `make smoke-runtime`.
+It has no API-key or external-network dependency. The default `make test`
+suite covers the same server flow over HTTP on any platform, serving the real
+`pons-hands` tool host over in-memory pipes. The live model/provider and
+Seatbelt smoke path remains intentionally separate under `make smoke-runtime`.
 
 The runtime queues a message arriving during an active run as the next fresh
 burst. It deliberately does not inject later submissions into an active run;
@@ -97,8 +98,8 @@ The public HTTP resource and logical interaction. Its opaque server-generated
 ID scopes one canonical event log and its operational indexes in the runtime
 store. A conversation also records its selected execution
 environment; the server validates this opaque choice against the providers it
-configured before persisting the conversation. `none` uses the in-process
-hands, while `seatbelt` or `e2b` selects the corresponding configured provider.
+configured before persisting the conversation. The server configures one
+provider, `seatbelt` or `e2b`, and an unset choice selects it.
 
 `POST /v1/conversations` requires a host workspace or a Git repository with a
 base commit or branch.

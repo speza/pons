@@ -73,8 +73,9 @@ command exit remains a domain result according to ADR-0003.
 
 ## Consequences
 
-- The local in-process configuration remains simple and uses the same
-  execution contract as external hands.
+- The `Core` library still composes in-process hands (as `pons-demo` does),
+  using the same execution contract as external hands; the runtime server
+  always runs them in an environment (ADR-0009).
 - External child processes provide a crash and resource-control boundary, but
   not a permissions boundary by themselves.
 - Security-sensitive deployments must configure the OS/container/VM boundary

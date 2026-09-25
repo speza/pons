@@ -76,9 +76,13 @@ For a reusable setup, put server defaults in `~/.pons/config.json`:
 }
 ```
 
-Log in once, then run a task:
+Tools always run in a sandbox. On macOS that is Seatbelt, which needs the
+`pons-hands` tool host on your `PATH`; on Linux use E2B (see
+[below](#hands-sandboxes-and-external-plugins)) until a local Linux sandbox
+exists. Install `pons-hands`, log in once, then run a task:
 
 ```sh
+go install ./cmd/pons-hands
 go run ./cmd/pons -login
 go run ./cmd/pons -message "inspect this project"
 ```
@@ -168,8 +172,8 @@ then select **New conversation**. With E2B, the Git source takes a
 credential-free HTTPS repository URL and either a branch name or a full
 40-character commit SHA. Pons uses the branch tip when it first provisions the
 workspace, then creates a separate work branch. E2B can also upload a host
-directory as the initial workspace. In-process and Seatbelt conversations use
-a host directory.
+directory as the initial workspace. Seatbelt conversations use a host
+directory.
 
 For a host directory, enter its **absolute path on the server host** (for
 example, `/Users/you/projects/my-project`). The path must exist inside
@@ -180,15 +184,16 @@ The browser uses the same HTTP/SSE runtime API as the CLI. Frontend source is
 in [`web/`](web/); run `make web-build` after changing it, then rebuild the
 server so it embeds the new assets.
 
-When the server is started with `-sandbox seatbelt` or `-sandbox e2b`, the web
-client lets each new conversation choose between the in-process tools and the
-configured sandbox provider. The choice is stored on the conversation and
-applies to its future runs.
-
 ## Hands, sandboxes, and external plugins
 
-By default, built-in tools run in-process. On macOS, Seatbelt can place the
-hands side in a fresh environment for each run:
+Built-in tools never run in the server process. Each run starts the
+`pons-hands` tool host in a sandbox, and the sandbox alone decides what the
+tools can reach. There is no unsandboxed mode.
+
+On macOS the default is Seatbelt, which runs `pons-hands` in a fresh
+environment for each run with only the workspace, a scratch directory, and the
+agent's memory writable, and no network unless `-sandbox-network` is set. It
+finds `pons-hands` on `PATH`, or use `-hands-command`:
 
 ```sh
 go build -o .build/pons-hands ./cmd/pons-hands
@@ -197,9 +202,15 @@ go run ./cmd/pons -provider codex -sandbox seatbelt \
   -message "inspect this project"
 ```
 
+Elsewhere, use `-sandbox e2b`; the server refuses to start without a sandbox.
+A local Linux sandbox is planned.
+
 E2B can run the same hands protocol in a remote Linux sandbox. Build the
-template once (requires `E2B_API_KEY` and Node/npm), then configure the server
-as shown in the [Git workspace guide](docs/design/git-workspaces.md):
+template (requires `E2B_API_KEY` and Node/npm), then configure the server
+as shown in the [Git workspace guide](docs/design/git-workspaces.md). Rebuild
+it whenever you upgrade pons: the template's `pons-hands` must match the
+server. With a template built before agent memory, the agent's file tools
+cannot reach its memory directory in the sandbox.
 
 ```sh
 make e2b-template
@@ -267,9 +278,24 @@ restart the server to change the agent.
   `provider` names a configured provider slot. A malformed file stops the
   server from starting.
 - `PERSONA.md` holds free-form instructions, used verbatim.
+- `memory/` holds the agent's own notes: `MEMORY.md`, an index with one line
+  per topic, and one file per topic. The agent keeps these up to date itself,
+  and each conversation starts with `MEMORY.md` (up to 16 KiB) as reference
+  data, never as instructions, refreshed whenever the conversation is
+  compacted. You can read or edit the files, but you
+  shouldn't need to. Memory has no history of its own.
+
+Runs are granted only `memory/`, never the rest of the agent directory.
+The sandbox enforces that, so the agent cannot change `agent.json`,
+`PERSONA.md`, or `revisions/`. Seatbelt grants `memory/` in place. E2B copies
+it into the sandbox at `/home/user/.pons/memory` when a run starts and writes
+back the files the run changed when it ends; links in the sandbox copy are not
+synced back.
 
 An agent without a name says so when asked, rather than using the model's own
-name.
+name. While `PERSONA.md` is empty, the agent introduces itself as new and asks
+what you want help with. It saves your answers to its memory, and follows them
+in later conversations. Only you change `PERSONA.md`.
 
 The agent's name appears in `GET /v1/options`, conversation snapshots, the
 CLI, and the web UI. Provider settings and credentials stay in
@@ -295,7 +321,7 @@ it.
 ```sh
 make check       # format, tests, vet, and golangci-lint
 make test-race   # race-enabled tests
-make test-integration
+make test-integration  # compiled server with hands under Seatbelt (macOS)
 ```
 
 Install the local lint tool once if needed with `make install-tools`.

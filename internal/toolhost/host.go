@@ -49,11 +49,15 @@ func New(cfg Config) (*Host, error) {
 	if cfg.MaxConcurrency < 0 {
 		return nil, errors.New("tool host: max concurrency must be non-negative")
 	}
-	fsTools, err := fs.New(fs.Config{Root: cfg.Workspace, MaxReadBytes: cfg.FSReadBytes})
+	// The tool host always runs inside an execution environment, which is
+	// the boundary (ADR-0004): file tools resolve relative paths in the
+	// workspace but accept any absolute path, as bash already can, and the
+	// environment decides what is reachable.
+	fsTools, err := fs.New(fs.Config{Root: cfg.Workspace, Unconfined: true, MaxReadBytes: cfg.FSReadBytes})
 	if err != nil {
 		return nil, err
 	}
-	editTool, err := edit.New(edit.Config{Root: cfg.Workspace})
+	editTool, err := edit.New(edit.Config{Root: cfg.Workspace, Unconfined: true})
 	if err != nil {
 		return nil, err
 	}

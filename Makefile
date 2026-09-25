@@ -7,7 +7,7 @@ GOLANGCI_LINT_VERSION ?= v2.13.2
 LINT_GOTOOLCHAIN ?= go1.27.1
 E2B_CLI_VERSION ?= 2.20.0
 
-.PHONY: fmt fmt-check test test-race test-integration test-integration-race test-integration-seatbelt test-integration-e2b vet lint check install-tools smoke-runtime smoke-e2b cleanup-e2b cleanup-e2b-all build-e2b-hands e2b-template web-install web-check web-build
+.PHONY: fmt fmt-check test test-race require-darwin test-integration test-integration-race test-integration-e2b vet lint check install-tools smoke-runtime smoke-e2b cleanup-e2b cleanup-e2b-all build-e2b-hands e2b-template web-install web-check web-build
 
 fmt:
 	@if [ -n "$(GO_FILES)" ]; then gofmt -w $(GO_FILES); fi
@@ -27,15 +27,18 @@ test:
 test-race:
 	go test -race ./...
 
-test-integration:
-	go test -tags integration -count=1 ./integration
+# Hands run only in a sandbox, and Seatbelt is the local one, so the
+# compiled-server integration tests need macOS.
+INTEGRATION_PACKAGES := ./integration ./environment/seatbelt
 
-test-integration-race:
-	go test -race -tags integration -count=1 ./integration
+require-darwin:
+	@if [ "$$(uname -s)" != "Darwin" ]; then echo "integration tests need macOS Seatbelt" >&2; exit 1; fi
 
-test-integration-seatbelt:
-	@if [ "$$(uname -s)" != "Darwin" ]; then echo "Seatbelt integration test requires macOS"; exit 0; fi
-	PONS_SEATBELT_TEST=1 go test -tags integration -count=1 ./integration -run TestRuntimeBlackBoxSeatbelt
+test-integration: require-darwin
+	PONS_SEATBELT_TEST=1 go test -tags integration -count=1 $(INTEGRATION_PACKAGES)
+
+test-integration-race: require-darwin
+	PONS_SEATBELT_TEST=1 go test -race -tags integration -count=1 $(INTEGRATION_PACKAGES)
 
 test-integration-e2b:
 	@test -n "$$E2B_API_KEY" || (echo "E2B_API_KEY is required"; exit 1)

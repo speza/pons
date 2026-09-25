@@ -28,7 +28,7 @@ func acceptInput(store *Store, ctx context.Context, conversationID, key string, 
 }
 
 func TestOpenRejectsOlderExistingDatabase(t *testing.T) {
-	for _, statement := range []string{"PRAGMA user_version = 0", "PRAGMA user_version = 1", "PRAGMA user_version = 2", "PRAGMA user_version = 3", "PRAGMA user_version = 4", "PRAGMA user_version = 5", "PRAGMA user_version = 6", "PRAGMA user_version = 7", "PRAGMA user_version = 8", "PRAGMA user_version = 9"} {
+	for _, statement := range []string{"PRAGMA user_version = 0", "PRAGMA user_version = 1", "PRAGMA user_version = 2", "PRAGMA user_version = 3", "PRAGMA user_version = 4", "PRAGMA user_version = 5", "PRAGMA user_version = 6", "PRAGMA user_version = 7", "PRAGMA user_version = 8", "PRAGMA user_version = 9", "PRAGMA user_version = 10"} {
 		t.Run(statement, func(t *testing.T) {
 			stateDir := t.TempDir()
 			store, err := Open(stateDir)
@@ -619,7 +619,7 @@ func TestConversationsAreReturnedNewestFirst(t *testing.T) {
 
 	ctx := context.Background()
 	old := ponsruntime.Conversation{
-		ID: "old", AgentID: testAgent.ID, Workspace: "/old", Environment: "none",
+		ID: "old", AgentID: testAgent.ID, Workspace: "/old", Environment: "seatbelt",
 		CreatedAt: time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC),
 	}
 	newest := ponsruntime.Conversation{
@@ -639,7 +639,7 @@ func TestConversationsAreReturnedNewestFirst(t *testing.T) {
 	if len(conversations) != 2 || conversations[0].ID != newest.ID || conversations[1].ID != old.ID {
 		t.Fatalf("conversations = %+v", conversations)
 	}
-	if conversations[0].Environment != "e2b" || conversations[1].Environment != "none" {
+	if conversations[0].Environment != "e2b" || conversations[1].Environment != "seatbelt" {
 		t.Fatalf("conversation environments = %+v", conversations)
 	}
 }

@@ -60,6 +60,28 @@ func ResolvePath(root, path string) (string, error) {
 	return real, nil
 }
 
+// ResolvePathUnconfined resolves path like ResolvePath but accepts an
+// absolute path anywhere, for tools inside an execution environment that
+// alone decides what is reachable. Relative paths still stay under root.
+func ResolvePathUnconfined(root, path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		return ResolvePath(root, path)
+	}
+	real, err := resolveExisting(filepath.Clean(path))
+	if err != nil {
+		return "", fmt.Errorf("jail: cannot resolve path: %w", err)
+	}
+	return real, nil
+}
+
+// Resolver returns ResolvePathUnconfined when unconfined, else ResolvePath.
+func Resolver(unconfined bool) func(root, path string) (string, error) {
+	if unconfined {
+		return ResolvePathUnconfined
+	}
+	return ResolvePath
+}
+
 // Check verifies that path stays within the (already resolved) root.
 // Both sides are resolved through symlinks (e.g. /var → /private/var on
 // macOS), and paths may reference files that do not exist yet (writes).

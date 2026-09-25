@@ -1,0 +1,282 @@
+package e2b
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"io/fs"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/samperrin/pons/environment"
+)
+
+// fakeSyncEnvd emulates the envd file and process calls sync uses, keeping
+// sandbox paths under a local directory.
+type fakeSyncEnvd struct {
+	t      *testing.T
+	root   string
+	mu     sync.Mutex
+	files  map[string][]byte
+	events []string
+}
+
+var (
+	extractCommand = regexp.MustCompile(`tar -xf (\S+) -C (\S+)`)
+	packCommand    = regexp.MustCompile(`find (\S+) ! -type f ! -type d -delete && tar --hard-dereference -cf (\S+) -C \S+ \.`)
+)
+
+func (f *fakeSyncEnvd) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch {
+	case r.URL.Path == "/files" && r.Method == http.MethodPost:
+		body, _ := io.ReadAll(r.Body)
+		f.files[r.URL.Query().Get("path")] = body
+	case r.URL.Path == "/files":
+		_, _ = w.Write(f.files[r.URL.Query().Get("path")])
+	case r.URL.Path == "/process.Process/Start":
+		body, _ := io.ReadAll(r.Body)
+		request, ok := decodeStart(body)
+		if !ok {
+			f.t.Error("invalid Start frame")
+			return
+		}
+		if err := f.run(request.Process.Cmd, request.Process.Args); err != nil {
+			f.t.Error(err)
+		}
+		w.Header().Set("Content-Type", "application/connect+json")
+		writeEnd(w)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (f *fakeSyncEnvd) run(command string, args []string) error {
+	f.events = append(f.events, command)
+	switch command {
+	case "/bin/sh":
+		if match := packCommand.FindStringSubmatch(args[1]); match != nil {
+			dir := f.local(match[1])
+			if err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+				if err == nil && !entry.Type().IsRegular() && !entry.IsDir() {
+					return os.Remove(path)
+				}
+				return err
+			}); err != nil {
+				return err
+			}
+			archive, err := archiveWorkspace(dir, 1<<20)
+			f.files[match[2]] = archive
+			return err
+		}
+		match := extractCommand.FindStringSubmatch(args[1])
+		dir := f.local(match[2])
+		if err := os.RemoveAll(dir); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		return restoreWorkspace(dir, f.files[match[1]], 1<<20)
+	case "/bin/tar":
+		archive, err := archiveWorkspace(f.local(flagValue(args, "-C")), 1<<20)
+		f.files[flagValue(args, "-cf")] = archive
+		return err
+	}
+	return nil
+}
+
+func flagValue(args []string, name string) string {
+	for i := range len(args) - 1 {
+		if args[i] == name {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func (f *fakeSyncEnvd) local(remote string) string {
+	return filepath.Join(f.root, filepath.FromSlash(remote))
+}
+
+func TestSyncedDirectoryRoundTripsOnlyTheRunsChanges(t *testing.T) {
+	envd := &fakeSyncEnvd{t: t, root: t.TempDir(), files: map[string][]byte{}}
+	server := httptest.NewServer(envd)
+	defer server.Close()
+	client := &e2bClient{envdURL: server.URL, http: server.Client()}
+	sandbox := e2bSandbox{ID: "sandbox", AccessToken: "token"}
+
+	memory := filepath.Join(t.TempDir(), "memory")
+	if err := os.MkdirAll(memory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(memory, "MEMORY.md"), "- [Tea](tea.md)\n")
+	write(filepath.Join(memory, "tea.md"), "green\n")
+	// Memory larger than the workspace limit still syncs back: the limit
+	// bounds growth beyond what was copied in.
+	write(filepath.Join(memory, "archive.md"), strings.Repeat("x", 8<<10))
+
+	synced, err := syncDirectoriesIn(context.Background(), client, sandbox, []string{memory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paths := syncedRemotePaths(synced); len(paths) != 1 || paths[0] != "/home/user/.pons/memory" {
+		t.Fatalf("remote paths = %v", paths)
+	}
+	remote := envd.local(synced[0].remote)
+	if data, err := os.ReadFile(filepath.Join(remote, "tea.md")); err != nil || string(data) != "green\n" {
+		t.Fatalf("remote copy = %q, %v", data, err)
+	}
+
+	// The agent edits its copy, including links that are never synced, while
+	// another run changes tea.md on the host.
+	write(filepath.Join(remote, "MEMORY.md"), "- [Tea](tea.md)\n- [Coffee](coffee.md)\n")
+	if err := os.Symlink("/etc/passwd", filepath.Join(remote, "passwd.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(remote, "notes.pipe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(remote, "coffee.md"), "flat white\n")
+	write(filepath.Join(memory, "tea.md"), "oolong\n")
+
+	var reported []error
+	session := &e2bSession{
+		client: client, sandbox: sandbox, synced: synced, maxWorkspaceBytes: 4 << 10,
+		onError: func(err error) { reported = append(reported, err) },
+	}
+	session.syncDirectoriesOut()
+	if len(reported) != 0 {
+		t.Fatalf("sync errors = %v", reported)
+	}
+	for name, want := range map[string]string{
+		"MEMORY.md": "- [Tea](tea.md)\n- [Coffee](coffee.md)\n",
+		"coffee.md": "flat white\n",
+		"tea.md":    "oolong\n",
+	} {
+		if data, err := os.ReadFile(filepath.Join(memory, name)); err != nil || string(data) != want {
+			t.Fatalf("%s = %q, %v; want %q", name, data, err, want)
+		}
+	}
+	for _, name := range []string{"passwd.md", "notes.pipe"} {
+		if _, err := os.Lstat(filepath.Join(memory, name)); !os.IsNotExist(err) {
+			t.Fatalf("sandbox special file %s was synced back: %v", name, err)
+		}
+	}
+}
+
+// startWithMemory runs Provider.Start against the fake envd with one synced
+// memory directory, serving hands in-process.
+func startWithMemory(t *testing.T, failSyncUpload bool) (*fakeSyncEnvd, string, *atomic.Int32, environment.HandsSession, error) {
+	t.Helper()
+	envd := &fakeSyncEnvd{t: t, root: t.TempDir(), files: map[string][]byte{}}
+	var deletes atomic.Int32
+	var input atomic.Pointer[io.PipeWriter]
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"sandboxID":"sandbox","envdAccessToken":"token"}`)
+		case r.Method == http.MethodDelete:
+			deletes.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/sandboxes/sandbox/timeout":
+			w.WriteHeader(http.StatusNoContent)
+		case failSyncUpload && r.URL.Path == "/files" && r.URL.Query().Get("path") == "/tmp/pons-sync-0.tar":
+			http.Error(w, "upload unavailable", http.StatusServiceUnavailable)
+		case r.URL.Path == "/process.Process/SendInput":
+			if err := forwardInput(r, &input); err != nil {
+				t.Error(err)
+				w.WriteHeader(http.StatusInternalServerError)
+			}
+		case r.URL.Path == "/process.Process/Start":
+			body, _ := io.ReadAll(r.Body)
+			request, ok := decodeStart(body)
+			if !ok {
+				t.Error("invalid Start frame")
+				return
+			}
+			if request.Process.Cmd != defaultE2BHandsPath {
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				envd.ServeHTTP(w, r)
+				return
+			}
+			serveHands(w, r, &input)
+		default:
+			envd.ServeHTTP(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	provider := &Provider{APIKey: "key", APIURL: server.URL, EnvdURL: server.URL, HTTPClient: server.Client(), CleanupInterval: time.Hour}
+	store := &recordingStateStore{}
+	if err := provider.SetStores(store, store); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = provider.Close() })
+	memory := filepath.Join(t.TempDir(), "memory")
+	if err := os.MkdirAll(memory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(memory, "MEMORY.md"), []byte("- tea\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := provider.Start(context.Background(), environment.Spec{
+		WorkspaceID: "workspace", WorkspacePath: t.TempDir(), RunID: "run",
+		Command: []string{defaultE2BHandsPath}, ReadWrite: []string{memory},
+	})
+	return envd, memory, &deletes, session, err
+}
+
+func TestStartSyncsMemoryIntoTheSandbox(t *testing.T) {
+	envd, memory, _, session, err := startWithMemory(t, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := session.Metadata().ReadWrite; len(got) != 1 || got[0] != "/home/user/.pons/memory" {
+		t.Fatalf("metadata read-write = %v", got)
+	}
+	remote := envd.local("/home/user/.pons/memory")
+	if data, err := os.ReadFile(filepath.Join(remote, "MEMORY.md")); err != nil || string(data) != "- tea\n" {
+		t.Fatalf("remote memory = %q, %v", data, err)
+	}
+	if err := os.WriteFile(filepath.Join(remote, "MEMORY.md"), []byte("- coffee\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(memory, "MEMORY.md")); err != nil || string(data) != "- coffee\n" {
+		t.Fatalf("host memory after close = %q, %v", data, err)
+	}
+}
+
+func TestStartDeletesSandboxWhenMemorySyncFails(t *testing.T) {
+	_, _, deletes, session, err := startWithMemory(t, true)
+	if err == nil {
+		_ = session.Close()
+		t.Fatal("start succeeded without syncing memory")
+	}
+	if deletes.Load() != 1 {
+		t.Fatalf("sandbox deletes = %d, want 1", deletes.Load())
+	}
+}

@@ -1,7 +1,7 @@
 # ADR-0019: Agent memory is a scoped file tree owned by one agent
 
 **Status:** Proposed
-**Implementation:** Not implemented
+**Implementation:** Partial — single-owner memory directory granted directly to local runs and synced into E2B, with prompt guidance and hydration (plan phase 2); commits, history, scopes, and extraction not implemented
 **Date:** 2026-09-24
 **Related:** ADR-0009, ADR-0016, ADR-0017, ADR-0018, ADR-0020, ADR-0021, ADR-0022
 
@@ -85,9 +85,8 @@ Mounting is provider-specific but must keep unmounted scopes unreadable:
 
 - Seatbelt grants only the run's materialized scope directories.
 - E2B uploads the scopes at run start and downloads them at commit.
-- Unsandboxed in-process tools cannot enforce this boundary. A composition
-  using them may enable memory only for an agent with at most one principal,
-  and must report that memory is unscoped.
+- The runtime has no unsandboxed hands, so every run's grant is enforced by
+  its provider.
 
 ### 3. Runs work on a copy; the host commits
 
@@ -168,9 +167,31 @@ The store adds memory scope revisions, per-run base revisions, commit audit
 rows, and review state. Revision content is stored through `CheckpointStore`.
 
 [`docs/proposals/persistent-agents/plan.md`](../proposals/persistent-agents/plan.md) builds this in
-two steps: a single-owner version with local mounts and history in phase 2,
-then principal scopes, per-run copies, E2B, extraction, and consolidation in
-phase 7.
+two steps: a single-owner version with local mounts in phase 2, then principal
+scopes, E2B, and a background memory agent in phase 7.
+
+### Phase 2 simplification
+
+Phase 2 implements sections 1, 2 (one agent-wide scope), and 6's hydration,
+but deliberately not sections 3 to 5. Seatbelt runs are granted the canonical
+`agents/<id>/memory/` directory itself. E2B copies it into the sandbox at run
+start and, when the session closes, applies only the files the run added,
+changed, or deleted, so concurrent runs collide only on the same file. There
+are no commits, conflict retention, revision log, or management commands.
+Memory should need no attention from its owner, and models curate their own
+memory poorly through tools, so host-side versioning added machinery without
+making memory better. The agent keeps direct file access so it can apply
+corrections, and curation moves to a background memory agent (section 6's
+extraction and consolidation) in phase 7, which revisits sections 3 to 5 for
+multi-principal writes.
+
+For now the memory block is hydrated once per conversation, into its first
+user message, and is then ordinary history: the runtime event log (ADR-0023)
+records it immutably with that prepared input, later runs in the conversation
+replay it. Compaction, which invalidates the prompt cache anyway, drops that
+block and adds memory as it is at that point to the compaction checkpoint,
+so a long conversation refreshes its memory whenever it is compacted. A new
+conversation sees memory as it is when that conversation starts.
 
 ## Verification requirements
 
@@ -192,9 +213,7 @@ Deterministic tests without provider credentials or network prove:
   new revision without changing history;
 - `MEMORY.md` is rendered as attributed data within its byte budget;
 - an extraction run runs once per lineage, touches only its memory mounts, and
-  under review does not change materialized memory until accepted; and
-- the unsandboxed composition refuses memory for an agent with more than one
-  principal.
+  under review does not change materialized memory until accepted.
 
 ## Alternatives
 

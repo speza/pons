@@ -21,8 +21,10 @@ import (
 )
 
 const (
-	runtimeDBName        = "runtime.db"
-	currentSchemaVersion = 10
+	runtimeDBName = "runtime.db"
+	// Version 11 drops the in-process "none" environment: older databases
+	// may hold conversations that can no longer run.
+	currentSchemaVersion = 11
 )
 
 // Store is the local, exclusive-manager runtime backend. Its transactions

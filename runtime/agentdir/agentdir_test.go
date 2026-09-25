@@ -136,3 +136,59 @@ func write(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestMemoryCreatesDirectoryAndBoundsIndex(t *testing.T) {
+	stateDir := t.TempDir()
+	store, err := Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory, err := store.Memory("default", 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(stateDir, "agents", "default", "memory")
+	if resolved, _ := filepath.EvalSymlinks(dir); memory.Path != resolved || memory.Index != "" || memory.Truncated {
+		t.Fatalf("fresh memory = %+v", memory)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "MEMORY.md")); err != nil {
+		t.Fatalf("index not created: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "MEMORY.md"), []byte("- first line\n- second line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	memory, err = store.Memory("default", 16)
+	if err != nil || memory.Index != "- first line\n" || !memory.Truncated {
+		t.Fatalf("bounded memory = %+v, %v", memory, err)
+	}
+
+	// A linked index is not followed into the rest of the agent directory.
+	if err := os.Remove(filepath.Join(dir, "MEMORY.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "PERSONA.md"), filepath.Join(dir, "MEMORY.md")); err != nil {
+		t.Fatal(err)
+	}
+	if memory, err = store.Memory("default", 0); err != nil || memory.Index != "" {
+		t.Fatalf("linked index = %+v, %v", memory, err)
+	}
+}
+
+func TestMemoryRejectsLinkedDirectory(t *testing.T) {
+	stateDir := t.TempDir()
+	store, err := Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(stateDir, "agents", "default")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(".", filepath.Join(agentDir, "memory")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Memory("default", 0); err == nil {
+		t.Fatal("a memory link to the agent directory was granted")
+	}
+}

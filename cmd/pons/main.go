@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -62,7 +63,7 @@ func main() {
 	flag.Var(&fallbackFlags, "fallback", "fallback provider as provider or provider:model (repeatable; tried in order when the primary fails)")
 	interactive := flag.Bool("i", false, "interactive runtime client: read tasks from stdin, one per line")
 	pluginPath := flag.String("plugin-path", "", "PATH supplied to external plugin children (credentials are not inherited by default)")
-	sandbox := flag.String("sandbox", "", `default execution environment for conversations: "seatbelt" | "e2b" (default: in-process)`)
+	sandbox := flag.String("sandbox", "", `execution environment for hands: "seatbelt" | "e2b" (default: seatbelt on macOS; required elsewhere)`)
 	sandboxNetwork := flag.Bool("sandbox-network", false, "allow network access inside the per-run sandbox")
 	handsCommand := flag.String("hands-command", "", "local pons-hands executable used by Seatbelt (default: find pons-hands on PATH)")
 	e2bTemplate := flag.String("e2b-template", "", `E2B template containing pons-hands (default: "pons-hands")`)
@@ -259,6 +260,12 @@ func main() {
 	if err != nil {
 		logger.Printf("workspace root: %v", err)
 		os.Exit(1)
+	}
+	if *sandbox = strings.TrimSpace(*sandbox); *sandbox == "" {
+		if *sandbox, err = defaultSandbox(runtime.GOOS); err != nil {
+			logger.Print(err)
+			os.Exit(1)
+		}
 	}
 
 	serverLogger := newServerLogger(os.Stderr, *debug)

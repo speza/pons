@@ -22,11 +22,7 @@ import (
 	"github.com/samperrin/pons/environment"
 	"github.com/samperrin/pons/environment/e2b"
 	"github.com/samperrin/pons/environment/gitworkspace"
-	"github.com/samperrin/pons/plugins/bash"
 	"github.com/samperrin/pons/plugins/brain/llm"
-	"github.com/samperrin/pons/plugins/edit"
-	"github.com/samperrin/pons/plugins/external"
-	"github.com/samperrin/pons/plugins/fs"
 	"github.com/samperrin/pons/protocol"
 	ponsruntime "github.com/samperrin/pons/runtime"
 	"github.com/samperrin/pons/runtime/agentdir"
@@ -116,6 +112,9 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 	if err := validateLoopbackAddress(opts.Address); err != nil {
 		return err
 	}
+	if opts.Environment == nil || opts.Sandbox == "" {
+		return errors.New("runtime server: hands run only in a sandbox; use -sandbox seatbelt (macOS) or -sandbox e2b")
+	}
 
 	logDebugConfiguration(logger, opts)
 	store, err := runtimesqlite.Open(opts.StateDir)
@@ -148,8 +147,14 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 	logger.Info("agent ready", "agent_id", agent.ID, "agent_name", agent.Name,
 		"agent_revision", agent.Revision(), "agent_dir", agents.Dir(agent.ID))
 
-	runner := &agentRunner{opts: opts, logger: logger}
-	environmentOptions := configuredEnvironments(opts)
+	environmentOptions := []string{opts.Sandbox}
+	network := opts.EnvironmentSpec.Network
+	logger.Info("hands sandbox ready", "sandbox", opts.Sandbox, "network", network)
+	if network != environment.NetworkEnabled {
+		logger.Info("hands have no network access; use -sandbox-network to allow it")
+	}
+
+	runner := &agentRunner{opts: opts, logger: logger, agents: agents}
 	backgroundErrors := make(chan error, 1)
 	manager, err := ponsruntime.New(ponsruntime.Config{
 		Store:              store,
@@ -158,7 +163,7 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 		AgentRevisions:     agents,
 		MaxConcurrent:      opts.MaxConcurrent,
 		EnvironmentOptions: environmentOptions,
-		DefaultEnvironment: defaultEnvironment(opts),
+		DefaultEnvironment: opts.Sandbox,
 		PrepareConversation: func(selection ponsruntime.ConversationOptions) (ponsruntime.ConversationOptions, error) {
 			if (selection.GitRepository == "") != (selection.GitRevision == "") {
 				return selection, errors.New("git repository and revision must be set together")
@@ -215,7 +220,7 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 		Handler: loopbackRequestOnly(httptransport.HandlerWithOptions(manager, httptransport.HandlerOptions{
 			Agent:              manager.Agent(),
 			Environments:       environmentOptions,
-			DefaultEnvironment: defaultEnvironment(opts),
+			DefaultEnvironment: opts.Sandbox,
 		})),
 
 		ReadHeaderTimeout: 5 * time.Second,
@@ -348,14 +353,24 @@ const unnamedIdentity = "Your owner has not named you yet. If asked your name, s
 
 func personaPrompt(agent ponsruntime.AgentDefinition) string {
 	identity := unnamedIdentity
+	introduce := "introduce yourself"
 	if agent.Name != "" {
 		identity = "Your name is " + agent.Name + "."
+		introduce = "introduce yourself as " + agent.Name
 	}
 	if agent.Persona == "" {
-		return identity
+		return identity + "\n\n" + fmt.Sprintf(onboarding, introduce)
 	}
 	return identity + "\n\n" + agent.Persona
 }
+
+// onboarding stands in for an empty PERSONA.md. The owner shapes a new agent
+// by talking to it; what the agent learns goes to memory, while PERSONA.md
+// stays owner-written.
+const onboarding = "You are new: your owner has not written standing instructions for you yet. " +
+	"At the start of a conversation, briefly %s, say that you are new, and ask what they would like " +
+	"help with; then help with whatever they ask. Save what you learn about how they want you to " +
+	"work in your memory."
 
 func loopbackRequestOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -371,22 +386,6 @@ func loopbackRequestOnly(next http.Handler) http.Handler {
 	})
 }
 
-func configuredEnvironments(opts serverOptions) []string {
-	options := []string{"none"}
-	sandbox := strings.TrimSpace(opts.Sandbox)
-	if opts.Environment != nil && sandbox != "" && !slices.Contains(options, sandbox) {
-		options = append(options, sandbox)
-	}
-	return options
-}
-
-func defaultEnvironment(opts serverOptions) string {
-	if opts.Environment != nil && strings.TrimSpace(opts.Sandbox) != "" {
-		return strings.TrimSpace(opts.Sandbox)
-	}
-	return "none"
-}
-
 func logDebugConfiguration(logger *slog.Logger, opts serverOptions) {
 
 	if !opts.Debug {
@@ -399,24 +398,11 @@ func logDebugConfiguration(logger *slog.Logger, opts serverOptions) {
 	logger.Debug("runtime configured", "provider", opts.Brain.Provider, "model", model,
 		"workspace_root", opts.WorkspaceRoot, "max_turns", opts.MaxTurns, "max_concurrent", opts.MaxConcurrent)
 
-	sandbox, network, hands := opts.Sandbox, "host", "in-process"
-	if sandbox == "" {
-		if opts.Environment == nil {
-			sandbox = "none"
-		} else {
-			sandbox = "custom"
-		}
+	hands := ""
+	if len(opts.EnvironmentSpec.Command) > 0 {
+		hands = opts.EnvironmentSpec.Command[0]
 	}
-	if opts.Environment != nil {
-		network = string(opts.EnvironmentSpec.Network)
-		if network == "" {
-			network = "unspecified"
-		}
-		if len(opts.EnvironmentSpec.Command) > 0 {
-			hands = opts.EnvironmentSpec.Command[0]
-		}
-	}
-	logger.Debug("hands configured", "sandbox", sandbox, "network", network, "hands", hands,
+	logger.Debug("hands configured", "sandbox", opts.Sandbox, "network", opts.EnvironmentSpec.Network, "hands", hands,
 		"idle_timeout", opts.SandboxIdleTimeout, "external_plugins", len(opts.PluginPaths), "read_only_paths", len(opts.EnvironmentSpec.ReadOnly))
 }
 
@@ -573,6 +559,8 @@ func resolvePathWithMissingLeaf(path string) (string, error) {
 type agentRunner struct {
 	opts   serverOptions
 	logger *slog.Logger
+	// agents supplies each run's memory directory; nil runs without memory.
+	agents *agentdir.Store
 }
 
 func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (result ponsruntime.RunResult, err error) {
@@ -590,6 +578,30 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	if err != nil {
 		return result, err
 	}
+	provider, spec, err := r.executionEnvironment(request.Environment)
+	if err != nil {
+		return result, err
+	}
+	// Memory is the one part of the agent directory hands may use. Seatbelt
+	// grants it in place; E2B copies it in and applies the run's changes back
+	// when the session closes.
+	var memoryGrant []string
+	if r.agents != nil {
+		memory, err := r.agents.Memory(agent.ID, agentdir.DefaultMemoryBudget)
+		if err != nil {
+			return result, err
+		}
+		memoryGrant = []string{memory.Path}
+		// Loaded from the host copy for a conversation's first message and
+		// after each compaction. On E2B the host copy gains this run's own
+		// edits only when the run ends.
+		brainConfig.Memory = func() (llm.Memory, error) {
+			memory, err := r.agents.Memory(agent.ID, agentdir.DefaultMemoryBudget)
+			return llm.Memory{Index: memory.Index, Truncated: memory.Truncated}, err
+		}
+	}
+	// Build the brain before provisioning hands so configuration errors fail
+	// fast; what the hands see arrives with Seed.
 	brainConfig.OnEvent = func(event llm.BrainEvent) error {
 		if event.Type == "context.compacted" {
 			contextTurns := make([]ponsruntime.ContextTurn, 0, len(event.Turns))
@@ -645,88 +657,57 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		}
 	}()
 
-	externals := make([]*external.Plugin, 0, len(agent.PluginPaths))
+	// Hands always run in an execution environment; there is no in-process
+	// fallback. Only the memory directory is granted beyond the workspace;
+	// the rest of the agent directory stays outside every grant. Concat
+	// copies so concurrent runs never share a slice.
+	spec.ReadWrite = slices.Concat(spec.ReadWrite, memoryGrant)
+	memoryIndex := len(spec.ReadWrite) - 1
+	spec.WorkspaceID = request.ConversationID
+	spec.WorkspacePath = request.Workspace
+	spec.RunID = request.RunID
+	spec.WorkspacePlan = environment.WorkspacePlan{}
+	if request.GitRepository != "" {
+		spec.WorkspacePlan = environment.WorkspacePlan{
+			Strategy:     environment.WorkspaceStrategyGit,
+			SourceRef:    request.GitRepository,
+			BaseRevision: request.GitRevision,
+		}
+	}
+	spec.GitAllRepositories = request.GitAllRepositories
+	spec.ReportProgress = func(step, message string) error {
+		return request.Emit(ponsruntime.RunEvent{Type: ponsruntime.EventEnvironmentProgress, Step: step, Message: message})
+	}
+	if request.GitRepository != "" || request.GitAllRepositories {
+		spec.Network = environment.NetworkEnabled
+	}
+	runLog.Debug("environment starting", "sandbox", r.opts.Sandbox)
+	session, startErr := provider.Start(ctx, spec)
+	if startErr != nil {
+		return result, fmt.Errorf("start execution environment: %w", startErr)
+	}
 	defer func() {
-		for _, plugin := range slices.Backward(externals) {
-			err = errors.Join(err, plugin.Close())
+		closeErr := session.Close()
+		err = errors.Join(err, closeErr)
+		if closeErr == nil {
+			runLog.Debug("environment closed")
 		}
 	}()
-	plugins := make([]pons.Plugin, 0, 4+len(agent.PluginPaths))
-	effectiveSandbox, effectiveNetwork, effectiveEnvironmentID := "none", "host", ""
-	provider, spec, selectedEnvironment, environmentErr := r.executionEnvironment(request.Environment)
-	if environmentErr != nil {
-		return result, environmentErr
-	}
-	if provider != nil {
-		spec.WorkspaceID = request.ConversationID
-		spec.WorkspacePath = request.Workspace
-		spec.RunID = request.RunID
-		spec.WorkspacePlan = environment.WorkspacePlan{}
-		if request.GitRepository != "" {
-			spec.WorkspacePlan = environment.WorkspacePlan{
-				Strategy:     environment.WorkspaceStrategyGit,
-				SourceRef:    request.GitRepository,
-				BaseRevision: request.GitRevision,
-			}
-		}
-		spec.GitAllRepositories = request.GitAllRepositories
-		reportProgress := func(step, message string) error {
-			return request.Emit(ponsruntime.RunEvent{Type: ponsruntime.EventEnvironmentProgress, Step: step, Message: message})
-		}
-		spec.ReportProgress = reportProgress
-		if request.GitRepository != "" || request.GitAllRepositories {
-			spec.Network = environment.NetworkEnabled
-		}
-		runLog.Debug("environment starting", "sandbox", r.opts.Sandbox)
-		session, startErr := provider.Start(ctx, spec)
 
-		if startErr != nil {
-			return result, fmt.Errorf("start execution environment: %w", startErr)
-		}
-		defer func() {
-			closeErr := session.Close()
-			err = errors.Join(err, closeErr)
-			if closeErr == nil {
-				runLog.Debug("environment closed")
-			}
-		}()
-		metadata := session.Metadata()
-		core.Workspace, core.Platform = metadata.WorkspacePath, metadata.Platform
-		effectiveSandbox = metadata.Provider
-		effectiveNetwork = string(metadata.Network)
-		effectiveEnvironmentID = metadata.EnvironmentID
-		if effectiveSandbox == "" {
-			effectiveSandbox = selectedEnvironment
-		}
-		if effectiveNetwork == "" {
-			effectiveNetwork = string(spec.Network)
-		}
-		plugins = append(plugins, environment.Proxy(session))
-	} else {
-		fsTools, fsErr := fs.New(fs.Config{Root: request.Workspace, MaxReadBytes: r.opts.FSReadBytes})
-		if fsErr != nil {
-			return result, fsErr
-		}
-		editTool, editErr := edit.New(edit.Config{Root: request.Workspace})
-		if editErr != nil {
-			return result, editErr
-		}
-		plugins = append(plugins, fsTools, editTool,
-			bash.New(bash.Config{Root: request.Workspace, Timeout: r.opts.BashTimeout, MaxLines: r.opts.BashMaxLines, MaxBytes: r.opts.BashMaxBytes}))
-		for _, manifestPath := range agent.PluginPaths {
-			plugin, pluginErr := external.NewHands(manifestPath, external.HostConfig{
-				Workspace: request.Workspace, Path: r.opts.PluginPath, CallTimeout: 60 * time.Second,
-				Limits: external.Limits{MaxResultBytes: r.opts.PluginMaxResultBytes},
-			})
-			if pluginErr != nil {
-				return result, pluginErr
-			}
-			externals = append(externals, plugin)
-			plugins = append(plugins, plugin)
-		}
+	metadata := session.Metadata()
+	if len(metadata.ReadWrite) != len(spec.ReadWrite) {
+		return result, fmt.Errorf("execution environment %q did not grant the agent's memory", r.opts.Sandbox)
 	}
+	hands := llm.Hands{Workspace: metadata.WorkspacePath, Platform: metadata.Platform, Network: string(metadata.Network)}
+	if len(memoryGrant) != 0 {
+		// The prompt names memory where the hands see its own grant.
+		hands.MemoryPath = metadata.ReadWrite[memoryIndex]
+	}
+	core.Workspace, core.Platform = metadata.WorkspacePath, metadata.Platform
 
-	brain.Seed(turns, request.Text, core.Workspace, core.Platform)
+	if err := brain.Seed(turns, request.Text, hands); err != nil {
+		return result, err
+	}
 	prepared := brain.PreparedInput()
 	preparedContent, err := runtimeAgentContent(prepared.Blocks)
 	if err != nil {
@@ -741,13 +722,12 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}); err != nil {
 		return result, err
 	}
-	plugins = append(plugins, brain)
-	if err := core.Use(plugins...); err != nil {
+	if err := core.Use(environment.Proxy(session), brain); err != nil {
 		return result, err
 	}
 
-	runLog.Debug("hands ready", "sandbox", effectiveSandbox, "sandbox_id", effectiveEnvironmentID,
-		"network", effectiveNetwork, "workspace", request.Workspace, "tools", len(core.ToolSpecs()))
+	runLog.Debug("hands ready", "sandbox", metadata.Provider, "sandbox_id", metadata.EnvironmentID,
+		"network", metadata.Network, "workspace", request.Workspace, "tools", len(core.ToolSpecs()))
 	core.OnEventError(func(event pons.Event) error {
 		switch event.Type {
 		case pons.EventAssistantResponse:
@@ -823,27 +803,14 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	return ponsruntime.RunResult{Answer: runResult.Answer}, nil
 }
 
-func (r *agentRunner) executionEnvironment(requested string) (environment.Provider, environment.Spec, string, error) {
-	requested = strings.TrimSpace(requested)
-	if requested == "" {
-		requested = strings.TrimSpace(r.opts.Sandbox)
-		// Direct agentRunner users may inject a provider without naming it.
-		// Server-created conversations always carry a configured choice.
-		if requested == "" && r.opts.Environment != nil {
-			return r.opts.Environment, r.opts.EnvironmentSpec, requested, nil
-		}
+// executionEnvironment resolves a conversation's environment. The server has
+// exactly one; a conversation recorded under another fails rather than
+// running elsewhere.
+func (r *agentRunner) executionEnvironment(requested string) (environment.Provider, environment.Spec, error) {
+	if r.opts.Environment == nil || (requested != "" && requested != r.opts.Sandbox) {
+		return nil, environment.Spec{}, fmt.Errorf("execution environment %q is not configured", requested)
 	}
-	switch requested {
-	case "", "none":
-		return nil, environment.Spec{}, "none", nil
-	case "seatbelt", "e2b":
-		if r.opts.Environment == nil || strings.TrimSpace(r.opts.Sandbox) != requested {
-			return nil, environment.Spec{}, requested, fmt.Errorf("execution environment %q is not configured", requested)
-		}
-		return r.opts.Environment, r.opts.EnvironmentSpec, requested, nil
-	default:
-		return nil, environment.Spec{}, requested, fmt.Errorf("execution environment %q is not supported", requested)
-	}
+	return r.opts.Environment, r.opts.EnvironmentSpec, nil
 }
 
 func runtimeContextTurns(context []ponsruntime.ContextTurn) ([]llm.Turn, error) {

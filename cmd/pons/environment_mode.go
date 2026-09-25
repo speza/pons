@@ -15,15 +15,18 @@ import (
 	"github.com/samperrin/pons/plugins/external"
 )
 
+// defaultSandbox selects the sandbox when none is configured. Hands always
+// run in one: Seatbelt on macOS, and E2B elsewhere until a local Linux
+// sandbox exists.
+func defaultSandbox(goos string) (string, error) {
+	if goos == "darwin" {
+		return "seatbelt", nil
+	}
+	return "", errors.New("hands run only in a sandbox; use -sandbox e2b (Seatbelt is macOS-only)")
+}
+
 func executionEnvironment(backend, handsCommand string, allowNetwork bool, opts serverOptions) (environment.Provider, environment.Spec, error) {
 	githubAppConfigured := opts.GitHubAppID != 0 || opts.GitHubAppInstallationID != 0 || opts.GitHubAppPrivateKey != ""
-	if backend == "" {
-		if allowNetwork || handsCommand != "" || opts.GitRepository != "" || opts.GitRevision != "" ||
-			opts.GitAllRepositories || githubAppConfigured {
-			return nil, environment.Spec{}, errors.New("sandbox, Git workspace, and GitHub App options require --sandbox")
-		}
-		return nil, environment.Spec{}, nil
-	}
 	if backend != "seatbelt" && backend != "e2b" {
 		return nil, environment.Spec{}, fmt.Errorf("unknown backend %q", backend)
 	}

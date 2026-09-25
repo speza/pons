@@ -150,3 +150,22 @@ func TestWritePreservesMode(t *testing.T) {
 		t.Fatalf("write content: %q", got)
 	}
 }
+
+func TestUnconfinedAcceptsAbsolutePathsOutsideRoot(t *testing.T) {
+	workspace, memory := t.TempDir(), t.TempDir()
+	p, err := New(Config{Root: workspace, Unconfined: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := p.writeFile(context.Background(), Write(filepath.Join(memory, "MEMORY.md"), "- note"))
+	if err != nil || !res.OK {
+		t.Fatalf("absolute write = %+v, %v", res, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(memory, "MEMORY.md")); err != nil || string(data) != "- note" {
+		t.Fatalf("absolute file = %q, %v", data, err)
+	}
+	res, _ = p.writeFile(context.Background(), Write(filepath.Join("..", "escaped.md"), "x"))
+	if res.OK {
+		t.Fatal("relative path escaped the root")
+	}
+}

@@ -39,13 +39,18 @@ func List(path string) protocol.Action {
 
 // FS is the filesystem tool plugin.
 type FS struct {
-	root string // resolved jail root
-	cfg  Config
+	root    string // resolved jail root
+	resolve func(root, path string) (string, error)
+	cfg     Config
 }
 
 // Config tunes the plugin.
 type Config struct {
 	Root string // jail root; "" = process cwd
+	// Unconfined accepts absolute paths outside Root, for hands running in an
+	// execution environment that alone decides what is reachable (ADR-0004).
+	// Relative paths still resolve under Root.
+	Unconfined bool
 	// MaxReadBytes caps read_file output so a huge or binary file cannot
 	// flood the model context. 0 = default (256 KiB); negative = unlimited.
 	MaxReadBytes int
@@ -69,22 +74,22 @@ func New(cfg Config) (*FS, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fs: %w", err)
 	}
-	return &FS{root: root, cfg: cfg}, nil
+	return &FS{root: root, resolve: jail.Resolver(cfg.Unconfined), cfg: cfg}, nil
 }
 
 // Setup registers the three filesystem tools.
 func (p *FS) Setup(c *pons.Core) error {
-	path := pons.ToolParam{Name: "path", Type: "string", Description: "File path (relative to the workspace root, or absolute within it)", Required: true}
+	path := pons.ToolParam{Name: "path", Type: "string", Description: "File path (relative to the workspace root, or an absolute path you have access to)", Required: true}
 	if err := c.AddTool(KindRead, pons.ToolDef{
 		Handler:     p.readFile,
-		Description: "Read a file inside the workspace and return its full content.",
+		Description: "Read a file and return its full content.",
 		Params:      []pons.ToolParam{path},
 	}); err != nil {
 		return err
 	}
 	if err := c.AddTool(KindWrite, pons.ToolDef{
 		Handler:     p.writeFile,
-		Description: "Create or overwrite a file inside the workspace. Parent dirs are created as needed.",
+		Description: "Create or overwrite a file. Parent dirs are created as needed.",
 		Params: []pons.ToolParam{path,
 			{Name: "content", Type: "string", Description: "Full file content to write", Required: true}},
 	}); err != nil {
@@ -92,7 +97,7 @@ func (p *FS) Setup(c *pons.Core) error {
 	}
 	return c.AddTool(KindList, pons.ToolDef{
 		Handler:     p.listDir,
-		Description: "List a directory inside the workspace. Directories have a trailing slash.",
+		Description: "List a directory. Directories have a trailing slash.",
 		Params:      []pons.ToolParam{path},
 	})
 }
@@ -100,7 +105,7 @@ func (p *FS) Setup(c *pons.Core) error {
 // resolvePath is the jail: it returns the canonical, root-relative path
 // that the operation must use after the containment check.
 func (p *FS) resolvePath(path string) (string, error) {
-	return jail.ResolvePath(p.root, path)
+	return p.resolve(p.root, path)
 }
 
 func (p *FS) readFile(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {

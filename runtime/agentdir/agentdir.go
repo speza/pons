@@ -4,9 +4,11 @@
 //	agents/<id>/agent.json         settings: name, provider slot, model, limits
 //	agents/<id>/PERSONA.md         free-form persona instructions
 //	agents/<id>/revisions/<sha>.json  immutable snapshots of resolved definitions
+//	agents/<id>/memory/            the agent's own notes: MEMORY.md and topic files
 //
 // The owner edits agent.json and PERSONA.md; the runtime only reads them at
-// startup. Revision snapshots are content-addressed and write-once, so work
+// startup. The agent maintains memory/ itself; it is the only part of the
+// directory a run's hands are granted. Revision snapshots are content-addressed and write-once, so work
 // accepted under a revision can still resolve it after the files change.
 package agentdir
 
@@ -21,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	ponsruntime "github.com/samperrin/pons/runtime"
 )
@@ -28,7 +31,12 @@ import (
 const (
 	SettingsFile = "agent.json"
 	PersonaFile  = "PERSONA.md"
+	MemoryDir    = "memory"
+	MemoryIndex  = "MEMORY.md"
 	revisionsDir = "revisions"
+
+	// DefaultMemoryBudget bounds the hydrated MEMORY.md in bytes.
+	DefaultMemoryBudget = 16 << 10
 )
 
 // Settings is the owner-authored agent.json. Empty fields fall back to the
@@ -141,6 +149,74 @@ func (s *Store) AgentRevision(_ context.Context, agentID, revision string) (pons
 		return ponsruntime.AgentDefinition{}, fmt.Errorf("agents: revision %s does not match its contents", revision)
 	}
 	return definition, nil
+}
+
+// Memory is an agent's memory directory and its index as hydrated into a
+// run. Index is data the agent or owner wrote, never instructions.
+type Memory struct {
+	Path      string
+	Index     string
+	Truncated bool
+}
+
+// Memory prepares the agent's memory directory and reads MEMORY.md within
+// budget bytes. The directory must be a real directory, not a link that could
+// widen a grant to the rest of the agent directory. A MEMORY.md that is not a
+// regular file hydrates as empty rather than following it.
+func (s *Store) Memory(agentID string, budget int) (Memory, error) {
+	if err := (ponsruntime.AgentDefinition{ID: agentID}).Validate(); err != nil {
+		return Memory{}, err
+	}
+	if budget <= 0 {
+		budget = DefaultMemoryBudget
+	}
+	dir := filepath.Join(s.Dir(agentID), MemoryDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return Memory{}, fmt.Errorf("agents: create %s: %w", dir, err)
+	}
+	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+		return Memory{}, fmt.Errorf("agents: %s must be a directory", dir)
+	}
+	indexPath := filepath.Join(dir, MemoryIndex)
+	if err := createIfMissing(indexPath, nil); err != nil {
+		return Memory{}, err
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return Memory{}, fmt.Errorf("agents: resolve %s: %w", dir, err)
+	}
+
+	memory := Memory{Path: resolved}
+	if info, err := os.Lstat(indexPath); err != nil || !info.Mode().IsRegular() {
+		return memory, nil
+	}
+	file, err := os.Open(indexPath)
+	if err != nil {
+		return Memory{}, fmt.Errorf("agents: read %s: %w", indexPath, err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, int64(budget)+1))
+	if err != nil {
+		return Memory{}, fmt.Errorf("agents: read %s: %w", indexPath, err)
+	}
+	memory.Index, memory.Truncated = truncateIndex(strings.ToValidUTF8(string(data), "\uFFFD"), budget)
+	return memory, nil
+}
+
+// truncateIndex cuts text to at most limit bytes, preferring a line boundary
+// and never splitting a rune.
+func truncateIndex(text string, limit int) (string, bool) {
+	if len(text) <= limit {
+		return text, false
+	}
+	cut := text[:limit]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	if line := strings.LastIndexByte(cut, '\n'); line > 0 {
+		cut = cut[:line+1]
+	}
+	return cut, true
 }
 
 func (s *Store) revisionPath(agentID, revision string) string {
