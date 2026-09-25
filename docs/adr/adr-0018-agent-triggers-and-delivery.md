@@ -83,6 +83,10 @@ loopback HTTP is not that gateway.
 
 ### 3. Terminal outcome is explicit
 
+> **Deferred (2026-09-25)** with ADR-0016 sections 5–6. Until revisited, a
+> scheduled run ends like any other: an answer, an error notice, or a stop
+> notice.
+
 An interactive root lineage completes with a final assistant response as in
 ADR-0016. A system-triggered root may instead complete with an explicit
 `no_update` outcome. The runtime records an outcome kind, not an inference

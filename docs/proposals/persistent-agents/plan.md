@@ -1,6 +1,6 @@
 # Persistent agents implementation plan
 
-**Status:** Proposed; phases 1 and 2 implemented
+**Status:** Proposed; phases 1–3 implemented
 **Related:** [design doc](design.md),
 [ADR-0016](../../adr/adr-0016-persistent-agents-and-async-messaging.md),
 [ADR-0017](../../adr/adr-0017-one-runtime-one-trust-domain.md),
@@ -30,7 +30,7 @@ tasks follow. Anything not needed yet moves to the phase that first needs it.
 | --- | --- | --- |
 | 1 Name the agent | — | Small |
 | 2 Memory and persona v0 | 1 | Medium |
-| 3 Lineages and outcomes | 1 | Medium |
+| 3 Run notices and stop (done) | 1 | Small |
 | 4 Principals, a chat connector, and delivery | 2, 3 | Large |
 | 5 Schedules and budgets | 4 | Medium |
 | 6 Agent workspaces and checkpoints | 1 | Medium |
@@ -41,15 +41,14 @@ tasks follow. Anything not needed yet moves to the phase that first needs it.
 | 11 Durable approvals | 4 and an implemented ADR-0014 | Medium |
 | 12 Additional agents | 1 | Medium |
 
-Phases 2 and 3 can proceed in parallel, and phase 6 at any time after
-phase 1.
+Phase 6 can proceed at any time, alongside phases 4 and 5.
 
 ## Milestones
 
 | Milestone | Phases | Demonstration |
 | --- | --- | --- |
 | M1 An agent that knows you | 1–2 | On a fresh server, the owner-named agent asks what the owner wants help with, and in a new conversation the next day it remembers the owner's preferences. |
-| M2 Reachable and proactive | 3–5 | The owner chats with their agent on Telegram, and a morning brief arrives or explicitly does not, across restarts. |
+| M2 Reachable and proactive | 3–5 | The owner chats with their agent on Telegram, and a morning brief arrives there every day, across restarts. |
 | M3 Long-lived | 6–8 | The agent's files survive sandbox replacement, household members' memory stays private, and routines set up by chat keep running. |
 | M4 Tasks | 9–11 | The agent starts a coding task from a phone, receives its result and files, and resumes after a durable approval. |
 | Later | 12 | The owner adds a second agent without a restart. |
@@ -178,66 +177,25 @@ and asks what the owner wants help with, and the next day, in a new
 conversation, it follows the preferences the owner gave it and remembers what
 the owner told it.
 
-## Phase 3: Lineages and explicit outcomes
+## Phase 3: Run notices and stop
 
-**Use cases:** all; U1 needs `no_update`. **ADRs:** ADR-0016 sections 4–6;
-ADR-0018 section 3; ADR-0023.
+**Status:** Done in [#17](https://github.com/speza/pons/pull/17).
+**ADRs:** ADR-0023.
 
-Make every accepted input part of a lineage with an explicit ending, and add
-the staged-decision mechanism later phases reuse. Under ADR-0023 the event log
-is canonical: lineage state is a set of events in the root conversation's log,
-and any lookup table is an index rebuilt from that log on open.
+The chat is the only channel today, so every run must end in something the
+owner can see there. A failed run appends its durable `run.failed` event and a
+stopped run a new `run.stopped` event; both project a notice into the
+conversation ("An error occurred while generating a response. Try again." or
+"Stopped. The response was not finished."), with the technical error kept as
+detail. `POST /v1/conversations/{id}/stop` and a Stop button cancel the active
+run gracefully: still-requested tools are marked interrupted and the stop is
+recorded in one transaction, while an answer that finishes first is kept.
 
-Already in place from ADR-0023: `InputSource` (kind, adapter, principal,
-source conversation and agent), `CausationID`, `Manager.SubmitInput` for
-internal producers, and the `input.accepted` fact that records them.
-
-Steps:
-
-1. **Lineage identity.** Add `root_id` to `InputSubmission` and the
-   `input.accepted` payload. External input (human or system) starts a new
-   lineage whose root ID is the accepted input's ID; later agent-sourced input
-   inherits its cause's root ID. Clients cannot set it.
-2. **Lineage events.** Append `lineage.completed`, `lineage.failed`, and
-   `lineage.cancelled` facts (root ID, outcome kind, final assistant output
-   ID, error code) to the root conversation's log. Add a `lineages` index
-   (root ID, conversation, status) that the store rebuilds from events in
-   `rebuild.go`, like submissions and runs.
-3. **Terminal transition.** In the same transaction as `FinishRun` and
-   `FailRun`, end the lineage once nothing with its root ID is queued or
-   running: `completed` with an explicit final response or a committed
-   `no_update`, otherwise `failed` with `no_final_response` or the run error.
-   An empty answer is no longer a success. A terminal lineage accepts no
-   further transitions.
-4. **Staged decisions.** Record a staged decision as a private
-   `agent.decision.staged` event (run ID, type, revision, payload). The
-   terminal transition commits only the latest successful root run's
-   decisions; decisions from failed, cancelled, or superseded runs are
-   ignored.
-5. **Host tools.** Add a host-tool plugin registered through `Core` with a
-   run-scoped callback instead of store access. Its first tool,
-   `complete_no_update`, is offered only when the admitted input's source
-   kind is `system`, and stages a `no_update` decision.
-6. **Views and API.** Project lineage status into `ConversationView` and the
-   web UI; add `GET /v1/conversations/{id}/lineages/{root_id}` and
-   `POST /v1/conversations/{id}/lineages/{root_id}/cancel`. Cancellation
-   appends `lineage.cancelled`, removes its queued input from eligibility,
-   cancels an active run, and fences a late completion.
-7. **Client.** `pons client -message` follows its input's lineage to a
-   terminal status instead of the first final message, and resumes after
-   reconnect from its snapshot cursor.
-
-Tests:
-
-- An empty or turn-exhausted run fails its lineage with a stable code.
-- A `system` input can complete with `no_update`; a `human` one cannot.
-- A decision staged by a failed or superseded run never commits.
-- Cancelling a lineage fences a late run completion.
-- Rebuilding indexes from the log restores lineage status exactly.
-- The client exits on lineage completion and resumes after reconnect.
-
-**Done when:** every conversation shows its lineages with explicit outcomes,
-and an internal `system` input can end silently with `no_update`.
+This replaced the planned lineages. Grouping several runs into one request,
+an explicit silent `no_update` outcome, and staged decisions (ADR-0016
+sections 5–6, ADR-0018 section 3) are deferred: with the real LLM brain a run
+ends in prose or an error, and the owner reads every outcome in the chat. They
+are revisited only if delivery, schedules, or tasks show a concrete need.
 
 ## Phase 4: Principals, a chat connector, and delivery
 
@@ -259,10 +217,10 @@ Steps:
    `(adapter, account, thread)`, and accepts the message with
    `external_event_id` idempotency.
 3. **Bindings.** Add a `bindings` table mapping an external thread to a
-   conversation and a delivery target, pinned on each lineage at acceptance.
-4. **Outbox.** Add `outbound_intents` (root ID, target, status, attempts,
-   last error). The lineage terminal transaction writes one intent when the
-   lineage has a target and a deliverable result. A delivery worker in
+   conversation and a delivery target, pinned on each accepted input.
+4. **Outbox.** Add `outbound_intents` (run ID, target, status, attempts,
+   last error). The transaction that records a run's final answer, error
+   notice, or stop notice writes one intent when its input has a target. A delivery worker in
    `Manager`, separate from run slots, sends pending intents with bounded
    backoff and records `unknown` when a send may have happened.
 5. **Scripted adapter.** Add an in-memory adapter for deterministic tests.
@@ -278,14 +236,14 @@ Steps:
    older ones, with memory carrying what matters. Stop loading the whole
    history for every run.
 9. **Visibility.** Show principal attribution on messages and delivery status
-   on lineages in the view, CLI, and web UI.
+   on runs in the view, CLI, and web UI.
 
 Tests:
 
 - A duplicate update creates one submission; an unknown sender is rejected.
 - Two linked accounts resolve to one principal; message text cannot change
   attribution.
-- A completed lineage creates exactly one intent across retries and
+- A finished run creates exactly one intent across retries and
   restarts; a delivery failure never reruns the agent.
 - Revoking a binding suppresses pending sends.
 - Hydration stays within its window for a conversation of any length.
@@ -312,8 +270,9 @@ Steps:
 3. **Catch-up.** After downtime, fire at most the latest missed slot and
    record how many were skipped. Skip nonexistent local times and fire
    repeated ones once.
-4. **Outcomes.** Scheduled roots get `complete_no_update`; results go to the
-   schedule's delivery target through the phase 4 outbox.
+4. **Outcomes.** A scheduled run's answer or error notice goes to the
+   schedule's delivery target through the phase 4 outbox. Whether a check may
+   end silently is an open question, not a planned feature.
 5. **Budgets.** Add a per-agent daily token budget; runs that would exceed
    it fail with a stable code and notify the owner once.
 6. **Management.** Add `pons schedules list|enable|disable`. Configured
@@ -324,10 +283,10 @@ Tests (with an injected clock):
 
 - Duplicate ticks and restarts fire each slot once.
 - A daylight-saving transition fires once, at the right local time.
-- `no_update` sends nothing; a response reaches the target.
+- A scheduled run's answer or error notice reaches the target.
 
-**Done when (M2):** a daily 07:00 brief arrives on Telegram, or records
-`no_update`, across restarts, and stops at the budget.
+**Done when (M2):** a daily 07:00 brief arrives on Telegram across restarts,
+and stops at the budget.
 
 ## Phase 6: Agent workspaces and checkpoints
 
@@ -404,11 +363,13 @@ Steps:
    summary, status, wake condition, and limits, plus client creation and
    `pons work list|cancel`.
 2. **Agent tools.** Add `create_work` behind a detached-work grant and
-   `decide_work` as a staged decision (`complete`, `wait_until`, `wait_for`).
+   `decide_work` (`complete`, `wait_until`, `wait_for`), recorded when the
+   run finishes. Revisit ADR-0021's staged-decision design before building
+   this phase, since it depends on the deferred lineages.
 3. **Wakes.** Timer wakes through the phase 5 scheduler, configured event
    keys through phase 4 ingress, and one `deadline_expired` wake when a
    `wait_for` deadline passes.
-4. **Exclusion.** At most one active lineage per item; bounded pending wakes.
+4. **Exclusion.** At most one active run per item; bounded pending wakes.
 5. **Routines by chat.** "Every morning at 7, send me a brief" becomes a
    recurring work item the agent proposes through an approval-system confirmation,
    running on the phase 5 engine.
@@ -432,7 +393,9 @@ running.
 - Add task profiles and named workspaces (such as configured repositories)
   to the agent definition, with built-in `general` and `coding` profiles.
 - Add the `start_task` host tool, private child conversations, the one-run
-  lifecycle, result routing, cancellation, and per-lineage limits.
+  lifecycle, result routing, cancellation, and per-conversation limits.
+  Decide then whether a request needs to group the parent's runs with its
+  tasks (ADR-0016 section 5).
 - Mount memory read-only into tasks as their profile allows.
 - Show tasks in the conversation view and web UI.
 

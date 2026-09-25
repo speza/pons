@@ -127,6 +127,14 @@ untrusted content, so labels in message text cannot forge identity.
 
 ### 5. Lineages complete explicitly
 
+> **Deferred (2026-09-25).** Sections 5 and 6 were not built. Phase 3 shipped
+> run notices and a stop control instead (#17): every run ends in an answer,
+> an error notice, or a stop notice in the event log. Grouping runs into one
+> request, `no_update`, and staged decisions are revisited only when
+> delivery, schedules, or tasks show a need; "lineage" may also be renamed
+> ("request" was suggested). Other ADRs that mention lineages depend on this
+> revisit.
+
 Each external submission starts a lineage, recorded as events in the root
 conversation's log under ADR-0023. It stays
 `active` while any of its submissions is queued or running, any of its

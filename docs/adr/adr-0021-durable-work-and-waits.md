@@ -5,6 +5,9 @@
 **Date:** 2026-09-23
 **Related:** ADR-0008, ADR-0012, ADR-0014, ADR-0016, ADR-0018, ADR-0019
 
+> **Note (2026-09-25):** this ADR builds on ADR-0016's lineages and staged
+> decisions, which are deferred. Revisit both before implementing work items.
+
 ## Context
 
 A lineage in ADR-0016 answers one external submission and all attached child

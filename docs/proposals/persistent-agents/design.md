@@ -174,8 +174,8 @@ These explain the decisions below and should settle future disputes.
 3. **Durable before acting.** Work is recorded before it runs, and replies
    are recorded before they are sent. A crash never silently loses accepted
    work or sends a message twice without saying so.
-4. **Honest outcomes.** Success, silence (`no_update`), failure, and
-   "unknown" are explicit states, never inferred from an empty answer.
+4. **Honest outcomes.** Every run ends in an answer, an error notice, or a
+   stop notice recorded in the log, never a silent guess.
 5. **Private by default.** Tasks get only the request, memory is per agent
    and per person, and the model never chooses who it is, which workspace it
    uses, or where a message goes.
@@ -198,7 +198,7 @@ Each ADR holds the contract for its decision.
 | Decision | ADR | Why |
 | --- | --- | --- |
 | One named agent, versioned; settings and persona in a host-owned agent directory | 0016 | The owner shapes one agent instead of designing roles; edits never change work in flight |
-| Lineages with explicit outcomes, including silent `no_update` | 0016 | A check that finds nothing must be distinguishable from a crash |
+| Every run ends in an answer, error notice, or stop notice in the log | 0023 | The owner always sees what happened, live or after a reload |
 | Private one-level tasks under owner-configured profiles | 0016 | Context isolation for coding and research without predefined agents |
 | Chat, schedules, and events share one intake; replies leave through a durable outbox | 0018 | One runner, owner-set destinations, no reruns when a send fails |
 | Owner-linked identities across chat apps | 0018 | Memory follows a person without guessing identity |
@@ -275,3 +275,7 @@ demonstration. Beyond them:
   Sentinel, rather than only individual tool calls?
 - **Talking to a task.** Should the owner be able to follow up inside a
   running or finished task, rather than only through the agent?
+- **Silent outcomes and request grouping.** Should a scheduled check be able
+  to end with nothing to send, and should several runs (for example a parent
+  and its tasks) count as one request? Deferred from phase 3 (ADR-0016
+  sections 5–6); revisit when delivery, schedules, or tasks need it.
