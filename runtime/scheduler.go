@@ -66,7 +66,7 @@ func (c *liveConversation) work(ctx context.Context, cancel context.CancelFunc, 
 		runErr = fmt.Errorf("runtime: agent revision %q of agent %q is unavailable: %w",
 			claim.Run.AgentRevision, claim.Conversation.AgentID, runErr)
 	} else {
-		result, runErr = c.execute(ctx, agent, claim.Message, claim.History, claim.Run)
+		result, runErr = c.execute(ctx, agent, claim)
 	}
 	cancel()
 
@@ -83,7 +83,7 @@ func (c *liveConversation) work(ctx context.Context, cancel context.CancelFunc, 
 			backgroundErr = fmt.Errorf("runtime: persist failed run %s: %w", claim.Run.ID, persistErr)
 		}
 	} else {
-		_, events, persistErr := c.manager.store.FinishRun(context.Background(), claim.Run, result.Answer)
+		events, persistErr := c.manager.store.FinishRun(context.Background(), claim.Run, result.Answer)
 		if persistErr == nil {
 			c.broadcastLocked(events...)
 		} else {
@@ -98,26 +98,24 @@ func (c *liveConversation) work(ctx context.Context, cancel context.CancelFunc, 
 func (c *liveConversation) execute(
 	ctx context.Context,
 	agent AgentDefinition,
-	message InboundMessage,
-	history []Message,
-	run Run,
+	claim *ClaimedRun,
 ) (RunResult, error) {
 	m := c.manager
 	return m.cfg.Runner.Run(ctx, RunRequest{
 		Agent:              agent,
 		ConversationID:     c.conversation.ID,
-		RunID:              run.ID,
-		InboundMessageID:   message.ID,
+		RunID:              claim.Run.ID,
+		InboundMessageID:   claim.Message.ID,
 		Workspace:          c.conversation.Workspace,
 		Environment:        c.conversation.Environment,
 		GitRepository:      c.conversation.GitRepository,
 		GitRevision:        c.conversation.GitRevision,
 		GitAllRepositories: c.conversation.GitAllRepositories,
-		Text:               messageText(message.Parts),
-		Messages:           history,
+		Text:               messageText(claim.Message.Parts),
+		Context:            claim.Context,
 
 		Emit: func(event RunEvent) error {
-			return c.emitRunEvent(run, event)
+			return c.emitRunEvent(claim.Run, event)
 		},
 	})
 }
@@ -126,6 +124,11 @@ func (c *liveConversation) emitRunEvent(run Run, source RunEvent) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	switch source.Type {
+	case RunEventAgentEvent:
+		if source.AgentEvent == nil {
+			return errors.New("runtime: agent event is missing")
+		}
+		return c.manager.store.AppendAgentEvent(context.Background(), run, *source.AgentEvent)
 	case EventEnvironmentProgress:
 		event, err := c.manager.store.AppendEnvironmentProgress(context.Background(), run, EnvironmentProgress{
 			Step: source.Step, Message: source.Message,

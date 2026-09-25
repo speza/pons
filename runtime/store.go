@@ -23,15 +23,15 @@ func NewID() string {
 }
 
 // Store is the authoritative persistence boundary consumed by the server runtime.
-// Implementations commit each returned event batch atomically with the state
-// mutation that produced it.
+// Its durable events form the conversation log; client replay is a filtered
+// projection of that log.
+// Implementations commit each returned event batch atomically with the
+// operational state transition that produced it.
 type Store interface {
 	CreateConversation(context.Context, Conversation) error
 	Conversation(context.Context, string) (Conversation, error)
 	Conversations(context.Context) ([]Conversation, error)
-	// Accept queues a submission under the given revision of the
-	// conversation's agent. The caller guarantees the revision is recorded.
-	Accept(ctx context.Context, conversationID, key, agentRevision string, parts []TextPart) (AcceptedMessage, []Event, error)
+	Accept(context.Context, string, InputSubmission) (AcceptedMessage, []Event, error)
 	// ClaimRunnable atomically selects and claims the oldest queued submission
 	// whose conversation and workspace have no active run. It returns nil when
 	// no work is currently eligible. This transition is not, by itself, a
@@ -39,8 +39,9 @@ type Store interface {
 	ClaimRunnable(context.Context) (*ClaimedRun, error)
 	CommitAssistantTurn(context.Context, Run, []MessagePart) ([]Event, error)
 	AppendEnvironmentProgress(context.Context, Run, EnvironmentProgress) (Event, error)
+	AppendAgentEvent(context.Context, Run, Event) error
 	ToolCompleted(context.Context, Run, protocol.ToolResult) ([]Event, error)
-	FinishRun(context.Context, Run, string) (Message, []Event, error)
+	FinishRun(context.Context, Run, string) ([]Event, error)
 	// FailRun atomically resolves every still-requested tool as interrupted and
 	// marks the run and submission failed. It must not strand requested tools
 	// behind a terminal run if any part of that transition fails.
@@ -50,13 +51,14 @@ type Store interface {
 	// claims; SQLite supports one Manager and calls this during startup.
 	RecoverRunning(context.Context) error
 	Events(context.Context, string, uint64) ([]Event, error)
+	AgentEvents(context.Context, string, uint64) ([]Event, error)
 	View(context.Context, string) (ConversationView, error)
 }
 
 type ClaimedRun struct {
 	Conversation Conversation
 	Message      InboundMessage
-	History      []Message
+	Context      []ContextTurn
 	Run          Run
 	Events       []Event
 }

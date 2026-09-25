@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ncruces/go-sqlite3/driver"
@@ -21,7 +22,7 @@ import (
 
 const (
 	runtimeDBName        = "runtime.db"
-	currentSchemaVersion = 5
+	currentSchemaVersion = 10
 )
 
 // Store is the local, exclusive-manager runtime backend. Its transactions
@@ -70,6 +71,10 @@ func Open(stateDir string) (*Store, error) {
 		_ = store.Close()
 		return nil, err
 	}
+	if err := store.rebuildIndexes(context.Background()); err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("runtime: rebuild event indexes: %w", err)
+	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = store.Close()
 		return nil, fmt.Errorf("runtime: secure database: %w", err)
@@ -107,35 +112,11 @@ CREATE TABLE IF NOT EXISTS conversations (
   created_at INTEGER NOT NULL,
   next_event_cursor INTEGER NOT NULL DEFAULT 1
 );
-CREATE TABLE IF NOT EXISTS messages (
-  id TEXT PRIMARY KEY,
-  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  inbound_message_id TEXT NOT NULL DEFAULT '',
-  run_id TEXT NOT NULL DEFAULT '',
-  role TEXT NOT NULL,
-  complete BOOLEAN NOT NULL DEFAULT TRUE,
-  final BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS messages_conversation_order
-  ON messages(conversation_id, created_at, id);
-CREATE TABLE IF NOT EXISTS message_parts (
-  message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-  position INTEGER NOT NULL,
-  type TEXT NOT NULL,
-  text TEXT NOT NULL DEFAULT '',
-  tool_call_id TEXT NOT NULL DEFAULT '',
-  tool_kind TEXT NOT NULL DEFAULT '',
-  arguments BLOB,
-  result BLOB,
-  metadata BLOB,
-  PRIMARY KEY(message_id, position)
-);
 CREATE TABLE IF NOT EXISTS submissions (
   id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   idempotency_key TEXT NOT NULL,
-  message_id TEXT NOT NULL REFERENCES messages(id),
+  message_id TEXT NOT NULL,
   agent_revision TEXT NOT NULL CHECK (agent_revision <> ''),
   status TEXT NOT NULL,
   error TEXT NOT NULL DEFAULT '',
@@ -166,12 +147,8 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   run_id TEXT NOT NULL REFERENCES runs(id),
   inbound_message_id TEXT NOT NULL,
-  message_id TEXT NOT NULL REFERENCES messages(id),
   kind TEXT NOT NULL,
-  arguments BLOB NOT NULL,
   status TEXT NOT NULL,
-  result BLOB,
-  result_message_id TEXT,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY(run_id, id)
 );
@@ -181,10 +158,13 @@ CREATE TABLE IF NOT EXISTS events (
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   cursor INTEGER NOT NULL,
   type TEXT NOT NULL,
+  message_id TEXT NOT NULL DEFAULT '',
   payload BLOB NOT NULL,
   created_at INTEGER NOT NULL,
   PRIMARY KEY(conversation_id, cursor)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS events_message_id
+  ON events(conversation_id, message_id) WHERE message_id <> '';
 CREATE TABLE IF NOT EXISTS workspaces (
   id TEXT PRIMARY KEY CHECK (id <> ''),
   strategy TEXT NOT NULL CHECK (strategy <> ''),
@@ -495,47 +475,6 @@ ORDER BY created_at DESC, id DESC`)
 	return conversations, nil
 }
 
-func insertMessageTx(ctx context.Context, tx *sql.Tx, message ponsruntime.Message) error {
-	_, err := tx.ExecContext(ctx, `
-	INSERT INTO messages(id, conversation_id, inbound_message_id, run_id, role, complete, final, created_at)
-	VALUES(?, ?, ?, ?, ?, ?, ?, ?)`, message.ID, message.ConversationID, message.InboundMessageID,
-		message.RunID, message.Role, message.Complete, message.Final, encodeTime(message.CreatedAt))
-	if err != nil {
-		return err
-	}
-	for i, part := range message.Parts {
-		var result, metadata []byte
-		if part.Result != nil {
-			result, err = json.Marshal(part.Result)
-			if err != nil {
-				return err
-			}
-		}
-		if len(part.Metadata) > 0 {
-			metadata, err = json.Marshal(part.Metadata)
-			if err != nil {
-				return err
-			}
-		}
-		_, err = tx.ExecContext(ctx, `
-INSERT INTO message_parts(message_id, position, type, text, tool_call_id, tool_kind, arguments, result, metadata)
-VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`, message.ID, i, part.Type, part.Text, part.ToolCallID,
-			part.ToolKind, []byte(part.Arguments), result, metadata)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func updateMessageEventTx(ctx context.Context, tx *sql.Tx, message ponsruntime.Message) (ponsruntime.Event, error) {
-	copy := cloneMessage(message)
-	return appendEventTx(ctx, tx, ponsruntime.Event{
-		Type: ponsruntime.EventMessageUpserted, ConversationID: message.ConversationID,
-		RunID: message.RunID, InboundMessageID: message.InboundMessageID, Message: &copy,
-	})
-}
-
 func appendEventTx(ctx context.Context, tx *sql.Tx, event ponsruntime.Event) (ponsruntime.Event, error) {
 	var next uint64
 	if err := tx.QueryRowContext(ctx,
@@ -544,14 +483,27 @@ func appendEventTx(ctx context.Context, tx *sql.Tx, event ponsruntime.Event) (po
 		return ponsruntime.Event{}, err
 	}
 	event.ID = next
-	event.CreatedAt = canonicalTime(time.Now())
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = canonicalTime(time.Now())
+	} else {
+		event.CreatedAt = canonicalTime(event.CreatedAt)
+	}
+	messageID := ""
+	switch event.Type {
+	case ponsruntime.EventInputAccepted:
+		messageID = event.InboundMessageID
+	case ponsruntime.EventAssistantCommitted:
+		messageID = event.AssistantOutput.ID
+	case ponsruntime.EventToolOutcomeRecorded:
+		messageID = event.ToolOutcome.ID
+	}
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return ponsruntime.Event{}, err
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO events(conversation_id, cursor, type, payload, created_at) VALUES(?, ?, ?, ?, ?)`,
-		event.ConversationID, event.ID, event.Type, payload, encodeTime(event.CreatedAt)); err != nil {
+		`INSERT INTO events(conversation_id, cursor, type, message_id, payload, created_at) VALUES(?, ?, ?, ?, ?, ?)`,
+		event.ConversationID, event.ID, event.Type, messageID, payload, encodeTime(event.CreatedAt)); err != nil {
 		return ponsruntime.Event{}, err
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -590,11 +542,69 @@ func (s *Store) AppendEnvironmentProgress(ctx context.Context, run ponsruntime.R
 	return event, nil
 }
 
-func (s *Store) Accept(
-	ctx context.Context,
-	conversationID, key, agentRevision string,
-	parts []ponsruntime.TextPart,
-) (ponsruntime.AcceptedMessage, []ponsruntime.Event, error) {
+// AppendAgentEvent records one typed internal fact before the caller proceeds.
+// Client replay deliberately excludes agent.* entries.
+func (s *Store) AppendAgentEvent(ctx context.Context, run ponsruntime.Run, event ponsruntime.Event) error {
+	if run.ID == "" || run.ConversationID == "" || !validAgentEvent(event) {
+		return errors.New("runtime: invalid agent event")
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var status string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM runs WHERE id = ? AND conversation_id = ?`, run.ID, run.ConversationID).Scan(&status); err != nil {
+		return err
+	}
+	if status != ponsruntime.RunRunning {
+		return fmt.Errorf("runtime: agent step for non-running run %q", run.ID)
+	}
+	event.ConversationID = run.ConversationID
+	event.RunID = run.ID
+	event.InboundMessageID = run.InboundMessageID
+	if _, err := appendEventTx(ctx, tx, event); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func validAgentEvent(event ponsruntime.Event) bool {
+	payloads := 0
+	for _, present := range []bool{
+		event.AgentBoundary != nil, event.Iteration != nil, event.ModelOutput != nil,
+		event.ToolExecution != nil, event.Compaction != nil, event.PreparedInput != nil,
+	} {
+		if present {
+			payloads++
+		}
+	}
+	if payloads != 1 || event.Input != nil || event.AssistantOutput != nil || event.ToolOutcome != nil || event.Run != nil {
+		return false
+	}
+	switch event.Type {
+	case ponsruntime.EventAgentStarted, ponsruntime.EventAgentFinished,
+		ponsruntime.EventAgentStopped, ponsruntime.EventAgentExhausted:
+		return event.AgentBoundary != nil
+	case ponsruntime.EventIterationStarted, ponsruntime.EventIterationCompleted:
+		return event.Iteration != nil && event.Iteration.Turn > 0
+	case ponsruntime.EventModelCompleted:
+		return event.ModelOutput != nil && event.ModelOutput.Turn > 0
+	case ponsruntime.EventToolExecutionStarted:
+		return event.ToolExecution != nil && event.ToolExecution.Turn > 0 && event.ToolExecution.ToolCallID != ""
+	case ponsruntime.EventContextCompacted:
+		return event.Compaction != nil && event.Compaction.Turn > 0 && len(event.Compaction.Context) > 0
+	case ponsruntime.EventInputPrepared:
+		return event.PreparedInput != nil && event.PreparedInput.Role == "user" && len(event.PreparedInput.Content) > 0
+	default:
+		return false
+	}
+}
+
+func (s *Store) Accept(ctx context.Context, conversationID string, input ponsruntime.InputSubmission) (ponsruntime.AcceptedMessage, []ponsruntime.Event, error) {
+	if err := ponsruntime.ValidateInputSubmission(input); err != nil {
+		return ponsruntime.AcceptedMessage{}, nil, err
+	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return ponsruntime.AcceptedMessage{}, nil, err
@@ -602,7 +612,7 @@ func (s *Store) Accept(
 	defer tx.Rollback()
 	var existing string
 	err = tx.QueryRowContext(ctx,
-		`SELECT id FROM submissions WHERE conversation_id = ? AND idempotency_key = ?`, conversationID, key,
+		`SELECT id FROM submissions WHERE conversation_id = ? AND idempotency_key = ?`, conversationID, input.IdempotencyKey,
 	).Scan(&existing)
 	if err == nil {
 		return ponsruntime.AcceptedMessage{ConversationID: conversationID, InboundMessageID: existing, Duplicate: true}, nil, nil
@@ -610,41 +620,25 @@ func (s *Store) Accept(
 	if !errors.Is(err, sql.ErrNoRows) {
 		return ponsruntime.AcceptedMessage{}, nil, err
 	}
-	if _, err := conversationTx(ctx, tx, conversationID); err != nil {
+	conversation, err := conversationTx(ctx, tx, conversationID)
+	if err != nil {
 		return ponsruntime.AcceptedMessage{}, nil, err
+	}
+	if input.TargetAgentID != conversation.AgentID || input.AgentRevision == "" {
+		return ponsruntime.AcceptedMessage{}, nil, errors.New("runtime: input target or agent revision does not match conversation")
 	}
 
 	now := canonicalTime(time.Now())
 	id := newID()
-	messageParts := make([]ponsruntime.MessagePart, len(parts))
-	for i, part := range parts {
-		messageParts[i] = ponsruntime.MessagePart{Type: "text", Text: part.Text}
-	}
-
-	message := ponsruntime.Message{
-		ID: id, ConversationID: conversationID, InboundMessageID: id,
-		Role: "user", Parts: messageParts, Complete: true, CreatedAt: now,
-	}
-	if err := insertMessageTx(ctx, tx, message); err != nil {
-		return ponsruntime.AcceptedMessage{}, nil, err
-	}
-
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO submissions(id, conversation_id, idempotency_key, message_id, agent_revision, status, accepted_at)
-VALUES(?, ?, ?, ?, ?, ?, ?)`, id, conversationID, key, message.ID, agentRevision, ponsruntime.RunQueued, encodeTime(now)); err != nil {
+VALUES(?, ?, ?, ?, ?, ?, ?)`, id, conversationID, input.IdempotencyKey, id, input.AgentRevision, ponsruntime.RunQueued, encodeTime(now)); err != nil {
 		return ponsruntime.AcceptedMessage{}, nil, err
 	}
-	messageEvent, err := updateMessageEventTx(ctx, tx, message)
-	if err != nil {
-		return ponsruntime.AcceptedMessage{}, nil, err
-	}
-	submission := ponsruntime.Submission{
-		ID: id, ConversationID: conversationID, MessageID: message.ID, AgentRevision: agentRevision,
-		Status: ponsruntime.RunQueued, AcceptedAt: now,
-	}
-	submissionEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
-		Type: ponsruntime.EventSubmissionUpdated, ConversationID: conversationID,
-		InboundMessageID: id, Submission: &submission,
+	inputEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
+		Type: ponsruntime.EventInputAccepted, ConversationID: conversationID,
+		InboundMessageID: id, Input: &ponsruntime.UserInput{InputSubmission: input},
+		CreatedAt: now,
 	})
 	if err != nil {
 		return ponsruntime.AcceptedMessage{}, nil, err
@@ -652,7 +646,7 @@ VALUES(?, ?, ?, ?, ?, ?, ?)`, id, conversationID, key, message.ID, agentRevision
 	if err := tx.Commit(); err != nil {
 		return ponsruntime.AcceptedMessage{}, nil, err
 	}
-	return ponsruntime.AcceptedMessage{ConversationID: conversationID, InboundMessageID: id}, []ponsruntime.Event{messageEvent, submissionEvent}, nil
+	return ponsruntime.AcceptedMessage{ConversationID: conversationID, InboundMessageID: id}, []ponsruntime.Event{inputEvent}, nil
 }
 
 func conversationTx(ctx context.Context, tx *sql.Tx, id string) (ponsruntime.Conversation, error) {
@@ -716,7 +710,7 @@ LIMIT 1`, ponsruntime.RunQueued, ponsruntime.RunRunning, ponsruntime.RunRunning,
 		return nil, err
 	}
 
-	parts, err := messageTextPartsTx(ctx, tx, id)
+	parts, err := loadInputTx(ctx, tx, conversationID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -746,29 +740,34 @@ VALUES(?, ?, ?, ?, ?, ?, ?)`, run.ID, conversationID, id, id, agentRevision, run
 		return nil, err
 	}
 
-	submission := ponsruntime.Submission{
-		ID: id, ConversationID: conversationID, MessageID: id, AgentRevision: agentRevision,
-		Status: ponsruntime.RunRunning, AcceptedAt: acceptedAt,
+	compaction, compactCursor, err := loadLatestCompactionTx(ctx, tx, conversationID)
+	if err != nil {
+		return nil, err
 	}
-	subEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
-		Type: ponsruntime.EventSubmissionUpdated, ConversationID: conversationID, RunID: run.ID,
-		InboundMessageID: id, Submission: &submission,
+	contextAfterCheckpoint, err := loadContextAfterTx(ctx, tx, conversationID, compactCursor)
+	if err != nil {
+		return nil, err
+	}
+	var contextTurns []ponsruntime.ContextTurn
+	if compaction != nil {
+		contextTurns = append(contextTurns, compaction.Context...)
+	}
+	contextTurns = append(contextTurns, contextAfterCheckpoint...)
+	admittedEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
+		Type: ponsruntime.EventInputAdmitted, ConversationID: conversationID,
+		RunID: run.ID, InboundMessageID: id, CreatedAt: now,
 	})
 	if err != nil {
 		return nil, err
 	}
 	runEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
-		Type: ponsruntime.EventRunUpdated, ConversationID: conversationID, RunID: run.ID,
-		InboundMessageID: id, Run: &run,
+		Type: ponsruntime.EventRunStarted, ConversationID: conversationID, RunID: run.ID,
+		InboundMessageID: id, Run: &run, CreatedAt: now,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	history, err := loadHistoryThroughSubmissionTx(ctx, tx, conversationID, accepted, id)
-	if err != nil {
-		return nil, err
-	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -778,64 +777,9 @@ VALUES(?, ?, ?, ?, ?, ?, ?)`, run.ID, conversationID, id, id, agentRevision, run
 			GitRevision: gitRevision, GitAllRepositories: gitAllRepositories, Environment: environment, CreatedAt: createdAt,
 		},
 		Message: ponsruntime.InboundMessage{ID: id, IdempotencyKey: key, Parts: parts, AcceptedAt: acceptedAt},
-		History: history, Run: run, Events: []ponsruntime.Event{subEvent, runEvent},
+		Context: contextTurns,
+		Run:     run, Events: []ponsruntime.Event{admittedEvent, runEvent},
 	}, nil
-}
-
-func loadHistoryThroughSubmissionTx(ctx context.Context, tx *sql.Tx, conversationID string, acceptedAt int64, submissionID string) ([]ponsruntime.Message, error) {
-	rows, err := tx.QueryContext(ctx, `
-SELECT messages.id
-FROM messages
-JOIN submissions ON submissions.id = messages.inbound_message_id
-WHERE messages.conversation_id = ?
-	  AND (messages.role != 'assistant' OR messages.complete = TRUE)
-	  AND (submissions.accepted_at < ? OR (submissions.accepted_at = ? AND submissions.id <= ?))
-ORDER BY submissions.accepted_at, submissions.id, messages.created_at, messages.rowid`,
-		conversationID, acceptedAt, acceptedAt, submissionID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		if id != submissionID {
-			ids = append(ids, id)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	messages := make([]ponsruntime.Message, 0, len(ids))
-	for _, id := range ids {
-		message, err := loadMessageTx(ctx, tx, id)
-		if err != nil {
-			return nil, err
-		}
-		messages = append(messages, message)
-	}
-	return messages, nil
-}
-
-func messageTextPartsTx(ctx context.Context, tx *sql.Tx, messageID string) ([]ponsruntime.TextPart, error) {
-	rows, err := tx.QueryContext(ctx, `
-SELECT type, text FROM message_parts WHERE message_id = ? ORDER BY position`, messageID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var parts []ponsruntime.TextPart
-	for rows.Next() {
-		var part ponsruntime.TextPart
-		if err := rows.Scan(&part.Type, &part.Text); err != nil {
-			return nil, err
-		}
-		parts = append(parts, part)
-	}
-	return parts, rows.Err()
 }
 
 func (s *Store) CommitAssistantTurn(ctx context.Context, run ponsruntime.Run, parts []ponsruntime.MessagePart) ([]ponsruntime.Event, error) {
@@ -875,45 +819,28 @@ func (s *Store) CommitAssistantTurn(ctx context.Context, run ponsruntime.Run, pa
 		return nil, errors.New("runtime: assistant tool turn has no tool calls")
 	}
 
-	message := ponsruntime.Message{
-		ID: newID(), ConversationID: run.ConversationID, InboundMessageID: run.InboundMessageID,
-		RunID: run.ID, Role: "assistant", Parts: normalizedParts, Complete: true, CreatedAt: now,
-	}
-	if err := insertMessageTx(ctx, tx, message); err != nil {
-		return nil, err
-	}
-
-	events := make([]ponsruntime.Event, 0, 1+len(toolParts))
-	messageEvent, err := updateMessageEventTx(ctx, tx, message)
+	outputID := newID()
+	outputEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
+		Type: ponsruntime.EventAssistantCommitted, ConversationID: run.ConversationID,
+		RunID: run.ID, InboundMessageID: run.InboundMessageID,
+		AssistantOutput: &ponsruntime.AssistantOutput{ID: outputID, Parts: normalizedParts},
+		CreatedAt:       now,
+	})
 	if err != nil {
 		return nil, err
 	}
-	events = append(events, messageEvent)
 	for _, part := range toolParts {
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO tool_calls(id, conversation_id, run_id, inbound_message_id, message_id, kind, arguments, status, updated_at)
-VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`, part.ToolCallID, run.ConversationID, run.ID, run.InboundMessageID,
-			message.ID, part.ToolKind, []byte(part.Arguments), ponsruntime.ToolRequested, encodeTime(now)); err != nil {
+INSERT INTO tool_calls(id, conversation_id, run_id, inbound_message_id, kind, status, updated_at)
+VALUES(?, ?, ?, ?, ?, ?, ?)`, part.ToolCallID, run.ConversationID, run.ID, run.InboundMessageID,
+			part.ToolKind, ponsruntime.ToolRequested, encodeTime(now)); err != nil {
 			return nil, err
 		}
-		tool := ponsruntime.ToolCall{
-			ID: part.ToolCallID, ConversationID: run.ConversationID, RunID: run.ID,
-			InboundMessageID: run.InboundMessageID, Kind: part.ToolKind,
-			Arguments: cloneRaw(part.Arguments), Status: ponsruntime.ToolRequested, UpdatedAt: now,
-		}
-		toolEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
-			Type: ponsruntime.EventToolCallUpdated, ConversationID: run.ConversationID, RunID: run.ID,
-			InboundMessageID: run.InboundMessageID, ToolCall: &tool,
-		})
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, toolEvent)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return events, nil
+	return []ponsruntime.Event{outputEvent}, nil
 }
 
 func (s *Store) ToolCompleted(ctx context.Context, run ponsruntime.Run, result protocol.ToolResult) ([]ponsruntime.Event, error) {
@@ -948,29 +875,16 @@ func toolFinishedTx(
 	status string,
 	now time.Time,
 ) ([]ponsruntime.Event, error) {
-	var args []byte
 	var kindText string
 	if err := tx.QueryRowContext(ctx,
-		`SELECT kind, arguments FROM tool_calls WHERE id = ? AND run_id = ? AND status = ?`,
+		`SELECT kind FROM tool_calls WHERE id = ? AND run_id = ? AND status = ?`,
 		result.ActionID, run.ID, ponsruntime.ToolRequested,
-	).Scan(&kindText, &args); err != nil {
-		return nil, err
-	}
-	message := ponsruntime.Message{
-		ID: newID(), ConversationID: run.ConversationID, InboundMessageID: run.InboundMessageID,
-		RunID: run.ID, Role: "tool", Complete: true, CreatedAt: now,
-		Parts: []ponsruntime.MessagePart{{Type: "tool_result", ToolCallID: result.ActionID, ToolKind: kindText, Result: cloneResult(result)}},
-	}
-	if err := insertMessageTx(ctx, tx, message); err != nil {
-		return nil, err
-	}
-	encoded, err := json.Marshal(result)
-	if err != nil {
+	).Scan(&kindText); err != nil {
 		return nil, err
 	}
 	updated, err := tx.ExecContext(ctx, `
-UPDATE tool_calls SET status = ?, result = ?, result_message_id = ?, updated_at = ?
-WHERE id = ? AND run_id = ? AND status = ?`, status, encoded, message.ID, encodeTime(now),
+UPDATE tool_calls SET status = ?, updated_at = ?
+WHERE id = ? AND run_id = ? AND status = ?`, status, encodeTime(now),
 		result.ActionID, run.ID, ponsruntime.ToolRequested)
 	if err != nil {
 		return nil, err
@@ -982,23 +896,18 @@ WHERE id = ? AND run_id = ? AND status = ?`, status, encoded, message.ID, encode
 	if count != 1 {
 		return nil, fmt.Errorf("runtime: requested tool %q lost its completion race", result.ActionID)
 	}
-	tool := ponsruntime.ToolCall{
-		ID: result.ActionID, ConversationID: run.ConversationID, RunID: run.ID,
-		InboundMessageID: run.InboundMessageID, Kind: kindText, Arguments: cloneRaw(args),
-		Status: status, Result: cloneResult(result), UpdatedAt: now,
-	}
-	toolEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
-		Type: ponsruntime.EventToolCallUpdated, ConversationID: run.ConversationID, RunID: run.ID,
-		InboundMessageID: run.InboundMessageID, ToolCall: &tool,
+	outcomeEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
+		Type: ponsruntime.EventToolOutcomeRecorded, ConversationID: run.ConversationID,
+		RunID: run.ID, InboundMessageID: run.InboundMessageID, CreatedAt: now,
+		ToolOutcome: &ponsruntime.ToolOutcome{
+			ID: newID(), ToolCallID: result.ActionID, ToolKind: kindText,
+			Status: status, Result: cloneResult(result),
+		},
 	})
 	if err != nil {
 		return nil, err
 	}
-	messageEvent, err := updateMessageEventTx(ctx, tx, message)
-	if err != nil {
-		return nil, err
-	}
-	return []ponsruntime.Event{toolEvent, messageEvent}, nil
+	return []ponsruntime.Event{outcomeEvent}, nil
 }
 
 func cloneResult(result protocol.ToolResult) *protocol.ToolResult {
@@ -1020,63 +929,42 @@ func cloneMessageParts(parts []ponsruntime.MessagePart) []ponsruntime.MessagePar
 	return out
 }
 
-func (s *Store) FinishRun(ctx context.Context, run ponsruntime.Run, answer string) (ponsruntime.Message, []ponsruntime.Event, error) {
+func (s *Store) FinishRun(ctx context.Context, run ponsruntime.Run, answer string) ([]ponsruntime.Event, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		return ponsruntime.Message{}, nil, err
+		return nil, err
 	}
 	defer tx.Rollback()
 	now := canonicalTime(time.Now())
-	message := ponsruntime.Message{
-		ID: newID(), ConversationID: run.ConversationID, InboundMessageID: run.InboundMessageID,
-		RunID: run.ID, Role: "assistant", Complete: true, Final: true, CreatedAt: now,
-		Parts: []ponsruntime.MessagePart{{Type: "text", Text: answer}},
-	}
-	if err := insertMessageTx(ctx, tx, message); err != nil {
-		return ponsruntime.Message{}, nil, err
-	}
 	if _, err := tx.ExecContext(ctx, `UPDATE submissions SET status = ? WHERE id = ?`, ponsruntime.RunCompleted, run.InboundMessageID); err != nil {
-		return ponsruntime.Message{}, nil, err
+		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE runs SET status = ?, completed_at = ? WHERE id = ?`, ponsruntime.RunCompleted, encodeTime(now), run.ID); err != nil {
-		return ponsruntime.Message{}, nil, err
+		return nil, err
 	}
 	completed := run
 	completed.Status, completed.CompletedAt = ponsruntime.RunCompleted, &now
-	var accepted int64
-	var agentRevision string
-	if err := tx.QueryRowContext(ctx,
-		`SELECT accepted_at, agent_revision FROM submissions WHERE id = ?`, run.InboundMessageID,
-	).Scan(&accepted, &agentRevision); err != nil {
-		return ponsruntime.Message{}, nil, err
-	}
-	acceptedAt := decodeTime(accepted)
-	submission := ponsruntime.Submission{
-		ID: run.InboundMessageID, ConversationID: run.ConversationID, MessageID: run.InboundMessageID,
-		AgentRevision: agentRevision, Status: ponsruntime.RunCompleted, AcceptedAt: acceptedAt,
-	}
-	messageEvent, err := updateMessageEventTx(ctx, tx, message)
+	outputEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
+		Type: ponsruntime.EventAssistantCommitted, ConversationID: run.ConversationID,
+		RunID: run.ID, InboundMessageID: run.InboundMessageID, CreatedAt: now,
+		AssistantOutput: &ponsruntime.AssistantOutput{
+			ID: newID(), Parts: []ponsruntime.MessagePart{{Type: "text", Text: answer}}, Final: true,
+		},
+	})
 	if err != nil {
-		return ponsruntime.Message{}, nil, err
+		return nil, err
 	}
 	runEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
-		Type: ponsruntime.EventRunUpdated, ConversationID: run.ConversationID, RunID: run.ID,
-		InboundMessageID: run.InboundMessageID, Run: &completed,
+		Type: ponsruntime.EventRunCompleted, ConversationID: run.ConversationID, RunID: run.ID,
+		InboundMessageID: run.InboundMessageID, Run: &completed, CreatedAt: now,
 	})
 	if err != nil {
-		return ponsruntime.Message{}, nil, err
-	}
-	submissionEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
-		Type: ponsruntime.EventSubmissionUpdated, ConversationID: run.ConversationID, RunID: run.ID,
-		InboundMessageID: run.InboundMessageID, Submission: &submission,
-	})
-	if err != nil {
-		return ponsruntime.Message{}, nil, err
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return ponsruntime.Message{}, nil, err
+		return nil, err
 	}
-	return message, []ponsruntime.Event{messageEvent, runEvent, submissionEvent}, nil
+	return []ponsruntime.Event{outputEvent, runEvent}, nil
 }
 
 func (s *Store) FailRun(ctx context.Context, run ponsruntime.Run, message string) ([]ponsruntime.Event, error) {
@@ -1098,28 +986,9 @@ func (s *Store) FailRun(ctx context.Context, run ponsruntime.Run, message string
 	}
 	failed := run
 	failed.Status, failed.Error, failed.CompletedAt = ponsruntime.RunFailed, message, &now
-	var accepted int64
-	var agentRevision string
-	if err := tx.QueryRowContext(ctx,
-		`SELECT accepted_at, agent_revision FROM submissions WHERE id = ?`, run.InboundMessageID,
-	).Scan(&accepted, &agentRevision); err != nil {
-		return nil, err
-	}
-	acceptedAt := decodeTime(accepted)
-	submission := ponsruntime.Submission{
-		ID: run.InboundMessageID, ConversationID: run.ConversationID, MessageID: run.InboundMessageID,
-		AgentRevision: agentRevision, Status: ponsruntime.RunFailed, Error: message, AcceptedAt: acceptedAt,
-	}
 	runEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
-		Type: ponsruntime.EventRunUpdated, ConversationID: run.ConversationID, RunID: run.ID,
-		InboundMessageID: run.InboundMessageID, Run: &failed,
-	})
-	if err != nil {
-		return nil, err
-	}
-	submissionEvent, err := appendEventTx(ctx, tx, ponsruntime.Event{
-		Type: ponsruntime.EventSubmissionUpdated, ConversationID: run.ConversationID, RunID: run.ID,
-		InboundMessageID: run.InboundMessageID, Submission: &submission,
+		Type: ponsruntime.EventRunFailed, ConversationID: run.ConversationID, RunID: run.ID,
+		InboundMessageID: run.InboundMessageID, Run: &failed, CreatedAt: now,
 	})
 	if err != nil {
 		return nil, err
@@ -1127,7 +996,7 @@ func (s *Store) FailRun(ctx context.Context, run ponsruntime.Run, message string
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return append(events, runEvent, submissionEvent), nil
+	return append(events, runEvent), nil
 }
 
 func interruptRequestedToolsTx(
@@ -1217,24 +1086,24 @@ func (s *Store) Events(ctx context.Context, conversationID string, after uint64)
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT payload FROM events WHERE conversation_id = ? AND cursor > ? ORDER BY cursor`, conversationID, after)
+SELECT payload FROM events WHERE conversation_id = ? AND cursor > ? AND type NOT LIKE 'agent.%' ORDER BY cursor`, conversationID, after)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var events []ponsruntime.Event
-	for rows.Next() {
-		var payload []byte
-		if err := rows.Scan(&payload); err != nil {
-			return nil, err
-		}
-		var event ponsruntime.Event
-		if err := json.Unmarshal(payload, &event); err != nil {
-			return nil, err
-		}
-		events = append(events, event)
+	return decodeEvents(rows)
+}
+
+// AgentEvents reads the internal part of the same cursor-ordered event log.
+func (s *Store) AgentEvents(ctx context.Context, conversationID string, after uint64) ([]ponsruntime.Event, error) {
+	if _, err := s.Conversation(ctx, conversationID); err != nil {
+		return nil, err
 	}
-	return events, rows.Err()
+	rows, err := s.db.QueryContext(ctx, `
+SELECT payload FROM events WHERE conversation_id = ? AND cursor > ? AND type LIKE 'agent.%' ORDER BY cursor`, conversationID, after)
+	if err != nil {
+		return nil, err
+	}
+	return decodeEvents(rows)
 }
 
 func (s *Store) View(ctx context.Context, conversationID string) (ponsruntime.ConversationView, error) {
@@ -1247,33 +1116,20 @@ func (s *Store) View(ctx context.Context, conversationID string) (ponsruntime.Co
 	if err != nil {
 		return ponsruntime.ConversationView{}, err
 	}
-	view := ponsruntime.ConversationView{Conversation: conversation}
 	var next uint64
 	if err := tx.QueryRowContext(ctx, `SELECT next_event_cursor FROM conversations WHERE id = ?`, conversationID).Scan(&next); err != nil {
 		return ponsruntime.ConversationView{}, err
 	}
+	events, err := loadPublicEventsTx(ctx, tx, conversationID)
+	if err != nil {
+		return ponsruntime.ConversationView{}, err
+	}
+	view, err := ponsruntime.ProjectView(conversation, events)
+	if err != nil {
+		return ponsruntime.ConversationView{}, err
+	}
 	if next > 0 {
 		view.EventCursor = next - 1
-	}
-	view.Messages, err = loadMessagesTx(ctx, tx, conversationID)
-	if err != nil {
-		return ponsruntime.ConversationView{}, err
-	}
-	view.Submissions, err = loadSubmissionsTx(ctx, tx, conversationID)
-	if err != nil {
-		return ponsruntime.ConversationView{}, err
-	}
-	view.ToolCalls, err = loadToolCallsTx(ctx, tx, conversationID)
-	if err != nil {
-		return ponsruntime.ConversationView{}, err
-	}
-	view.EnvironmentEvents, err = loadEnvironmentProgressTx(ctx, tx, conversationID)
-	if err != nil {
-		return ponsruntime.ConversationView{}, err
-	}
-	view.ActiveRun, err = loadActiveRunTx(ctx, tx, conversationID)
-	if err != nil {
-		return ponsruntime.ConversationView{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return ponsruntime.ConversationView{}, err
@@ -1281,13 +1137,16 @@ func (s *Store) View(ctx context.Context, conversationID string) (ponsruntime.Co
 	return view, nil
 }
 
-func loadEnvironmentProgressTx(ctx context.Context, tx *sql.Tx, conversationID string) ([]ponsruntime.Event, error) {
+func loadPublicEventsTx(ctx context.Context, tx *sql.Tx, conversationID string) ([]ponsruntime.Event, error) {
 	rows, err := tx.QueryContext(ctx, `
-SELECT payload FROM events WHERE conversation_id = ? AND type = ? ORDER BY cursor`,
-		conversationID, ponsruntime.EventEnvironmentProgress)
+SELECT payload FROM events WHERE conversation_id = ? AND type NOT LIKE 'agent.%' ORDER BY cursor`, conversationID)
 	if err != nil {
 		return nil, err
 	}
+	return decodeEvents(rows)
+}
+
+func decodeEvents(rows *sql.Rows) ([]ponsruntime.Event, error) {
 	defer rows.Close()
 	var events []ponsruntime.Event
 	for rows.Next() {
@@ -1304,163 +1163,171 @@ SELECT payload FROM events WHERE conversation_id = ? AND type = ? ORDER BY curso
 	return events, rows.Err()
 }
 
-func loadSubmissionsTx(ctx context.Context, tx *sql.Tx, conversationID string) ([]ponsruntime.Submission, error) {
-	rows, err := tx.QueryContext(ctx, `
-SELECT id, message_id, agent_revision, status, error, accepted_at
-FROM submissions WHERE conversation_id = ? ORDER BY accepted_at, rowid`, conversationID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var submissions []ponsruntime.Submission
-	for rows.Next() {
-		value := ponsruntime.Submission{ConversationID: conversationID}
-		var accepted int64
-		if err := rows.Scan(&value.ID, &value.MessageID, &value.AgentRevision, &value.Status, &value.Error, &accepted); err != nil {
-			return nil, err
-		}
-		value.AcceptedAt = decodeTime(accepted)
-		submissions = append(submissions, value)
-	}
-	return submissions, rows.Err()
-}
-
-func loadMessagesTx(ctx context.Context, tx *sql.Tx, conversationID string) ([]ponsruntime.Message, error) {
-	rows, err := tx.QueryContext(ctx, `
-SELECT messages.id
-FROM messages
-JOIN submissions ON submissions.id = messages.inbound_message_id
-WHERE messages.conversation_id = ?
-ORDER BY submissions.accepted_at, submissions.id, messages.created_at, messages.rowid`, conversationID)
-	if err != nil {
-		return nil, err
-	}
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	messages := make([]ponsruntime.Message, 0, len(ids))
-	for _, id := range ids {
-		message, err := loadMessageTx(ctx, tx, id)
-		if err != nil {
-			return nil, err
-		}
-		messages = append(messages, message)
-	}
-	return messages, nil
-}
-
-func loadMessageTx(ctx context.Context, tx *sql.Tx, id string) (ponsruntime.Message, error) {
-	var message ponsruntime.Message
-	var created int64
+func loadLatestCompactionTx(ctx context.Context, tx *sql.Tx, conversationID string) (*ponsruntime.ContextCompaction, uint64, error) {
+	var payload []byte
+	var cursor uint64
 	err := tx.QueryRowContext(ctx, `
-	SELECT id, conversation_id, inbound_message_id, run_id, role, complete, final, created_at
-	FROM messages WHERE id = ?`, id).Scan(&message.ID, &message.ConversationID, &message.InboundMessageID,
-		&message.RunID, &message.Role, &message.Complete, &message.Final, &created)
+SELECT cursor, payload FROM events
+WHERE conversation_id = ? AND type = ?
+ORDER BY cursor DESC LIMIT 1`, conversationID, ponsruntime.EventContextCompacted).Scan(&cursor, &payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, 0, nil
+	}
 	if err != nil {
-		return ponsruntime.Message{}, err
+		return nil, 0, err
 	}
-	message.CreatedAt = decodeTime(created)
-	rows, err := tx.QueryContext(ctx, `
-SELECT type, text, tool_call_id, tool_kind, arguments, result, metadata
-FROM message_parts WHERE message_id = ? ORDER BY position`, id)
-	if err != nil {
-		return ponsruntime.Message{}, err
+	var event ponsruntime.Event
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return nil, 0, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var part ponsruntime.MessagePart
-		var arguments, result, metadata []byte
-		if err := rows.Scan(&part.Type, &part.Text, &part.ToolCallID, &part.ToolKind, &arguments, &result, &metadata); err != nil {
-			return ponsruntime.Message{}, err
-		}
-		part.Arguments = cloneRaw(arguments)
-		if len(result) > 0 {
-			var decoded protocol.ToolResult
-			if err := json.Unmarshal(result, &decoded); err != nil {
-				return ponsruntime.Message{}, err
-			}
-			part.Result = &decoded
-		}
-		if len(metadata) > 0 {
-			if err := json.Unmarshal(metadata, &part.Metadata); err != nil {
-				return ponsruntime.Message{}, err
-			}
-		}
-		message.Parts = append(message.Parts, part)
+	if event.Compaction == nil {
+		return nil, 0, errors.New("runtime: compaction event has no payload")
 	}
-	return message, rows.Err()
+	if len(event.Compaction.Context) == 0 {
+		return nil, 0, errors.New("runtime: compaction event has no context")
+	}
+	return event.Compaction, cursor, nil
 }
 
-func loadToolCallsTx(ctx context.Context, tx *sql.Tx, conversationID string) ([]ponsruntime.ToolCall, error) {
+// loadContextAfterTx rebuilds provider context after a compaction checkpoint.
+// A model output becomes history only when its complete assistant message was
+// committed; a model response whose subsequent persistence failed is ignored.
+func loadContextAfterTx(ctx context.Context, tx *sql.Tx, conversationID string, after uint64) ([]ponsruntime.ContextTurn, error) {
 	rows, err := tx.QueryContext(ctx, `
-SELECT id, run_id, inbound_message_id, kind, arguments, status, result, updated_at
-FROM tool_calls WHERE conversation_id = ? ORDER BY updated_at, rowid`, conversationID)
+SELECT payload FROM events
+WHERE conversation_id = ? AND type IN (?, ?, ?, ?, ?, ?)
+ORDER BY cursor`, conversationID, ponsruntime.EventInputAccepted,
+		ponsruntime.EventAssistantCommitted, ponsruntime.EventToolOutcomeRecorded,
+		ponsruntime.EventInputAdmitted, ponsruntime.EventModelCompleted, ponsruntime.EventInputPrepared)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var tools []ponsruntime.ToolCall
+	accepted := make(map[string]ponsruntime.Message)
+	admitted := make(map[string]bool)
+	inputIndex := make(map[string]int)
+	pendingModel := make(map[string][]ponsruntime.ContextTurn)
+	var tail []ponsruntime.ContextTurn
 	for rows.Next() {
-		tool := ponsruntime.ToolCall{ConversationID: conversationID}
-		var arguments, result []byte
-		var updated int64
-		if err := rows.Scan(&tool.ID, &tool.RunID, &tool.InboundMessageID, &tool.Kind, &arguments,
-			&tool.Status, &result, &updated); err != nil {
+		var payload []byte
+		if err := rows.Scan(&payload); err != nil {
 			return nil, err
 		}
-		tool.Arguments = cloneRaw(arguments)
-		tool.UpdatedAt = decodeTime(updated)
-		if len(result) > 0 {
-			var decoded protocol.ToolResult
-			if err := json.Unmarshal(result, &decoded); err != nil {
+		var event ponsruntime.Event
+		if err := json.Unmarshal(payload, &event); err != nil {
+			return nil, err
+		}
+		switch event.Type {
+		case ponsruntime.EventInputAccepted, ponsruntime.EventAssistantCommitted, ponsruntime.EventToolOutcomeRecorded:
+			message, err := event.ProjectMessage()
+			if err != nil {
 				return nil, err
 			}
-			tool.Result = &decoded
+			if message.Role == "user" {
+				accepted[message.ID] = message
+				continue
+			}
+			if event.ID <= after || !admitted[event.InboundMessageID] || !message.Complete {
+				continue
+			}
+			if message.Role == "assistant" && len(pendingModel[event.RunID]) > 0 {
+				tail = append(tail, pendingModel[event.RunID][0])
+				pendingModel[event.RunID] = pendingModel[event.RunID][1:]
+				continue
+			}
+			turn, err := contextTurnFromMessage(message)
+			if err != nil {
+				return nil, err
+			}
+			if message.Role == "tool" && len(tail) > 0 && len(tail[len(tail)-1].Content) > 0 &&
+				tail[len(tail)-1].Content[0].Type == "tool_result" {
+				tail[len(tail)-1].Content = append(tail[len(tail)-1].Content, turn.Content...)
+				continue
+			}
+			tail = append(tail, turn)
+		case ponsruntime.EventInputAdmitted:
+			message, ok := accepted[event.InboundMessageID]
+			if !ok {
+				return nil, fmt.Errorf("runtime: admitted message %q is missing", event.InboundMessageID)
+			}
+			if admitted[event.InboundMessageID] {
+				return nil, fmt.Errorf("runtime: message %q admitted twice", event.InboundMessageID)
+			}
+			admitted[event.InboundMessageID] = true
+			if event.ID > after {
+				turn, err := contextTurnFromMessage(message)
+				if err != nil {
+					return nil, err
+				}
+				tail = append(tail, turn)
+				inputIndex[event.InboundMessageID] = len(tail) - 1
+			}
+		case ponsruntime.EventInputPrepared:
+			if event.ID > after && event.PreparedInput != nil {
+				index, ok := inputIndex[event.InboundMessageID]
+				if !ok {
+					return nil, fmt.Errorf("runtime: prepared input %q was not admitted", event.InboundMessageID)
+				}
+				tail[index] = *event.PreparedInput
+			}
+		case ponsruntime.EventModelCompleted:
+			if event.ID > after && event.ModelOutput != nil {
+				pendingModel[event.RunID] = append(pendingModel[event.RunID], ponsruntime.ContextTurn{
+					Role: "assistant", Content: event.ModelOutput.Content,
+				})
+			}
 		}
-		tools = append(tools, tool)
 	}
-	return tools, rows.Err()
+	return tail, rows.Err()
 }
 
-func loadActiveRunTx(ctx context.Context, tx *sql.Tx, conversationID string) (*ponsruntime.Run, error) {
-	var run ponsruntime.Run
-	var started int64
-	err := tx.QueryRowContext(ctx, `
-SELECT id, inbound_message_id, agent_revision, status, error, started_at
-FROM runs WHERE conversation_id = ? AND status = ? ORDER BY started_at DESC LIMIT 1`, conversationID, ponsruntime.RunRunning,
-	).Scan(&run.ID, &run.InboundMessageID, &run.AgentRevision, &run.Status, &run.Error, &started)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+func contextTurnFromMessage(message ponsruntime.Message) (ponsruntime.ContextTurn, error) {
+	turn := ponsruntime.ContextTurn{Role: message.Role}
+	if turn.Role == "tool" {
+		turn.Role = "user"
 	}
+	for _, part := range message.Parts {
+		switch part.Type {
+		case "text":
+			turn.Content = append(turn.Content, ponsruntime.AgentContent{Type: "text", Text: part.Text})
+		case "tool_call":
+			turn.Content = append(turn.Content, ponsruntime.AgentContent{
+				Type: "tool_call", ToolCallID: part.ToolCallID, ToolKind: part.ToolKind,
+				Arguments: cloneRaw(part.Arguments),
+			})
+		case "tool_result":
+			if part.Result == nil {
+				return ponsruntime.ContextTurn{}, errors.New("runtime: tool result message has no result")
+			}
+			content := part.Result.Observation()
+			if strings.TrimSpace(content) == "" {
+				content = "(no output)"
+			}
+			turn.Content = append(turn.Content, ponsruntime.AgentContent{
+				Type: "tool_result", ToolCallID: part.ToolCallID, Text: content, IsError: !part.Result.OK,
+			})
+		default:
+			return ponsruntime.ContextTurn{}, fmt.Errorf("runtime: unsupported message part %q", part.Type)
+		}
+	}
+	return turn, nil
+}
+
+func loadInputTx(ctx context.Context, tx *sql.Tx, conversationID, id string) ([]ponsruntime.TextPart, error) {
+	var payload []byte
+	err := tx.QueryRowContext(ctx, `
+SELECT payload FROM events WHERE conversation_id = ? AND message_id = ?`, conversationID, id).Scan(&payload)
 	if err != nil {
 		return nil, err
 	}
-	run.ConversationID = conversationID
-	run.StartedAt = decodeTime(started)
-	return &run, nil
-}
-
-func cloneMessage(message ponsruntime.Message) ponsruntime.Message {
-	copy := message
-	copy.Parts = make([]ponsruntime.MessagePart, len(message.Parts))
-	for i, part := range message.Parts {
-		copy.Parts[i] = part
-		copy.Parts[i].Arguments = cloneRaw(part.Arguments)
-		copy.Parts[i].Metadata = cloneMetadata(part.Metadata)
-		if part.Result != nil {
-			copy.Parts[i].Result = cloneResult(*part.Result)
-		}
+	var event ponsruntime.Event
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return nil, err
 	}
-	return copy
+	if event.Type != ponsruntime.EventInputAccepted || event.Input == nil || event.InboundMessageID != id {
+		return nil, fmt.Errorf("runtime: accepted input %q is missing", id)
+	}
+	return event.Input.Parts, nil
 }
 
 func cloneMetadata(metadata map[string]json.RawMessage) map[string]json.RawMessage {

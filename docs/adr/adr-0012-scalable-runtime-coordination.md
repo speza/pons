@@ -33,10 +33,9 @@ multi-process recovery. We must not describe an in-memory mutex, a `running`
 status, or a SQLite transaction as a distributed lease.
 
 At the same time, scaling coordination must not move canonical conversation
-state into an execution sandbox. Messages, submissions, runs, tool calls, and
-the durable client-event outbox remain server-owned state under ADR-0010 and
-ADR-0011. Sandboxes and future remote executors are replaceable runner or
-environment concerns.
+state into an execution sandbox. The durable event log, submissions, runs,
+and tool calls remain server-owned under ADR-0011 and ADR-0023. Sandboxes and
+future remote executors are replaceable runner or environment concerns.
 
 ## Decision
 
@@ -46,7 +45,7 @@ The runtime has three kinds of state:
 
 | State | Owner | Examples |
 |---|---|---|
-| Canonical durable state | `runtime.Store` | messages, parts, submissions, runs, tool calls, event outbox |
+| Canonical durable state | `runtime.Store` | event log, submissions, runs, tool calls |
 | Durable coordination state | coordination operations in `runtime.Store` | claim owner, lease identity, lease expiry, fencing generation, workspace ownership |
 | Ephemeral live state | one server process | cancellation functions, connected subscribers, coalesced wake signals, bounded active-run cache |
 
@@ -269,8 +268,8 @@ creates `liveConversation` delivery state lazily, but does not yet evict an
 entry after it has been accessed; eviction remains a bounded-cache
 optimization rather than a correctness mechanism.
 
-Canonical messages remain durable and directly queryable. Today an active run
-materializes its complete eligible history before the LLM brain applies
+Canonical messages remain durable as event log entries. Today an active run
+projects its complete admitted history before the LLM brain applies
 provider-side compaction. A future bounded context view will instead assemble
 recent complete messages plus durable summary/checkpoint state while retaining
 full history for audit and UI pagination.

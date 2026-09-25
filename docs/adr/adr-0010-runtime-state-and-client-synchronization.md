@@ -1,5 +1,9 @@
 # ADR-0010: Runtime conversations use transactional state and an event outbox
 
+**Storage update:** Superseded in part by [ADR-0023](adr-0023-runtime-event-log.md).
+The separate message tables and disposable event outbox below describe the
+earlier design; ADR-0023 defines the current conversation history.
+
 **Status:** Accepted; runtime coordination refined by ADR-0012
 **Implementation:** Implemented
 **Date:** 2026-09-19

@@ -5,6 +5,10 @@
 **Date:** 2026-09-19
 **Related:** ADR-0001, ADR-0002, ADR-0005, ADR-0008, ADR-0010
 
+**Storage update:** [ADR-0023](adr-0023-runtime-event-log.md) replaces the
+separate message tables and client event outbox described below with one
+durable event log. Server ownership and the injected store remain in force.
+
 ## Context
 
 pons originally had a finite CLI harness that recorded completed core turns

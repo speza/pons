@@ -92,11 +92,12 @@ func exerciseRuntime(t *testing.T, seatbelt bool) {
 	if len(replayed) == 0 || replayed[len(replayed)-1].ID != restartedView.EventCursor {
 		t.Fatalf("replayed events ended at %+v, want cursor %d", replayed, restartedView.EventCursor)
 	}
+	var previous uint64
 	for i, event := range replayed {
-		want := uint64(i + 1)
-		if event.ID != want {
-			t.Fatalf("replayed event %d has cursor %d, want %d", i, event.ID, want)
+		if event.ID <= previous || strings.HasPrefix(event.Type, "agent.") {
+			t.Fatalf("replayed event %d has invalid client cursor/type: %+v", i, event)
 		}
+		previous = event.ID
 	}
 
 	duplicate := submitMessage(t, server.URL(), conversation.ID, "first-attempt", "This body must be ignored.")
@@ -610,11 +611,15 @@ func waitForFinal(t *testing.T, stream *sseStream, inboundMessageID string) ([]p
 				continue
 			}
 			events = append(events, event)
-			if event.Type == ponsruntime.EventRunUpdated && event.Run != nil && event.Run.Status == ponsruntime.RunFailed {
+			if event.Type == ponsruntime.EventRunFailed && event.Run != nil {
 				t.Fatalf("runtime run failed: %s; events = %+v", event.Run.Error, events)
 			}
-			if event.Type == ponsruntime.EventMessageUpserted && event.Message != nil && event.Message.Role == "assistant" && event.Message.Final {
-				return events, messageText(*event.Message)
+			if event.Type == ponsruntime.EventAssistantCommitted && event.AssistantOutput != nil && event.AssistantOutput.Final {
+				message, err := event.ProjectMessage()
+				if err != nil {
+					t.Fatal(err)
+				}
+				return events, messageText(message)
 			}
 		}
 	}
@@ -651,10 +656,10 @@ func replayUntilCursor(t *testing.T, stream *sseStream, cursor uint64) []ponsrun
 func assertLiveEvents(t *testing.T, events []ponsruntime.Event, inboundMessageID string) {
 	t.Helper()
 	wanted := map[string]bool{
-		ponsruntime.EventMessageUpserted:   false,
-		ponsruntime.EventSubmissionUpdated: false,
-		ponsruntime.EventToolCallUpdated:   false,
-		ponsruntime.EventRunUpdated:        false,
+		ponsruntime.EventInputAccepted:       false,
+		ponsruntime.EventAssistantCommitted:  false,
+		ponsruntime.EventToolOutcomeRecorded: false,
+		ponsruntime.EventRunStarted:          false,
 	}
 	toolStatuses := map[string]bool{}
 	for _, event := range events {
@@ -664,8 +669,15 @@ func assertLiveEvents(t *testing.T, events []ponsruntime.Event, inboundMessageID
 		if _, ok := wanted[event.Type]; ok {
 			wanted[event.Type] = true
 		}
-		if event.Type == ponsruntime.EventToolCallUpdated && event.ToolCall != nil {
-			toolStatuses[event.ToolCall.Status] = true
+		if event.Type == ponsruntime.EventAssistantCommitted && event.AssistantOutput != nil {
+			for _, part := range event.AssistantOutput.Parts {
+				if part.Type == "tool_call" {
+					toolStatuses[ponsruntime.ToolRequested] = true
+				}
+			}
+		}
+		if event.Type == ponsruntime.EventToolOutcomeRecorded && event.ToolOutcome != nil {
+			toolStatuses[event.ToolOutcome.Status] = true
 		}
 	}
 	for eventType, seen := range wanted {

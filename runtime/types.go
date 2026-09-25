@@ -6,17 +6,20 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/samperrin/pons/protocol"
 )
 
 const (
-	EventMessageUpserted     = "message.upserted"
-	EventSubmissionUpdated   = "submission.updated"
-	EventToolCallUpdated     = "tool_call.updated"
-	EventRunUpdated          = "run.updated"
-	EventConversationUpdated = "conversation.updated"
+	EventInputAccepted       = "input.accepted"
+	EventInputAdmitted       = "input.admitted"
+	EventAssistantCommitted  = "assistant.output.committed"
+	EventToolOutcomeRecorded = "tool.outcome.recorded"
+	EventRunStarted          = "run.started"
+	EventRunCompleted        = "run.completed"
+	EventRunFailed           = "run.failed"
 	EventEnvironmentProgress = "environment.progress"
 
 	// Transient events are delivered live but never persisted and never advance
@@ -25,10 +28,21 @@ const (
 	EventToolProgress   = "tool.progress"
 	EventHeartbeat      = "heartbeat"
 
-	// Runner events are internal signals translated by Manager into the public
-	// entity-shaped event contract above.
+	// Runner events are internal signals translated by Manager into durable facts.
 	RunEventAssistantTurn = "runner.assistant.turn"
 	RunEventToolCompleted = "runner.tool.completed"
+	RunEventAgentEvent    = "runner.agent.event"
+
+	EventAgentStarted         = "agent.started"
+	EventAgentFinished        = "agent.finished"
+	EventAgentStopped         = "agent.stopped"
+	EventAgentExhausted       = "agent.exhausted"
+	EventIterationStarted     = "agent.iteration.started"
+	EventIterationCompleted   = "agent.iteration.completed"
+	EventModelCompleted       = "agent.model.completed"
+	EventToolExecutionStarted = "agent.tool.execution.started"
+	EventContextCompacted     = "agent.context.compacted"
+	EventInputPrepared        = "agent.input.prepared"
 
 	RunQueued    = "queued"
 	RunRunning   = "running"
@@ -53,9 +67,9 @@ type InboundMessage struct {
 	AcceptedAt     time.Time  `json:"accepted_at"`
 }
 
-// Message is the provider-neutral semantic record rendered by clients and
-// projected into provider context. Complete messages are durable; streamed
-// assistant deltas are not messages until the provider response completes.
+// Message is a provider-neutral client projection of content events. It is not
+// persisted directly; streamed assistant deltas enter the projection only
+// when an assistant output commits.
 type Message struct {
 	ID               string        `json:"id"`
 	ConversationID   string        `json:"conversation_id"`
@@ -76,6 +90,47 @@ type MessagePart struct {
 	Arguments  json.RawMessage            `json:"arguments,omitempty"`
 	Result     *protocol.ToolResult       `json:"result,omitempty"`
 	Metadata   map[string]json.RawMessage `json:"metadata,omitempty"`
+}
+
+// InputSource identifies the trusted ingress that accepted an input. The
+// HTTP transport always uses a human source; internal producers supply their
+// own source rather than trusting a client-provided value.
+type InputSource struct {
+	Kind                 string `json:"kind"` // human, system, or agent
+	Adapter              string `json:"adapter"`
+	PrincipalID          string `json:"principal_id,omitempty"`
+	SourceConversationID string `json:"source_conversation_id,omitempty"`
+	SourceAgentID        string `json:"source_agent_id,omitempty"`
+}
+
+// InputSubmission is the ingress command. Its fields become one immutable
+// input.accepted fact; the submissions table is only a claimable index.
+type InputSubmission struct {
+	IdempotencyKey string      `json:"idempotency_key"`
+	Parts          []TextPart  `json:"parts"`
+	Source         InputSource `json:"source"`
+	CausationID    string      `json:"causation_id,omitempty"`
+	TargetAgentID  string      `json:"target_agent_id,omitempty"`
+	AgentRevision  string      `json:"agent_revision,omitempty"`
+}
+
+// These payloads record facts. Message is a client projection of them.
+type UserInput struct {
+	InputSubmission
+}
+
+type AssistantOutput struct {
+	ID    string        `json:"id"`
+	Parts []MessagePart `json:"parts"`
+	Final bool          `json:"final,omitempty"`
+}
+
+type ToolOutcome struct {
+	ID         string               `json:"id"`
+	ToolCallID string               `json:"tool_call_id"`
+	ToolKind   string               `json:"tool_kind"`
+	Status     string               `json:"status"`
+	Result     *protocol.ToolResult `json:"result"`
 }
 
 type Run struct {
@@ -122,24 +177,112 @@ type ConversationView struct {
 	EventCursor       uint64       `json:"event_cursor"`
 }
 
-// Event is either a durable entity update (ID > 0) or a transient live event
-// (ID == 0). Durable events are replayable after ID; transient events never
-// advance Last-Event-ID.
+// Event is either an immutable event log entry (ID > 0) or a transient live
+// event (ID == 0). Durable entries are replayable after ID; transient events
+// never advance Last-Event-ID.
 type Event struct {
 	ID                  uint64                     `json:"cursor,omitempty"`
 	Type                string                     `json:"type"`
 	ConversationID      string                     `json:"conversation_id"`
 	RunID               string                     `json:"run_id,omitempty"`
 	InboundMessageID    string                     `json:"inbound_message_id,omitempty"`
-	Message             *Message                   `json:"message,omitempty"`
-	Submission          *Submission                `json:"submission,omitempty"`
-	ToolCall            *ToolCall                  `json:"tool_call,omitempty"`
+	Input               *UserInput                 `json:"input,omitempty"`
+	AssistantOutput     *AssistantOutput           `json:"assistant_output,omitempty"`
+	ToolOutcome         *ToolOutcome               `json:"tool_outcome,omitempty"`
 	Run                 *Run                       `json:"run,omitempty"`
 	Delta               *TextDelta                 `json:"delta,omitempty"`
 	Progress            *ToolProgress              `json:"progress,omitempty"`
 	EnvironmentProgress *EnvironmentProgress       `json:"environment_progress,omitempty"`
+	AgentBoundary       *AgentBoundary             `json:"agent_boundary,omitempty"`
+	Iteration           *IterationEvent            `json:"iteration,omitempty"`
+	ModelOutput         *ModelOutput               `json:"model_output,omitempty"`
+	ToolExecution       *ToolExecution             `json:"tool_execution,omitempty"`
+	Compaction          *ContextCompaction         `json:"compaction,omitempty"`
+	PreparedInput       *ContextTurn               `json:"prepared_input,omitempty"`
 	Metadata            map[string]json.RawMessage `json:"metadata,omitempty"`
 	CreatedAt           time.Time                  `json:"created_at"`
+}
+
+// ProjectMessage derives the client-facing message for a content event.
+func (e Event) ProjectMessage() (Message, error) {
+	message := Message{
+		ConversationID: e.ConversationID, InboundMessageID: e.InboundMessageID,
+		RunID: e.RunID, Complete: true, CreatedAt: e.CreatedAt,
+	}
+	switch e.Type {
+	case EventInputAccepted:
+		if e.Input == nil || e.InboundMessageID == "" {
+			return Message{}, errors.New("runtime: input event has no input")
+		}
+		message.ID, message.Role = e.InboundMessageID, "user"
+		for _, part := range e.Input.Parts {
+			message.Parts = append(message.Parts, MessagePart{Type: part.Type, Text: part.Text})
+		}
+	case EventAssistantCommitted:
+		if e.AssistantOutput == nil || e.AssistantOutput.ID == "" {
+			return Message{}, errors.New("runtime: assistant event has no output")
+		}
+		message.ID, message.Role = e.AssistantOutput.ID, "assistant"
+		message.Parts, message.Final = e.AssistantOutput.Parts, e.AssistantOutput.Final
+	case EventToolOutcomeRecorded:
+		if e.ToolOutcome == nil || e.ToolOutcome.ID == "" || e.ToolOutcome.Result == nil {
+			return Message{}, errors.New("runtime: tool outcome event has no result")
+		}
+		message.ID, message.Role = e.ToolOutcome.ID, "tool"
+		message.Parts = []MessagePart{{
+			Type: "tool_result", ToolCallID: e.ToolOutcome.ToolCallID,
+			ToolKind: e.ToolOutcome.ToolKind, Result: e.ToolOutcome.Result,
+		}}
+	default:
+		return Message{}, errors.New("runtime: event does not project a message")
+	}
+	return message, nil
+}
+
+// These payloads belong to distinct private event types in the durable log.
+// Clients never receive agent.* events. Model content preserves provider items
+// such as opaque encrypted reasoning when a provider returns them.
+type AgentBoundary struct {
+	Turn int    `json:"turn,omitempty"`
+	Text string `json:"text,omitempty"`
+}
+
+type IterationEvent struct {
+	Turn int `json:"turn"`
+}
+
+type ModelOutput struct {
+	Turn    int            `json:"turn"`
+	Content []AgentContent `json:"content"`
+}
+
+type ToolExecution struct {
+	Turn       int    `json:"turn"`
+	ToolCallID string `json:"tool_call_id"`
+	ToolKind   string `json:"tool_kind"`
+}
+
+type ContextCompaction struct {
+	Turn           int           `json:"turn"`
+	Summary        string        `json:"summary"`
+	CompactedTurns int           `json:"compacted_turns"`
+	RetainedTurns  int           `json:"retained_turns"`
+	Context        []ContextTurn `json:"context"`
+}
+
+type AgentContent struct {
+	Type       string          `json:"type"`
+	Text       string          `json:"text,omitempty"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+	ToolKind   string          `json:"tool_kind,omitempty"`
+	Arguments  json.RawMessage `json:"arguments,omitempty"`
+	IsError    bool            `json:"is_error,omitempty"`
+	Item       json.RawMessage `json:"item,omitempty"`
+}
+
+type ContextTurn struct {
+	Role    string         `json:"role"`
+	Content []AgentContent `json:"content"`
 }
 
 type TextDelta struct {
@@ -171,7 +314,7 @@ type RunRequest struct {
 	GitRevision        string
 	GitAllRepositories bool
 	Text               string
-	Messages           []Message
+	Context            []ContextTurn
 	Emit               func(RunEvent) error
 }
 
@@ -186,6 +329,7 @@ type RunEvent struct {
 	Action     *protocol.Action
 	Result     *protocol.ToolResult
 	Parts      []MessagePart
+	AgentEvent *Event
 }
 
 type RunResult struct {

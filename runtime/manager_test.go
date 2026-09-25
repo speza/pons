@@ -19,6 +19,14 @@ import (
 	runtimesqlite "github.com/samperrin/pons/runtime/sqlite"
 )
 
+func acceptInput(store ponsruntime.Store, ctx context.Context, conversationID, key string, parts []ponsruntime.TextPart) (ponsruntime.AcceptedMessage, []ponsruntime.Event, error) {
+	return store.Accept(ctx, conversationID, ponsruntime.InputSubmission{
+		IdempotencyKey: key, Parts: parts,
+		Source:        ponsruntime.InputSource{Kind: "human", Adapter: "test"},
+		TargetAgentID: testAgent.ID, AgentRevision: testRevision,
+	})
+}
+
 type (
 	Event      = ponsruntime.Event
 	Manager    = ponsruntime.Manager
@@ -31,16 +39,15 @@ type (
 )
 
 const (
-	EventAssistantDelta   = ponsruntime.EventAssistantDelta
-	EventMessageUpserted  = ponsruntime.EventMessageUpserted
-	EventRunUpdated       = ponsruntime.EventRunUpdated
-	EventToolCallUpdated  = ponsruntime.EventToolCallUpdated
-	RunEventAssistantTurn = ponsruntime.RunEventAssistantTurn
-	RunEventToolCompleted = ponsruntime.RunEventToolCompleted
-	RunFailed             = ponsruntime.RunFailed
-	ToolCompleted         = ponsruntime.ToolCompleted
-	ToolInterrupted       = ponsruntime.ToolInterrupted
-	ToolRequested         = ponsruntime.ToolRequested
+	EventAssistantDelta     = ponsruntime.EventAssistantDelta
+	EventAssistantCommitted = ponsruntime.EventAssistantCommitted
+	EventRunCompleted       = ponsruntime.EventRunCompleted
+	RunEventAssistantTurn   = ponsruntime.RunEventAssistantTurn
+	RunEventToolCompleted   = ponsruntime.RunEventToolCompleted
+	RunFailed               = ponsruntime.RunFailed
+	ToolCompleted           = ponsruntime.ToolCompleted
+	ToolInterrupted         = ponsruntime.ToolInterrupted
+	ToolRequested           = ponsruntime.ToolRequested
 )
 
 var New = ponsruntime.New
@@ -313,7 +320,7 @@ func TestRepairScanFindsWorkAfterLostWake(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Write through the store to deliberately bypass Manager.Submit's wake.
-	if _, _, err := base.Accept(context.Background(), conversation.ID, "lost-wake", testRevision, []TextPart{{Type: "text", Text: "repair me"}}); err != nil {
+	if _, _, err := acceptInput(base, context.Background(), conversation.ID, "lost-wake", []TextPart{{Type: "text", Text: "repair me"}}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -338,7 +345,7 @@ func TestSchedulerBoundsActiveRunGoroutines(t *testing.T) {
 		if err := store.CreateConversation(ctx, conversation); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := store.Accept(ctx, conversation.ID, fmt.Sprintf("key-%d", i), testRevision, []TextPart{{Type: "text", Text: "go"}}); err != nil {
+		if _, _, err := acceptInput(store, ctx, conversation.ID, fmt.Sprintf("key-%d", i), []TextPart{{Type: "text", Text: "go"}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -398,7 +405,7 @@ func TestWorkspaceExclusionIsEnforcedByRunnableClaim(t *testing.T) {
 		if err := store.CreateConversation(ctx, conversation); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := store.Accept(ctx, conversation.ID, fmt.Sprintf("key-%d", i), testRevision, []TextPart{{Type: "text", Text: "go"}}); err != nil {
+		if _, _, err := acceptInput(store, ctx, conversation.ID, fmt.Sprintf("key-%d", i), []TextPart{{Type: "text", Text: "go"}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -448,7 +455,7 @@ func TestCompetingSQLiteClaimsDoNotDuplicateSubmission(t *testing.T) {
 	if err := store.CreateConversation(context.Background(), conversation); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Accept(context.Background(), conversation.ID, "once", testRevision, []TextPart{{Type: "text", Text: "go"}}); err != nil {
+	if _, _, err := acceptInput(store, context.Background(), conversation.ID, "once", []TextPart{{Type: "text", Text: "go"}}); err != nil {
 		t.Fatal(err)
 	}
 	start := make(chan struct{})
@@ -490,7 +497,7 @@ func TestSubscribeDuringClaimBroadcastDoesNotDuplicateDurableEvents(t *testing.T
 	if err := base.CreateConversation(context.Background(), conversation); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := base.Accept(context.Background(), conversation.ID, "key", testRevision, []TextPart{{Type: "text", Text: "go"}}); err != nil {
+	if _, _, err := acceptInput(base, context.Background(), conversation.ID, "key", []TextPart{{Type: "text", Text: "go"}}); err != nil {
 		t.Fatal(err)
 	}
 	store := &delayedClaimStore{Store: base, claimed: make(chan struct{}), release: make(chan struct{})}
@@ -524,7 +531,7 @@ func TestSubscribeDuringClaimBroadcastDoesNotDuplicateDurableEvents(t *testing.T
 			if event.ID != 0 {
 				cursors = append(cursors, event.ID)
 			}
-			if event.Type == EventMessageUpserted && event.Message != nil && event.Message.Final {
+			if event.Type == EventAssistantCommitted && event.AssistantOutput != nil && event.AssistantOutput.Final {
 				for i, cursor := range cursors {
 					if cursor != uint64(i+1) {
 						t.Fatalf("durable cursors = %v", cursors)
@@ -578,7 +585,7 @@ func TestConversationSerializesMessagesAndDeduplicates(t *testing.T) {
 	if !duplicate.Duplicate || duplicate.InboundMessageID != first.InboundMessageID {
 		t.Fatalf("duplicate = %+v", duplicate)
 	}
-	events := waitForEvent(t, m, conversation.ID, EventRunUpdated, 4)
+	events := waitForEvent(t, m, conversation.ID, EventRunCompleted, 2)
 	if maximum.Load() != 1 {
 		t.Fatalf("conversation concurrency = %d", maximum.Load())
 	}
@@ -672,10 +679,10 @@ func TestSnapshotThenEventsHasNoDurableGap(t *testing.T) {
 			if event.ID <= view.EventCursor {
 				t.Fatalf("event cursor %d <= snapshot cursor %d", event.ID, view.EventCursor)
 			}
-			if event.Type == EventMessageUpserted && event.Message != nil && event.Message.ID == accepted.InboundMessageID {
+			if event.Type == ponsruntime.EventInputAccepted && event.Input != nil && event.InboundMessageID == accepted.InboundMessageID {
 				foundUser = true
 			}
-			if event.Type == EventMessageUpserted && event.Message != nil && event.Message.Final {
+			if event.Type == EventAssistantCommitted && event.AssistantOutput != nil && event.AssistantOutput.Final {
 				foundFinal = true
 			}
 		case <-deadline:
@@ -786,13 +793,15 @@ func TestToolLifecycleUsesEntityUpserts(t *testing.T) {
 	if _, err := m.Submit(context.Background(), conversation.ID, "stable", []TextPart{{Type: "text", Text: "world"}}); err != nil {
 		t.Fatal(err)
 	}
-	observed := waitForEvent(t, m, conversation.ID, EventRunUpdated, 2)
+	observed := waitForEvent(t, m, conversation.ID, EventRunCompleted, 1)
 	requested, completed := false, false
 	for _, event := range observed {
-		if event.Type == EventToolCallUpdated && event.ToolCall != nil && event.ToolCall.Status == ToolRequested {
-			requested = true
+		if event.Type == EventAssistantCommitted && event.AssistantOutput != nil {
+			for _, part := range event.AssistantOutput.Parts {
+				requested = requested || part.Type == "tool_call"
+			}
 		}
-		if event.Type == EventToolCallUpdated && event.ToolCall != nil && event.ToolCall.Status == ToolCompleted {
+		if event.Type == ponsruntime.EventToolOutcomeRecorded && event.ToolOutcome != nil && event.ToolOutcome.Status == ToolCompleted {
 			completed = true
 		}
 	}
@@ -824,7 +833,7 @@ func TestFailedRunIsDurableAndNotRetried(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events := waitForEvent(t, m, conversation.ID, EventRunUpdated, 2)
+	events := waitForEvent(t, m, conversation.ID, ponsruntime.EventRunFailed, 1)
 	last := events[len(events)-2]
 	_ = last
 	if executions.Load() != 1 {
@@ -850,7 +859,7 @@ func TestRestartMarksRequestedToolInterruptedWithoutRetry(t *testing.T) {
 	if err := store.CreateConversation(context.Background(), conversation); err != nil {
 		t.Fatal(err)
 	}
-	accepted, _, err := store.Accept(context.Background(), conversation.ID, "stable", testRevision, []TextPart{{Type: "text", Text: "do it"}})
+	accepted, _, err := acceptInput(store, context.Background(), conversation.ID, "stable", []TextPart{{Type: "text", Text: "do it"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -902,11 +911,11 @@ func TestClaimHistoryExcludesLaterQueuedMessages(t *testing.T) {
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
 	}
-	first, _, err := store.Accept(ctx, conversation.ID, "first", testRevision, []TextPart{{Type: "text", Text: "A"}})
+	first, _, err := acceptInput(store, ctx, conversation.ID, "first", []TextPart{{Type: "text", Text: "A"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, _, err := store.Accept(ctx, conversation.ID, "second", testRevision, []TextPart{{Type: "text", Text: "B"}})
+	second, _, err := acceptInput(store, ctx, conversation.ID, "second", []TextPart{{Type: "text", Text: "B"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -914,23 +923,23 @@ func TestClaimHistoryExcludesLaterQueuedMessages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claimA.Message.ID != first.InboundMessageID || len(claimA.History) != 0 {
+	if claimA.Message.ID != first.InboundMessageID || len(claimA.Context) != 0 {
 		t.Fatalf("first claim = %+v", claimA)
 	}
-	if _, _, err := store.FinishRun(ctx, claimA.Run, "answer A"); err != nil {
+	if _, err := store.FinishRun(ctx, claimA.Run, "answer A"); err != nil {
 		t.Fatal(err)
 	}
 	claimB, err := store.ClaimRunnable(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claimB.Message.ID != second.InboundMessageID || len(claimB.History) != 2 {
+	if claimB.Message.ID != second.InboundMessageID || len(claimB.Context) != 2 {
 		t.Fatalf("second claim = %+v", claimB)
 	}
-	if got := claimB.History[0]; got.InboundMessageID != first.InboundMessageID || got.Role != "user" {
+	if got := claimB.Context[0]; got.Role != "user" || got.Content[0].Text != "A" {
 		t.Fatalf("history[0] = %+v", got)
 	}
-	if got := claimB.History[1]; got.InboundMessageID != first.InboundMessageID || got.Role != "assistant" || !got.Final {
+	if got := claimB.Context[1]; got.Role != "assistant" || got.Content[0].Text != "answer A" {
 		t.Fatalf("history[1] = %+v", got)
 	}
 }
@@ -946,7 +955,7 @@ func TestAssistantToolTurnsRemainOrderedAndComplete(t *testing.T) {
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Accept(ctx, conversation.ID, "one", testRevision, []TextPart{{Type: "text", Text: "go"}}); err != nil {
+	if _, _, err := acceptInput(store, ctx, conversation.ID, "one", []TextPart{{Type: "text", Text: "go"}}); err != nil {
 		t.Fatal(err)
 	}
 	claim, err := store.ClaimRunnable(ctx)
@@ -970,7 +979,7 @@ func TestAssistantToolTurnsRemainOrderedAndComplete(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, _, err := store.FinishRun(ctx, claim.Run, "done"); err != nil {
+	if _, err := store.FinishRun(ctx, claim.Run, "done"); err != nil {
 		t.Fatal(err)
 	}
 	view, err := store.View(ctx, conversation.ID)
@@ -1005,7 +1014,7 @@ func TestRestartRunsDurablyQueuedSubmission(t *testing.T) {
 	if err := store.CreateConversation(context.Background(), conversation); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Accept(context.Background(), conversation.ID, "queued", testRevision, []TextPart{{Type: "text", Text: "resume me"}}); err != nil {
+	if _, _, err := acceptInput(store, context.Background(), conversation.ID, "queued", []TextPart{{Type: "text", Text: "resume me"}}); err != nil {
 		t.Fatal(err)
 	}
 	ran := make(chan string, 1)
@@ -1025,7 +1034,7 @@ func TestRestartRunsDurablyQueuedSubmission(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("queued submission did not resume")
 	}
-	waitForEvent(t, second, conversation.ID, EventRunUpdated, 2)
+	waitForEvent(t, second, conversation.ID, EventRunCompleted, 1)
 }
 
 // idleStore accepts work but never claims it, leaving submissions queued.
@@ -1090,7 +1099,7 @@ func TestQueuedSubmissionKeepsAgentRevisionAcrossPersonaChange(t *testing.T) {
 	if queued.Text != "queued" || queued.Agent.Name != "Ada" || queued.Agent.Persona != "Be brief." || queued.Agent.Revision() != original.Revision() {
 		t.Fatalf("queued submission ran under %+v", queued.Agent)
 	}
-	waitForEvent(t, second, conversation.ID, EventRunUpdated, 2)
+	waitForEvent(t, second, conversation.ID, EventRunCompleted, 1)
 	if _, err := second.Submit(ctx, conversation.ID, "after", []TextPart{{Type: "text", Text: "new"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -1098,11 +1107,11 @@ func TestQueuedSubmissionKeepsAgentRevisionAcrossPersonaChange(t *testing.T) {
 	if fresh.Text != "new" || fresh.Agent.Revision() != edited.Revision() {
 		t.Fatalf("new submission ran under %+v", fresh.Agent)
 	}
-	runs := waitForEvent(t, second, conversation.ID, EventRunUpdated, 4)
+	runs := waitForEvent(t, second, conversation.ID, EventRunCompleted, 2)
 
 	var revisions []string
 	for _, event := range runs {
-		if event.Type == EventRunUpdated {
+		if event.Type == ponsruntime.EventRunStarted || event.Type == EventRunCompleted {
 			revisions = append(revisions, event.Run.AgentRevision)
 		}
 	}
@@ -1175,10 +1184,10 @@ func TestUnresolvedAgentRevisionFailsClosed(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = restarted.Close(); _ = store.Close() })
 
-	events := waitForEvent(t, restarted, conversation.ID, EventRunUpdated, 2)
+	events := waitForEvent(t, restarted, conversation.ID, ponsruntime.EventRunFailed, 1)
 	var failed Event
 	for _, event := range events {
-		if event.Type == EventRunUpdated {
+		if event.Type == ponsruntime.EventRunFailed {
 			failed = event
 		}
 	}

@@ -590,13 +590,44 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	if err != nil {
 		return result, err
 	}
+	brainConfig.OnEvent = func(event llm.BrainEvent) error {
+		if event.Type == "context.compacted" {
+			contextTurns := make([]ponsruntime.ContextTurn, 0, len(event.Turns))
+			for _, turn := range event.Turns {
+				content, err := runtimeAgentContent(turn.Blocks)
+				if err != nil {
+					return err
+				}
+				contextTurns = append(contextTurns, ponsruntime.ContextTurn{Role: turn.Role, Content: content})
+			}
+			return request.Emit(ponsruntime.RunEvent{
+				Type: ponsruntime.RunEventAgentEvent,
+				AgentEvent: &ponsruntime.Event{
+					Type: ponsruntime.EventContextCompacted,
+					Compaction: &ponsruntime.ContextCompaction{
+						Turn: event.Turn, Summary: event.Summary,
+						CompactedTurns: event.CompactedTurns, RetainedTurns: event.RetainedTurns,
+						Context: contextTurns,
+					},
+				},
+			})
+		}
+		content, err := runtimeAgentContent(event.Blocks)
+		if err != nil {
+			return err
+		}
+		return request.Emit(ponsruntime.RunEvent{
+			Type:       ponsruntime.RunEventAgentEvent,
+			AgentEvent: &ponsruntime.Event{Type: ponsruntime.EventModelCompleted, ModelOutput: &ponsruntime.ModelOutput{Turn: event.Turn, Content: content}},
+		})
+	}
 	brain, err := llm.New(brainConfig)
 	if err != nil {
 		return result, fmt.Errorf("brain: %w", err)
 	}
 	defer func() { err = errors.Join(err, brain.Close(context.Background())) }()
 
-	turns, turnsErr := runtimeTurns(request.Messages)
+	turns, turnsErr := runtimeContextTurns(request.Context)
 	if turnsErr != nil {
 		return result, turnsErr
 	}
@@ -696,6 +727,20 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}
 
 	brain.Seed(turns, request.Text, core.Workspace, core.Platform)
+	prepared := brain.PreparedInput()
+	preparedContent, err := runtimeAgentContent(prepared.Blocks)
+	if err != nil {
+		return result, err
+	}
+	if err := request.Emit(ponsruntime.RunEvent{
+		Type: ponsruntime.RunEventAgentEvent,
+		AgentEvent: &ponsruntime.Event{
+			Type:          ponsruntime.EventInputPrepared,
+			PreparedInput: &ponsruntime.ContextTurn{Role: prepared.Role, Content: preparedContent},
+		},
+	}); err != nil {
+		return result, err
+	}
 	plugins = append(plugins, brain)
 	if err := core.Use(plugins...); err != nil {
 		return result, err
@@ -725,11 +770,45 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		case pons.EventActionEnd:
 			runLog.Debug("tool completed", "turn", event.Turn, "tool", event.Action.Kind,
 				"ok", event.Result.OK)
-			return request.Emit(ponsruntime.RunEvent{
+			if err := request.Emit(ponsruntime.RunEvent{
 				Type: ponsruntime.RunEventToolCompleted, ToolCallID: event.Action.ID, Result: event.Result,
-			})
+			}); err != nil {
+				return err
+			}
+			return nil
 		}
-		return nil
+		entry := ponsruntime.Event{}
+		switch event.Type {
+		case pons.EventAgentStart:
+			entry.Type = ponsruntime.EventAgentStarted
+			entry.AgentBoundary = &ponsruntime.AgentBoundary{}
+		case pons.EventTurnStart:
+			entry.Type = ponsruntime.EventIterationStarted
+			entry.Iteration = &ponsruntime.IterationEvent{Turn: event.Turn}
+		case pons.EventTurnEnd:
+			entry.Type = ponsruntime.EventIterationCompleted
+			entry.Iteration = &ponsruntime.IterationEvent{Turn: event.Turn}
+		case pons.EventActionStart:
+			entry.Type = ponsruntime.EventToolExecutionStarted
+			entry.ToolExecution = &ponsruntime.ToolExecution{
+				Turn: event.Turn, ToolCallID: event.Action.ID, ToolKind: string(event.Action.Kind),
+			}
+		case pons.EventFinish, pons.EventStopped, pons.EventExhausted:
+			entry.AgentBoundary = &ponsruntime.AgentBoundary{Turn: event.Turn, Text: event.Text}
+			switch event.Type {
+			case pons.EventFinish:
+				entry.Type = ponsruntime.EventAgentFinished
+			case pons.EventStopped:
+				entry.Type = ponsruntime.EventAgentStopped
+			case pons.EventExhausted:
+				entry.Type = ponsruntime.EventAgentExhausted
+			}
+		default:
+			return nil
+		}
+		return request.Emit(ponsruntime.RunEvent{
+			Type: ponsruntime.RunEventAgentEvent, AgentEvent: &entry,
+		})
 	})
 
 	runResult, err := core.Run(ctx, request.Text)
@@ -767,49 +846,82 @@ func (r *agentRunner) executionEnvironment(requested string) (environment.Provid
 	}
 }
 
-func runtimeTurns(messages []ponsruntime.Message) ([]llm.Turn, error) {
-	turns := make([]llm.Turn, 0, len(messages))
-	for _, message := range messages {
-		if message.Role == "assistant" && !message.Complete {
-			continue
+func runtimeContextTurns(context []ponsruntime.ContextTurn) ([]llm.Turn, error) {
+	turns := make([]llm.Turn, 0, len(context))
+	for _, turn := range context {
+		if turn.Role != "user" && turn.Role != "assistant" {
+			return nil, fmt.Errorf("hydrate compacted context: unsupported role %q", turn.Role)
 		}
-		var blocks []llm.Block
-		for _, part := range message.Parts {
+		blocks := make([]llm.Block, 0, len(turn.Content))
+		for _, part := range turn.Content {
 			switch part.Type {
 			case "text":
 				blocks = append(blocks, llm.Text{Value: part.Text})
 			case "tool_call":
-				input := make(map[string]any)
-				arguments := bytes.TrimSpace(part.Arguments)
-				if len(arguments) == 0 || bytes.Equal(arguments, []byte("null")) {
-					arguments = []byte("{}")
-				}
-				decoder := json.NewDecoder(bytes.NewReader(arguments))
-				decoder.UseNumber()
-				if err := decoder.Decode(&input); err != nil {
-					return nil, fmt.Errorf("hydrate tool call %q arguments: %w", part.ToolCallID, err)
-				}
-				var extra any
-				if err := decoder.Decode(&extra); err != io.EOF {
-					return nil, fmt.Errorf("hydrate tool call %q arguments: trailing JSON", part.ToolCallID)
+				input, err := runtimeToolInput(part.ToolCallID, part.Arguments)
+				if err != nil {
+					return nil, err
 				}
 				blocks = append(blocks, llm.ToolUse{ID: part.ToolCallID, Name: part.ToolKind, Input: input})
 			case "tool_result":
-				if part.Result != nil {
-					blocks = append(blocks, llm.Result{ToolUseID: part.ToolCallID, Content: part.Result.Observation(), IsError: !part.Result.OK})
+				blocks = append(blocks, llm.Result{ToolUseID: part.ToolCallID, Content: part.Text, IsError: part.IsError})
+			case "provider_item":
+				if !json.Valid(part.Item) {
+					return nil, errors.New("hydrate compacted context: invalid provider item")
 				}
+				blocks = append(blocks, llm.Raw{Item: append(json.RawMessage(nil), part.Item...)})
+			default:
+				return nil, fmt.Errorf("hydrate compacted context: unsupported block %q", part.Type)
 			}
 		}
-		if len(blocks) == 0 {
-			continue
-		}
-		role := message.Role
-		if role == "tool" {
-			role = "user"
-		}
-		turns = append(turns, llm.Turn{Role: role, Blocks: blocks})
+		turns = append(turns, llm.Turn{Role: turn.Role, Blocks: blocks})
 	}
 	return turns, nil
+}
+
+func runtimeToolInput(id string, raw json.RawMessage) (map[string]any, error) {
+	input := make(map[string]any)
+	arguments := bytes.TrimSpace(raw)
+	if len(arguments) == 0 || bytes.Equal(arguments, []byte("null")) {
+		arguments = []byte("{}")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(arguments))
+	decoder.UseNumber()
+	if err := decoder.Decode(&input); err != nil {
+		return nil, fmt.Errorf("hydrate tool call %q arguments: %w", id, err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("hydrate tool call %q arguments: trailing JSON", id)
+	}
+	return input, nil
+}
+
+func runtimeAgentContent(blocks []llm.Block) ([]ponsruntime.AgentContent, error) {
+	content := make([]ponsruntime.AgentContent, 0, len(blocks))
+	for _, block := range blocks {
+		switch block := block.(type) {
+		case llm.Text:
+			content = append(content, ponsruntime.AgentContent{Type: "text", Text: block.Value})
+		case llm.ToolUse:
+			arguments, err := json.Marshal(block.Input)
+			if err != nil {
+				return nil, fmt.Errorf("record model tool call: %w", err)
+			}
+			content = append(content, ponsruntime.AgentContent{
+				Type: "tool_call", ToolCallID: block.ID, ToolKind: block.Name, Arguments: arguments,
+			})
+		case llm.Result:
+			content = append(content, ponsruntime.AgentContent{
+				Type: "tool_result", ToolCallID: block.ToolUseID, Text: block.Content, IsError: block.IsError,
+			})
+		case llm.Raw:
+			content = append(content, ponsruntime.AgentContent{Type: "provider_item", Item: append(json.RawMessage(nil), block.Item...)})
+		default:
+			return nil, fmt.Errorf("record model content: unsupported block %T", block)
+		}
+	}
+	return content, nil
 }
 
 func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, message string, interactive, debug bool, options ponsruntime.ConversationOptions) error {
@@ -841,13 +953,18 @@ func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, m
 				if event.EnvironmentProgress != nil {
 					fmt.Printf("  %s\n", event.EnvironmentProgress.Message)
 				}
-			case ponsruntime.EventToolCallUpdated:
-				if event.ToolCall != nil && event.ToolCall.Status == ponsruntime.ToolRequested {
-					action := &protocol.Action{ID: event.ToolCall.ID, Kind: protocol.ActionKind(event.ToolCall.Kind), Args: event.ToolCall.Arguments}
-					fmt.Printf("▸ %s: %s\n", action.Kind, primaryArg(action))
+			case ponsruntime.EventAssistantCommitted:
+				if event.AssistantOutput != nil {
+					for _, part := range event.AssistantOutput.Parts {
+						if part.Type == "tool_call" {
+							action := &protocol.Action{ID: part.ToolCallID, Kind: protocol.ActionKind(part.ToolKind), Args: part.Arguments}
+							fmt.Printf("▸ %s: %s\n", action.Kind, primaryArg(action))
+						}
+					}
 				}
-				if event.ToolCall != nil && event.ToolCall.Result != nil {
-					showResult(event.ToolCall.Result.Observation(), debug)
+			case ponsruntime.EventToolOutcomeRecorded:
+				if event.ToolOutcome != nil && event.ToolOutcome.Result != nil {
+					showResult(event.ToolOutcome.Result.Observation(), debug)
 				}
 			}
 		})
