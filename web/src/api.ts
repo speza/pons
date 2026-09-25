@@ -3,6 +3,7 @@ import type {
   Conversation,
   ConversationView,
   RuntimeOptions,
+  Run,
   RuntimeEvent,
 } from "./types";
 
@@ -56,6 +57,10 @@ export function getRuntimeOptions(signal?: AbortSignal): Promise<RuntimeOptions>
 
 export function getConversation(id: string, signal?: AbortSignal): Promise<ConversationView> {
   return request<ConversationView>(`${apiRoot}/conversations/${encodeURIComponent(id)}`, { signal });
+}
+
+export function stopRun(id: string, signal?: AbortSignal): Promise<Run> {
+  return request<Run>(`${apiRoot}/conversations/${encodeURIComponent(id)}/stop`, { method: "POST", signal });
 }
 
 export function submitMessage(

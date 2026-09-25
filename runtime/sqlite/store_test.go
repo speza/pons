@@ -1150,3 +1150,42 @@ func TestAgentRevisionIsRecordedOnSubmissionAndRun(t *testing.T) {
 		t.Fatalf("view = %+v", view)
 	}
 }
+
+func TestRebuildRestoresStoppedRun(t *testing.T) {
+	stateDir := t.TempDir()
+	store, err := Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	conversation := ponsruntime.Conversation{ID: "stopped", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	if err := store.CreateConversation(ctx, conversation); err != nil {
+		t.Fatal(err)
+	}
+	accepted, _, err := acceptInput(store, ctx, conversation.ID, "stop-me", []ponsruntime.TextPart{{Type: "text", Text: "work"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := store.ClaimRunnable(ctx)
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %+v, error = %v", claim, err)
+	}
+	events, err := store.StopRun(ctx, claim.Run)
+	if err != nil || len(events) != 1 || events[0].Type != ponsruntime.EventRunStopped {
+		t.Fatalf("stop events = %+v, error = %v", events, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	assertStoredStatus(t, store, "submissions", accepted.InboundMessageID, ponsruntime.RunStopped)
+	assertStoredStatus(t, store, "runs", claim.Run.ID, ponsruntime.RunStopped)
+	if claim, err := store.ClaimRunnable(ctx); err != nil || claim != nil {
+		t.Fatalf("stopped input was claimed again: %+v, error = %v", claim, err)
+	}
+}

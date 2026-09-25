@@ -129,6 +129,11 @@ The server reads `~/.pons/config.json`. A standalone `serve` process does not
 read `.pons.json` from its startup directory. The loopback server trusts other
 local processes that can connect to it.
 
+A run that fails or is stopped leaves a notice in the conversation, such as
+"An error occurred while generating a response. Try again.", recorded in the
+durable event log so it survives reloads. `POST /v1/conversations/{id}/stop`,
+or **Stop** in the web UI, stops the active run.
+
 Runtime state lives under `~/.pons/runtime/server/` by default. Run one server
 per state directory; additional clients connect to that server. The server
 listens on loopback (`127.0.0.1:7337`) and refuses non-loopback addresses.

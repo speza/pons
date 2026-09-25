@@ -1012,6 +1012,13 @@ func renderConversationSnapshot(view ponsruntime.ConversationView, debug bool) {
 					showResult(part.Result.Observation(), debug)
 				}
 			}
+		case "notice":
+			for _, part := range message.Parts {
+				fmt.Printf("! %s\n", part.Text)
+			}
+			if debug && message.Notice != nil && message.Notice.Error != "" {
+				fmt.Printf("  %s\n", message.Notice.Error)
+			}
 		}
 	}
 }

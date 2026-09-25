@@ -96,7 +96,12 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .message--user .message-label { color: #9db3ac; }
 .message-content { color: var(--text); font-size: 14px; line-height: 1.65; }
 .message--user .message-content { padding: 12px 14px; border: 1px solid #315345; border-radius: 14px 4px 14px 14px; background: #14251f; }
-.run-failure { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid #633b42; border-radius: 9px; color: #ffd0d0; background: #2b1b22; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.notice { display: flex; flex-direction: column; gap: 6px; align-self: flex-start; max-width: 680px; margin-left: 42px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 9px; color: var(--muted); background: var(--panel); font-size: 12px; }
+.notice--failed { border-color: #633b42; color: #ffd0d0; background: #2b1b22; }
+.notice summary { cursor: pointer; color: var(--muted); }
+.notice code { display: block; margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.stop-button { padding: 5px 10px; border: 1px solid var(--border); border-radius: 999px; color: var(--text); background: var(--panel-raised); font-size: 11px; font-weight: 650; }
+.stop-button:hover { border-color: var(--danger); color: var(--danger); }
 .message--draft .message-content { color: #b9c8d2; }
 .text-part { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .text-part + .text-part { margin-top: 11px; }

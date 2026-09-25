@@ -52,7 +52,8 @@ idempotency, scheduling, workspace exclusion, and recovery. The tool-call index
 stores status and identity; arguments and outcomes live in events and are
 projected for snapshots. Their transitions
 and corresponding facts commit in the same SQLite transaction. Run lifecycle
-events are `run.started`, `run.completed`, and `run.failed`. An assistant output
+events are `run.started`, `run.completed`, `run.failed`, and `run.stopped`;
+a failed or stopped run projects a notice message for clients. An assistant output
 with tool calls records the requested tools; a tool outcome records their
 terminal result, including an interrupted outcome whose execution is uncertain.
 Client snapshots are projected from the same ordered public events that live

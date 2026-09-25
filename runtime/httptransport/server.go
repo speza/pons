@@ -27,6 +27,7 @@ type Runtime interface {
 	Submit(context.Context, string, string, []ponsruntime.TextPart) (ponsruntime.AcceptedMessage, error)
 	View(context.Context, string) (ponsruntime.ConversationView, error)
 	Subscribe(context.Context, string, uint64) (<-chan ponsruntime.Event, error)
+	StopRun(context.Context, string) (ponsruntime.Run, error)
 }
 
 type HandlerOptions struct {
@@ -52,6 +53,7 @@ func HandlerWithOptions(runtime Runtime, options HandlerOptions) http.Handler {
 	mux.HandleFunc("GET /v1/conversations/{id}", server.getConversation)
 	mux.HandleFunc("POST /v1/conversations/{id}/messages", server.submitMessage)
 	mux.HandleFunc("GET /v1/conversations/{id}/events", server.events)
+	mux.HandleFunc("POST /v1/conversations/{id}/stop", server.stopRun)
 	mux.HandleFunc("GET /ui", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui/", http.StatusPermanentRedirect)
 	})
@@ -183,6 +185,22 @@ func (s server) submitMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, accepted)
+}
+
+// stopRun asks the active run to stop. The stop is recorded when the run
+// unwinds, as a run.stopped event on the conversation's stream.
+func (s server) stopRun(w http.ResponseWriter, r *http.Request) {
+	run, err := s.runtime.StopRun(r.Context(), r.PathValue("id"))
+	switch {
+	case errors.Is(err, ponsruntime.ErrNotFound):
+		writeAPIError(w, http.StatusNotFound, "conversation not found")
+	case errors.Is(err, ponsruntime.ErrNoActiveRun):
+		writeAPIError(w, http.StatusConflict, err.Error())
+	case err != nil:
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+	default:
+		writeJSON(w, http.StatusAccepted, run)
+	}
 }
 
 func (s server) events(w http.ResponseWriter, r *http.Request) {

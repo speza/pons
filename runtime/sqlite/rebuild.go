@@ -28,13 +28,14 @@ func (s *Store) rebuildIndexes(ctx context.Context) error {
 
 	rows, err := tx.QueryContext(ctx, `
 SELECT conversation_id, cursor, type, payload FROM events
-WHERE type IN (?, ?, ?, ?, ?, ?, ?)
+WHERE type IN (?, ?, ?, ?, ?, ?, ?, ?)
 ORDER BY conversation_id, cursor`,
 		ponsruntime.EventInputAccepted,
 		ponsruntime.EventInputAdmitted,
 		ponsruntime.EventRunStarted,
 		ponsruntime.EventRunCompleted,
 		ponsruntime.EventRunFailed,
+		ponsruntime.EventRunStopped,
 		ponsruntime.EventAssistantCommitted,
 		ponsruntime.EventToolOutcomeRecorded,
 	)
@@ -163,12 +164,13 @@ WHERE conversation_id = ? AND run_id = ? AND id = ? AND kind = ? AND status = ?`
 			outcome.Status, encodeTime(event.CreatedAt), event.ConversationID, event.RunID,
 			outcome.ToolCallID, outcome.ToolKind, ponsruntime.ToolRequested)
 
-	case ponsruntime.EventRunCompleted, ponsruntime.EventRunFailed:
+	case ponsruntime.EventRunCompleted, ponsruntime.EventRunFailed, ponsruntime.EventRunStopped:
 		run := event.Run
-		status := ponsruntime.RunCompleted
-		if event.Type == ponsruntime.EventRunFailed {
-			status = ponsruntime.RunFailed
-		}
+		status := map[string]string{
+			ponsruntime.EventRunCompleted: ponsruntime.RunCompleted,
+			ponsruntime.EventRunFailed:    ponsruntime.RunFailed,
+			ponsruntime.EventRunStopped:   ponsruntime.RunStopped,
+		}[event.Type]
 		if run == nil || run.ID != event.RunID || run.ConversationID != event.ConversationID ||
 			run.InboundMessageID != event.InboundMessageID || run.Status != status || run.CompletedAt == nil {
 			return errors.New("invalid terminal run")

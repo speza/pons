@@ -20,6 +20,7 @@ const (
 	EventRunStarted          = "run.started"
 	EventRunCompleted        = "run.completed"
 	EventRunFailed           = "run.failed"
+	EventRunStopped          = "run.stopped"
 	EventEnvironmentProgress = "environment.progress"
 
 	// Transient events are delivered live but never persisted and never advance
@@ -48,6 +49,7 @@ const (
 	RunRunning   = "running"
 	RunCompleted = "completed"
 	RunFailed    = "failed"
+	RunStopped   = "stopped"
 
 	ToolRequested   = "requested"
 	ToolCompleted   = "completed"
@@ -79,8 +81,24 @@ type Message struct {
 	Parts            []MessagePart `json:"parts"`
 	Complete         bool          `json:"complete"`
 	Final            bool          `json:"final,omitempty"`
-	CreatedAt        time.Time     `json:"created_at"`
+	// Notice is set on a notice message: the chat entry for a run that
+	// failed or was stopped instead of answering.
+	Notice    *RunNotice `json:"notice,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
 }
+
+// RunNotice explains a run that ended without an answer. Status is failed or
+// stopped; Error keeps the technical detail behind the message text.
+type RunNotice struct {
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+// Notice texts shown in the chat for a run that ended without an answer.
+const (
+	NoticeFailedText  = "An error occurred while generating a response. Try again."
+	NoticeStoppedText = "Stopped. The response was not finished."
+)
 
 type MessagePart struct {
 	Type       string                     `json:"type"`
@@ -203,7 +221,8 @@ type Event struct {
 	CreatedAt           time.Time                  `json:"created_at"`
 }
 
-// ProjectMessage derives the client-facing message for a content event.
+// ProjectMessage derives the client-facing message for a content event, or
+// the notice message for a run that failed or was stopped.
 func (e Event) ProjectMessage() (Message, error) {
 	message := Message{
 		ConversationID: e.ConversationID, InboundMessageID: e.InboundMessageID,
@@ -233,6 +252,19 @@ func (e Event) ProjectMessage() (Message, error) {
 			Type: "tool_result", ToolCallID: e.ToolOutcome.ToolCallID,
 			ToolKind: e.ToolOutcome.ToolKind, Result: e.ToolOutcome.Result,
 		}}
+	case EventRunFailed, EventRunStopped:
+		if e.Run == nil || e.RunID == "" {
+			return Message{}, errors.New("runtime: run event has no run")
+		}
+		// The terminal run fact is the durable record; its notice message
+		// has a stable ID derived from the run.
+		message.ID, message.Role = e.RunID+":notice", "notice"
+		message.Notice = &RunNotice{Status: e.Run.Status, Error: e.Run.Error}
+		text := NoticeFailedText
+		if e.Type == EventRunStopped {
+			text = NoticeStoppedText
+		}
+		message.Parts = []MessagePart{{Type: "text", Text: text}}
 	default:
 		return Message{}, errors.New("runtime: event does not project a message")
 	}

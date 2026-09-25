@@ -79,9 +79,16 @@ func ProjectView(conversation Conversation, events []Event) (ConversationView, e
 				view.ToolCalls[index].Result = event.ToolOutcome.Result
 				view.ToolCalls[index].UpdatedAt = event.CreatedAt
 			}
-		case EventRunStarted, EventRunCompleted, EventRunFailed:
+		case EventRunStarted, EventRunCompleted, EventRunFailed, EventRunStopped:
 			if event.Run == nil {
 				return ConversationView{}, errors.New("runtime: run event has no run")
+			}
+			if event.Type == EventRunFailed || event.Type == EventRunStopped {
+				notice, err := event.ProjectMessage()
+				if err != nil {
+					return ConversationView{}, err
+				}
+				view.Messages = append(view.Messages, notice)
 			}
 			index, ok := submissions[event.Run.InboundMessageID]
 			if !ok {

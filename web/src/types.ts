@@ -52,7 +52,13 @@ export interface Message {
   parts: MessagePart[];
   complete: boolean;
   final?: boolean;
+  notice?: RunNotice;
   created_at: string;
+}
+
+export interface RunNotice {
+  status: "failed" | "stopped";
+  error?: string;
 }
 
 export interface UserInput {
