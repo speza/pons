@@ -3,8 +3,9 @@
 **Status:** Transactional runtime and client synchronization implemented
 **Related:** [ADR-0008](../adr/adr-0008-runtime-orchestration-layer.md),
 [ADR-0010](../adr/adr-0010-runtime-state-and-client-synchronization.md),
-[ADR-0012](../adr/adr-0012-scalable-runtime-coordination.md), and
-[ADR-0017](../adr/adr-0017-one-runtime-one-trust-domain.md)
+[ADR-0012](../adr/adr-0012-scalable-runtime-coordination.md),
+[ADR-0017](../adr/adr-0017-one-runtime-one-trust-domain.md), and
+[ADR-0023](../adr/adr-0023-runtime-event-log.md)
 
 This document turns ADR-0008 into the smallest useful local runtime shape. It
 is an implementation guide, not a second agent protocol.
@@ -21,7 +22,8 @@ cells as specified by ADR-0017.
 - persist accepted work across process restarts;
 - let clients hydrate a complete renderable conversation without event replay;
 - stream live assistant output when possible; and
-- resume a conversation by loading provider-neutral semantic messages directly.
+- resume a conversation from the durable event log, using a compaction
+  checkpoint when one exists.
 
 The runtime implementation lives in `runtime/`; the native wire adapter lives
 in `runtime/httptransport`. `pons serve` composes them with the configured
@@ -37,10 +39,10 @@ discovered proxy tools, and closes the session before becoming idle. The
 Seatbelt and E2B providers both launch `pons-hands`; the server has no
 in-process hands and refuses to start without a provider.
 
-The runtime persists semantic messages, operational state, and a durable event
-outbox in one SQLite database. It does not run a second session recorder or
-write an independently authoritative JSONL transcript. JSONL may be offered as
-an explicit export of canonical runtime messages later.
+The runtime persists one durable conversation event log and indexed
+operational state in SQLite. Complete semantic messages are event log entries
+used for both model context and client replay. It does not run a second session
+recorder or write an independently authoritative JSONL transcript.
 
 The manager exposes transport-independent operations for creation, submission,
 snapshot reads, and subscriptions. HTTP routing, SSE framing, cursor headers,
@@ -93,8 +95,8 @@ The first runtime does not include:
 ### Conversation
 
 The public HTTP resource and logical interaction. Its opaque server-generated
-ID identifies the canonical messages, submissions, runs, tools, and events in
-the runtime store. A conversation also records its selected execution
+ID scopes one canonical event log and its operational indexes in the runtime
+store. A conversation also records its selected execution
 environment; the server validates this opaque choice against the providers it
 configured before persisting the conversation. The server configures one
 provider, `seatbelt` or `e2b`, and an unset choice selects it.
@@ -136,9 +138,10 @@ provider-specific request shape.
 ```text
 create conversation
         ↓
-atomically persist UserMessage, submission, and client event
+atomically append input.accepted and index its submission
         ↓
-hydrate a fresh Core/Brain from semantic messages
+hydrate a fresh Core/Brain from the latest compaction checkpoint and later
+committed events, or project from the start of the log without a checkpoint
         ↓
 run agent turns
         ↓
@@ -275,29 +278,49 @@ The target runtime uses one transactional store with purpose-specific state:
 
 ```text
 conversations
-messages
-message_parts
 submissions
 runs
 tool_calls
-events             // client delivery outbox
+events             // canonical log; client replay is a filtered projection
 ```
 
-`messages` and `message_parts` are the canonical provider-neutral conversation
-history. The runtime queries them directly when hydrating a brain, and the HTTP
-API queries them directly when hydrating a client. Neither path rebuilds a
-conversation by replaying events.
+`input.accepted`, `assistant.output.committed`, and `tool.outcome.recorded`
+hold the canonical conversation content. The runtime projects admitted input,
+prepared input, committed model output, and tool results from the log, starting
+at the latest compaction checkpoint when one exists. The HTTP snapshot projects messages,
+including queued user input, into the client view in event cursor order.
 
-Submissions own message acceptance and idempotency. Runs own execution state.
-Tool-call records own durable pre-execution intent and terminal outcome. Each
-authoritative change and its durable client event commit in the same
+Submissions index acceptance and idempotency for claiming. The accepted-input
+event carries the idempotency key, trusted source, causation ID, target agent,
+selected revision, and content. HTTP ingress records a human
+source; trusted internal ingress can record scheduled or agent input through
+the same path. `input.admitted` references that accepted input when claimed.
+Runs index execution state.
+Tool-call records index identity and terminal status for recovery; arguments and
+results are projected from assistant-output and tool-outcome events. Snapshots
+project all client state from public events in cursor order. Each
+operational change and its event log entry commit in the same
 transaction.
+SQLite rebuilds the submission, run, and tool-call indexes from the log when
+the store opens. A malformed log aborts startup; a valid active run is then
+failed during recovery, with still-requested tools marked interrupted rather
+than executed again.
 
-The event outbox supports bounded catch-up between a snapshot and a live SSE
-subscription. It is not a second conversation history. Token deltas, tool
-progress and heartbeats bypass the outbox and are transient. Curated
+The event log supports catch-up between a snapshot and a live SSE
+subscription. It is retained as conversation history. Token deltas, tool
+progress and heartbeats bypass it and are transient. Curated
 environment setup steps are durable events and also appear in snapshots so a
 client can reopen the setup log after a disconnect.
+
+Discrete private `agent.*` entries share the log cursor. Their typed payloads
+record agent and iteration boundaries, prepared user input, complete model
+output (including opaque provider items when available), tool execution stages,
+and compaction summaries. Client replay filters them out; the internal store
+reader can inspect them. Compaction events
+also contain the context after compaction. The store gives each claimed run one
+ordered context projected from the latest checkpoint and committed events that
+followed it, or from the start of the log. The runner has no separate message
+history or compaction fallback. The current runtime has no approval gate.
 
 The manager depends on the consumer-owned `runtime.Store` interface. Its
 operations describe atomic runtime transitions rather than SQL tables, so a
@@ -430,20 +453,20 @@ Accept: text/event-stream
 The CLI may connect before submitting a message. A client reconnecting to an
 existing conversation first fetches its snapshot, then subscribes after the
 snapshot's `event_cursor`. Durable events committed in between are replayed.
-If the requested cursor is older than the retained outbox, the server requires
-a new snapshot.
+Durable event log entries remain replayable while the conversation exists.
 
-Durable client events update entities or append curated environment progress.
-They can be applied idempotently to the same local model returned by the
-snapshot API:
+Durable client events record facts or append curated environment progress.
+Clients project messages, submissions, tool calls, and the active run from
+them after loading a snapshot:
 
 ```text
-message.upserted
-message.removed
-submission.updated
-tool_call.updated
-run.updated
-conversation.updated
+input.accepted
+input.admitted
+assistant.output.committed
+tool.outcome.recorded
+run.started
+run.completed
+run.failed
 environment.progress
 ```
 
@@ -455,7 +478,7 @@ tool.progress
 heartbeat
 ```
 
-Transient events are never persisted in the durable event outbox and do not
+Transient events are never persisted in the durable event log and do not
 receive a replay guarantee or advance the durable cursor. The complete
 assistant message and terminal tool state replace any live draft or progress
 display.

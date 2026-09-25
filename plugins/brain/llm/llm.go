@@ -23,6 +23,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -131,6 +132,9 @@ type Config struct {
 	// hydrates the run's memory index as attributed data.
 	Memory *Memory
 	Logger *log.Logger
+	// OnEvent receives completed model output and compaction before the brain
+	// advances. Runtime persistence errors stop the run.
+	OnEvent func(BrainEvent) error
 
 	// Compaction: when the conversation (estimate) exceeds CompactChars,
 	// older turns are summarized into one user message, keeping the last
@@ -145,6 +149,18 @@ type Config struct {
 	Fallbacks []Fallback
 }
 
+type BrainEvent struct {
+	Type           string
+	Turn           int
+	Blocks         []Block
+	Summary        string
+	CompactedTurns int
+	RetainedTurns  int
+	Turns          []Turn
+}
+
+var errEventPersistence = errors.New("llm: persist event")
+
 // Brain is the LLM-driven ControlPort. It holds the conversation in
 // process and is not safe for concurrent use: drive one Core.Run at a
 // time (the interactive CLI does this).
@@ -157,9 +173,10 @@ type Brain struct {
 	pending     []Result
 	seenMessage string // last message folded into context
 	hands       Hands  // what the seeded run's hands see; shown in <env>
-	// memoryContext is the rendered memory block and memoryTurn the index of
-	// the turn holding it (-1 when none), so compaction never summarizes
-	// away where memory lives.
+	// memoryContext is the rendered memory block, kept as its own Text block,
+	// and memoryTurn the index of the turn holding it (-1 when none).
+	// Compaction never summarizes it away, and it is left out of everything
+	// persisted, so later runs see only their own memory.
 	memoryContext string
 	memoryTurn    int
 	logf          func(string, ...any)
@@ -343,18 +360,21 @@ func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.Ass
 	}
 	if len(b.turns) == 0 {
 		// First turn: the goal as the opening user message.
-		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: b.userPrompt(obs, "")}}})
+		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: b.userPrompt(obs)}}})
 	} else if obs.Message != "" && obs.Message != b.seenMessage {
 		// A new instruction arrived (interactive follow-up, resumed run
 		// with a fresh goal): append it with a fresh <env> block. This is
 		// intentionally independent of pending results: an instruction
 		// arriving after an exhausted run must not be discarded.
-		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: b.userPrompt(obs, "")}}})
+		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: b.userPrompt(obs)}}})
 	}
 	b.seenMessage = obs.Message
 
 	if b.shouldCompact() {
-		if err := b.compact(ctx); err != nil {
+		if err := b.compact(ctx, obs.Turn); err != nil {
+			if errors.Is(err, errEventPersistence) {
+				return pons.AssistantResponse{}, err
+			}
 			if b.logf != nil {
 				b.logf("[llm] compaction skipped: %v", err)
 			}
@@ -364,6 +384,11 @@ func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.Ass
 	assistant, err := b.client.Complete(ctx, b.systemPrompt(), b.turns, b.core.ToolSpecs())
 	if err != nil {
 		return pons.AssistantResponse{}, fmt.Errorf("llm: %w", err)
+	}
+	if b.cfg.OnEvent != nil {
+		if err := b.cfg.OnEvent(BrainEvent{Type: "model.completed", Turn: obs.Turn, Blocks: assistant.Blocks}); err != nil {
+			return pons.AssistantResponse{}, fmt.Errorf("llm: record model output: %w", err)
+		}
 	}
 	b.turns = append(b.turns, assistant)
 
@@ -471,7 +496,7 @@ func (b *Brain) shouldCompact() bool {
 // compact summarizes all but the goal and the most recent turns into a
 // single user message. Best effort: a failed summary call leaves the
 // conversation untouched (the next turn simply retries).
-func (b *Brain) compact(ctx context.Context) error {
+func (b *Brain) compact(ctx context.Context, turn int) error {
 	keep := b.cfg.CompactKeep
 	if keep <= 0 {
 		keep = 6
@@ -506,21 +531,49 @@ func (b *Brain) compact(ctx context.Context) error {
 			summary.WriteString(t.Value)
 		}
 	}
-	text := fmt.Sprintf("[Earlier conversation compacted into this summary.]\n\n%s", strings.TrimSpace(summary.String()))
+	compacted := Turn{Role: "user", Blocks: []Block{Text{Value: fmt.Sprintf(
+		"[Earlier conversation compacted into this summary.]\n\n%s",
+		strings.TrimSpace(summary.String()))}}}
+	memoryTurn := b.memoryTurn
 	switch {
-	case b.memoryTurn >= 1 && b.memoryTurn < start:
+	case memoryTurn >= 1 && memoryTurn < start:
 		// The memory block was in the summarized middle: carry it verbatim.
-		text += "\n\n" + b.memoryContext
-		b.memoryTurn = 1
-	case b.memoryTurn >= start:
-		b.memoryTurn = b.memoryTurn - start + 2
+		compacted.Blocks = append(compacted.Blocks, Text{Value: b.memoryContext})
+		memoryTurn = 1
+	case memoryTurn >= start:
+		memoryTurn = memoryTurn - start + 2
 	}
-	compacted := Turn{Role: "user", Blocks: []Block{Text{Value: text}}}
+	context := append([]Turn{b.turns[0], compacted}, tail...)
+	if b.cfg.OnEvent != nil {
+		if err := b.cfg.OnEvent(BrainEvent{
+			Type: "context.compacted", Turn: turn, Summary: compacted.Blocks[0].(Text).Value,
+			CompactedTurns: len(middle), RetainedTurns: len(tail), Turns: b.withoutMemory(context),
+		}); err != nil {
+			return fmt.Errorf("%w: %v", errEventPersistence, err)
+		}
+	}
 	if b.logf != nil {
 		b.logf("[llm] compacted %d turns into %d-char summary (keeping %d recent)", len(middle), summary.Len(), keep)
 	}
-	b.turns = append([]Turn{b.turns[0], compacted}, tail...)
+	b.turns, b.memoryTurn = context, memoryTurn
 	return nil
+}
+
+// withoutMemory copies turns without the run's memory block, which is
+// per-run context rather than conversation history.
+func (b *Brain) withoutMemory(turns []Turn) []Turn {
+	if b.memoryContext == "" {
+		return turns
+	}
+	out := make([]Turn, len(turns))
+	for i, turn := range turns {
+		out[i] = turn
+		out[i].Blocks = slices.DeleteFunc(slices.Clone(turn.Blocks), func(block Block) bool {
+			text, ok := block.(Text)
+			return ok && text.Value == b.memoryContext
+		})
+	}
+	return out
 }
 
 const summarizeSystem = "Summarize this portion of an agent session transcript. " +
@@ -567,9 +620,8 @@ func truncText(s string, n int) string {
 
 // userPrompt renders a new instruction with the environment the brain is
 // working in: the jailed workspace (the model is blind to everything not
-// stated here), the platform, the hands' network policy, and the date,
-// followed by context such as the memory index.
-func (b *Brain) userPrompt(obs protocol.Observation, context string) string {
+// stated here), the platform, the hands' network policy, and the date.
+func (b *Brain) userPrompt(obs protocol.Observation) string {
 	now := obs.Now
 	if now.IsZero() {
 		now = time.Now()
@@ -587,10 +639,6 @@ func (b *Brain) userPrompt(obs protocol.Observation, context string) string {
 	}
 	fmt.Fprintf(&sb, "date: %s\n", now.Format("2006-01-02"))
 	sb.WriteString("</env>\n\n")
-	if context != "" {
-		sb.WriteString(context)
-		sb.WriteString("\n")
-	}
 	sb.WriteString(obs.Message)
 	return sb.String()
 }
@@ -649,10 +697,19 @@ func (b *Brain) Seed(turns []Turn, message string, hands Hands) {
 	if context != "" {
 		b.memoryTurn = len(turns)
 	}
-	b.turns = append(append([]Turn(nil), turns...), Turn{
-		Role: "user", Blocks: []Block{Text{Value: b.userPrompt(protocol.Observation{
-			Message: message, Workspace: hands.Workspace, Platform: hands.Platform, Now: time.Now(),
-		}, context)}},
-	})
+	var blocks []Block
+	if context != "" {
+		blocks = append(blocks, Text{Value: context})
+	}
+	blocks = append(blocks, Text{Value: b.userPrompt(protocol.Observation{
+		Message: message, Workspace: hands.Workspace, Platform: hands.Platform, Now: time.Now(),
+	})})
+	b.turns = append(append([]Turn(nil), turns...), Turn{Role: "user", Blocks: blocks})
 	b.seenMessage = message
+}
+
+// PreparedInput returns the exact user turn Seed added, including the
+// environment header, for durable context replay.
+func (b *Brain) PreparedInput() Turn {
+	return b.withoutMemory(b.turns[len(b.turns)-1:])[0]
 }

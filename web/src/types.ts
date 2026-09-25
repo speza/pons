@@ -55,6 +55,35 @@ export interface Message {
   created_at: string;
 }
 
+export interface UserInput {
+  idempotency_key: string;
+  parts: TextPart[];
+  source: {
+    kind: "human" | "system" | "agent";
+    adapter: string;
+    principal_id?: string;
+    source_conversation_id?: string;
+    source_agent_id?: string;
+  };
+  causation_id?: string;
+  target_agent_id: string;
+  agent_revision: string;
+}
+
+export interface AssistantOutput {
+  id: string;
+  parts: MessagePart[];
+  final?: boolean;
+}
+
+export interface ToolOutcome {
+  id: string;
+  tool_call_id: string;
+  tool_kind: string;
+  status: string;
+  result: ToolResult;
+}
+
 export interface Run {
   id: string;
   conversation_id: string;
@@ -121,7 +150,9 @@ export interface RuntimeEvent {
   conversation_id: string;
   run_id?: string;
   inbound_message_id?: string;
-  message?: Message;
+  input?: UserInput;
+  assistant_output?: AssistantOutput;
+  tool_outcome?: ToolOutcome;
   submission?: Submission;
   tool_call?: ToolCall;
   run?: Run;

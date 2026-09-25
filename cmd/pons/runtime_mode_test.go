@@ -74,6 +74,29 @@ func (p *lifecycleEnvironment) Close() error {
 
 type recordingSession struct{ closes *atomic.Int32 }
 
+func TestRuntimeContextTurnsPreserveProviderState(t *testing.T) {
+	context := []ponsruntime.ContextTurn{
+		{Role: "assistant", Content: []ponsruntime.AgentContent{
+			{Type: "provider_item", Item: json.RawMessage(`{"type":"reasoning","encrypted_content":"opaque"}`)},
+			{Type: "tool_call", ToolCallID: "call-1", ToolKind: "bash", Arguments: json.RawMessage(`{"count":9007199254740993}`)},
+		}},
+		{Role: "user", Content: []ponsruntime.AgentContent{{Type: "tool_result", ToolCallID: "call-1", Text: "done", IsError: true}}},
+	}
+	turns, err := runtimeContextTurns(context)
+	if err != nil || len(turns) != 2 || len(turns[0].Blocks) != 2 {
+		t.Fatalf("hydrated context = %+v, err = %v", turns, err)
+	}
+	if raw, ok := turns[0].Blocks[0].(llm.Raw); !ok || !bytes.Equal(raw.Item, context[0].Content[0].Item) {
+		t.Fatalf("provider item = %+v", turns[0].Blocks[0])
+	}
+	if call, ok := turns[0].Blocks[1].(llm.ToolUse); !ok || call.Input["count"] != json.Number("9007199254740993") {
+		t.Fatalf("tool call = %+v", turns[0].Blocks[1])
+	}
+	if result, ok := turns[1].Blocks[0].(llm.Result); !ok || !result.IsError || result.Content != "done" {
+		t.Fatalf("tool result = %+v", turns[1].Blocks[0])
+	}
+}
+
 func (s recordingSession) Catalog() []external.ToolDescription { return nil }
 func (s recordingSession) Metadata() environment.Metadata {
 	return environment.Metadata{Provider: "recording", WorkspacePath: "/remote/workspace", Platform: "linux/arm64"}
@@ -114,40 +137,51 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 		},
 	}, logger: newServerLogger(&debugLog, true)}
 	requestNumber := 0
-	var history []ponsruntime.Message
 	var progress []string
+	var agentStages []string
+	var modelContent []ponsruntime.AgentContent
 	request := func(text string) ponsruntime.RunRequest {
 		requestNumber++
 		inboundID := fmt.Sprintf("inbound-%d", requestNumber)
-		return ponsruntime.RunRequest{
+		req := ponsruntime.RunRequest{
 			Agent:          ponsruntime.AgentDefinition{ID: ponsruntime.DefaultAgentID, Model: "test", MaxTurns: 3},
 			ConversationID: "conversation-1", InboundMessageID: inboundID,
 			RunID: fmt.Sprintf("run-%d", requestNumber), Text: text,
 			GitRepository: "https://github.com/acme/a.git", GitRevision: strings.Repeat("a", 40),
-			Messages: append([]ponsruntime.Message(nil), history...),
 			Emit: func(event ponsruntime.RunEvent) error {
 				if event.Type == ponsruntime.EventEnvironmentProgress {
 					progress = append(progress, event.Message)
 				}
+				if event.Type == ponsruntime.RunEventAgentEvent {
+					agentStages = append(agentStages, event.AgentEvent.Type)
+					if event.AgentEvent.Type == ponsruntime.EventModelCompleted {
+						modelContent = event.AgentEvent.ModelOutput.Content
+					}
+				}
 				return nil
 			},
 		}
+		if requestNumber == 2 {
+			req.Context = []ponsruntime.ContextTurn{
+				{Role: "user", Content: []ponsruntime.AgentContent{{Type: "text", Text: "checkpoint summary"}}},
+				{Role: "assistant", Content: []ponsruntime.AgentContent{{Type: "text", Text: "answer 1"}}},
+			}
+		}
+		return req
 	}
 	first, err := runner.Run(context.Background(), request("first question"))
 	if err != nil || first.Answer != "answer 1" {
 		t.Fatalf("first run = %+v, err = %v", first, err)
 	}
-	history = append(history,
-		ponsruntime.Message{ID: "user-1", Role: "user", Complete: true, Parts: []ponsruntime.MessagePart{{Type: "text", Text: "first question"}}},
-		ponsruntime.Message{ID: "assistant-1", Role: "assistant", Complete: true, Final: true, Parts: []ponsruntime.MessagePart{{Type: "text", Text: first.Answer}}},
-	)
 	second, err := runner.Run(context.Background(), request("second question"))
 	if err != nil || second.Answer != "answer 2" {
 		t.Fatalf("second run = %+v, err = %v", second, err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(bodies) != 2 || !strings.Contains(bodies[1], "answer 1") || !strings.Contains(bodies[1], "second question") {
+	if len(bodies) != 2 || !strings.Contains(bodies[1], "checkpoint summary") ||
+		!strings.Contains(bodies[1], "answer 1") || !strings.Contains(bodies[1], "second question") ||
+		strings.Contains(bodies[1], "first question") {
 		t.Fatalf("second provider request was not hydrated: %v", bodies)
 	}
 	for _, body := range bodies {
@@ -163,6 +197,12 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 	}
 	if len(progress) != 2 || progress[0] != "Provisioning test sandbox…" || progress[1] != "Provisioning test sandbox…" {
 		t.Fatalf("run progress = %v", progress)
+	}
+	if !slices.Contains(agentStages, ponsruntime.EventInputPrepared) ||
+		!slices.Contains(agentStages, ponsruntime.EventIterationStarted) || !slices.Contains(agentStages, ponsruntime.EventIterationCompleted) ||
+		!slices.Contains(agentStages, ponsruntime.EventModelCompleted) || !slices.Contains(agentStages, ponsruntime.EventAgentFinished) ||
+		len(modelContent) != 1 || modelContent[0].Text != "answer 2" {
+		t.Fatalf("agent stages = %v, model content = %+v", agentStages, modelContent)
 	}
 	for i := 1; i <= 2; i++ {
 		spec := <-execution.specs
@@ -363,10 +403,9 @@ func TestRuntimeServerShutdownClosesActiveSSE(t *testing.T) {
 	}
 }
 
-func TestRuntimeTurnsPreserveJSONNumberPrecision(t *testing.T) {
-	turns, err := runtimeTurns([]ponsruntime.Message{{
-		ID: "assistant", Role: "assistant", Complete: true,
-		Parts: []ponsruntime.MessagePart{{Type: "tool_call", ToolCallID: "call", ToolKind: "tool", Arguments: json.RawMessage(`{"value":9007199254740993}`)}},
+func TestRuntimeContextTurnsPreserveJSONNumberPrecision(t *testing.T) {
+	turns, err := runtimeContextTurns([]ponsruntime.ContextTurn{{
+		Role: "assistant", Content: []ponsruntime.AgentContent{{Type: "tool_call", ToolCallID: "call", ToolKind: "tool", Arguments: json.RawMessage(`{"value":9007199254740993}`)}},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -381,24 +420,16 @@ func TestRuntimeTurnsPreserveJSONNumberPrecision(t *testing.T) {
 	}
 }
 
-func TestRuntimeTurnsSkipIncompleteAssistantMessages(t *testing.T) {
-	turns, err := runtimeTurns([]ponsruntime.Message{
-		{ID: "draft", Role: "assistant", Parts: []ponsruntime.MessagePart{{Type: "text", Text: "partial"}}},
-		{ID: "complete", Role: "assistant", Complete: true, Parts: []ponsruntime.MessagePart{{Type: "text", Text: "kept"}}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(turns) != 1 || turns[0].Blocks[0].(llm.Text).Value != "kept" {
-		t.Fatalf("turns = %+v", turns)
+func TestRuntimeAgentContentRejectsNilBlock(t *testing.T) {
+	if _, err := runtimeAgentContent([]llm.Block{nil}); err == nil {
+		t.Fatal("nil model block was silently omitted")
 	}
 }
 
-func TestRuntimeTurnsNormalizeEmptyToolArguments(t *testing.T) {
+func TestRuntimeContextTurnsNormalizeEmptyToolArguments(t *testing.T) {
 	for _, arguments := range []json.RawMessage{nil, json.RawMessage(`null`)} {
-		turns, err := runtimeTurns([]ponsruntime.Message{{
-			ID: "assistant", Role: "assistant", Complete: true,
-			Parts: []ponsruntime.MessagePart{{Type: "tool_call", ToolCallID: "call", ToolKind: "tool", Arguments: arguments}},
+		turns, err := runtimeContextTurns([]ponsruntime.ContextTurn{{
+			Role: "assistant", Content: []ponsruntime.AgentContent{{Type: "tool_call", ToolCallID: "call", ToolKind: "tool", Arguments: arguments}},
 		}})
 		if err != nil {
 			t.Fatal(err)

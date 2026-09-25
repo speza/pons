@@ -20,6 +20,7 @@ import {
   newIdempotencyKey,
   submitMessage,
 } from "./api";
+import { applyEvent } from "./projection";
 import type {
   AgentSummary,
   Conversation,
@@ -71,48 +72,6 @@ function wait(ms: number, signal: AbortSignal): Promise<void> {
       { once: true },
     );
   });
-}
-
-function upsert<T extends { id: string }>(items: T[], item: T): T[] {
-  const index = items.findIndex((existing) => existing.id === item.id);
-  if (index < 0) return [...items, item];
-  const next = [...items];
-  next[index] = item;
-  return next;
-}
-
-function applyEvent(view: ConversationView, event: RuntimeEvent): ConversationView {
-  const next: ConversationView = {
-    ...view,
-    messages: view.messages,
-    submissions: view.submissions,
-    tool_calls: view.tool_calls,
-    environment_events: view.environment_events,
-    active_run: view.active_run,
-  };
-  if (event.cursor && event.cursor > next.event_cursor) next.event_cursor = event.cursor;
-
-  switch (event.type) {
-    case "message.upserted":
-      if (event.message) next.messages = upsert(next.messages, event.message);
-      break;
-    case "submission.updated":
-      if (event.submission) next.submissions = upsert(next.submissions ?? [], event.submission);
-      break;
-    case "tool_call.updated":
-      if (event.tool_call) next.tool_calls = upsert(next.tool_calls ?? [], event.tool_call);
-      break;
-    case "run.updated":
-      next.active_run = event.run && ["queued", "running"].includes(event.run.status) ? event.run : undefined;
-      break;
-    case "environment.progress":
-      if (event.cursor && event.environment_progress &&
-          !next.environment_events?.some((entry) => entry.cursor === event.cursor)) {
-        next.environment_events = [...(next.environment_events ?? []), event];
-      }
-      break;
-  }
-  return next;
 }
 
 function formatDate(value: string): string {
@@ -248,7 +207,7 @@ function App() {
           setLiveDraft((current) => current + delta.text);
         }
       }
-      if (event.type === "message.upserted" && event.message?.final) {
+      if (event.type === "assistant.output.committed" && event.assistant_output?.final) {
         liveDraftMessage.current = "";
         setLiveDraft("");
       }
@@ -258,13 +217,13 @@ function App() {
           [`${event.run_id ?? ""}:${event.progress!.tool_call_id}`]: event.progress!.text ?? "",
         }));
       }
-      if (event.type === "tool_call.updated" && event.tool_call) {
-        const tool = event.tool_call;
-        if (tool.status !== "requested") {
+      if (event.type === "tool.outcome.recorded") {
+        const toolID = event.tool_outcome?.tool_call_id;
+        if (toolID) {
           setToolProgress((current) => {
             const next = { ...current };
-            delete next[`${tool.run_id}:${tool.id}`];
-            delete next[tool.id];
+            delete next[`${event.run_id ?? ""}:${toolID}`];
+            delete next[toolID];
             return next;
           });
         }

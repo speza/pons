@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "npm run check && vite build",
-    "check": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "check": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit && node --test src/projection.test.mjs",
     "dev": "vite",
     "preview": "vite preview"
   },

@@ -353,17 +353,17 @@ func (c Client) Send(ctx context.Context, conversationID, idempotencyKey, text s
 				onEvent(event)
 			}
 			switch event.Type {
-			case ponsruntime.EventMessageUpserted:
-				if event.Message != nil && event.Message.Role == "assistant" && event.Message.Final {
+			case ponsruntime.EventAssistantCommitted:
+				if event.AssistantOutput != nil && event.AssistantOutput.Final {
 					var answer strings.Builder
-					for _, part := range event.Message.Parts {
+					for _, part := range event.AssistantOutput.Parts {
 						if part.Type == "text" {
 							answer.WriteString(part.Text)
 						}
 					}
-					return SendResult{ConversationID: conversationID, ResponseID: event.Message.ID, Answer: answer.String()}, nil
+					return SendResult{ConversationID: conversationID, ResponseID: event.AssistantOutput.ID, Answer: answer.String()}, nil
 				}
-			case ponsruntime.EventRunUpdated:
+			case ponsruntime.EventRunFailed:
 				if event.Run != nil && event.Run.Status == ponsruntime.RunFailed {
 					return SendResult{}, errors.New(event.Run.Error)
 				}

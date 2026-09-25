@@ -14,6 +14,8 @@ Start with the [project README](../README.md), then use this index.
 
 - [Runtime](design/runtime.md): server, conversations, storage, and client
   synchronization
+- [Runtime event log](adr/adr-0023-runtime-event-log.md): canonical history,
+  client replay, and operational index recovery
 - [Hands environment](design/hands-environment.md): Seatbelt and E2B
   execution environments
 - [Remote workspaces](design/remote-workspaces.md): durable remote

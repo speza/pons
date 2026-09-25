@@ -151,6 +151,13 @@ func TestAgentMemorySurvivesRestartAndNewConversation(t *testing.T) {
 	if !strings.Contains(all[0].system(), "<memory_rules>") {
 		t.Fatalf("memory rules missing:\n%s", all[0].system())
 	}
+	blocks := 0
+	for _, message := range all[2].Messages {
+		blocks += strings.Count(message.Content, "<memory path=")
+	}
+	if blocks != 1 {
+		t.Fatalf("later run carries %d memory blocks, want only its own", blocks)
+	}
 	_, recalled := all[2].last()
 	if !strings.Contains(recalled, "<memory_index source=\"MEMORY.md\">\n- [Tea](MEMORY.md) — owner drinks green tea\n</memory_index>") {
 		t.Fatalf("new conversation after restart did not hydrate memory:\n%s", recalled)

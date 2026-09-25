@@ -185,6 +185,11 @@ corrections, and curation moves to a background memory agent (section 6's
 extraction and consolidation) in phase 7, which revisits sections 3 to 5 for
 multi-principal writes.
 
+The hydrated memory block is per-run context, not conversation history: the
+runtime event log (ADR-0023) records each run's prepared input and compaction
+checkpoints without it, so a later run sees only its own memory, and
+compaction within a run carries the block forward verbatim.
+
 ## Verification requirements
 
 Deterministic tests without provider credentials or network prove:

@@ -144,10 +144,10 @@ func TestSendCreatesConversationWithWorkspaceSelection(t *testing.T) {
 		created:  ponsruntime.Conversation{ID: "new-conversation"},
 		accepted: ponsruntime.AcceptedMessage{ConversationID: "new-conversation", InboundMessageID: "first-message"},
 		events: []ponsruntime.Event{{
-			Type:             ponsruntime.EventMessageUpserted,
+			Type:             ponsruntime.EventAssistantCommitted,
 			InboundMessageID: "first-message",
-			Message: &ponsruntime.Message{
-				ID: "answer", Role: "assistant", Final: true,
+			AssistantOutput: &ponsruntime.AssistantOutput{
+				ID: "answer", Final: true,
 				Parts: []ponsruntime.MessagePart{{Type: "text", Text: "done"}},
 			},
 		}},
