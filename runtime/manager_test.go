@@ -838,7 +838,7 @@ func TestDeniedToolPersistsDistinctStatusAndResult(t *testing.T) {
 	if _, err := m.Submit(context.Background(), conversation.ID, "deny", []TextPart{{Type: "text", Text: "go"}}); err != nil {
 		t.Fatal(err)
 	}
-	_ = waitForEvent(t, m, conversation.ID, EventRunUpdated, 2)
+	_ = waitForEvent(t, m, conversation.ID, EventRunCompleted, 1)
 	view, err := m.View(context.Background(), conversation.ID)
 	if err != nil {
 		t.Fatal(err)
