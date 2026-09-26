@@ -93,8 +93,10 @@ func DefaultCodexAuthPath() (string, error) {
 // codexAuth holds one ChatGPT-subscription credential resolved from the
 // store. Refreshed tokens are written back under their auth id.
 type codexAuth struct {
-	// The gate guards credentials through refresh and persistence. Waiting
-	// callers can cancel without waiting for another request's network call.
+	// The gate acts as a cancellable mutex, held through token refresh and
+	// persistence. sync.Mutex.Lock cannot honor context cancellation, so a
+	// canceled caller would remain blocked behind another request's stalled
+	// refresh HTTP call. Semaphore acquisition lets that waiter exit promptly.
 	gate       *semaphore.Weighted
 	http       *http.Client
 	storePath  string
