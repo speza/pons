@@ -92,7 +92,7 @@ func (c remoteClient) post(ctx context.Context, payload any, destination any) er
 
 // classifierState omits the brain's self-reported danger field. Source labels
 // keep user instructions distinguishable from tool output and repository text.
-func classifierState(req pons.ToolCallStartEvent) map[string]any {
+func classifierState(req pons.ToolCallStartInput) map[string]any {
 	return map[string]any{
 		"current_user_message": req.Message,
 		"recent_context":       req.RecentContext,

@@ -20,7 +20,7 @@ func NewTypeSafeClassifier(config RemoteConfig) (*TypeSafeClassifier, error) {
 	return &TypeSafeClassifier{client}, nil
 }
 
-func (c *TypeSafeClassifier) Assess(ctx context.Context, req pons.ToolCallStartEvent) (pons.ActionAssessment, error) {
+func (c *TypeSafeClassifier) Assess(ctx context.Context, req pons.ToolCallStartInput) (pons.ActionAssessment, error) {
 	payload := map[string]any{
 		"model": c.model,
 		"state": classifierState(req),

@@ -17,9 +17,9 @@ import (
 // Event uses the same JSON shape as a host hook event.
 type EvalCase struct {
 	ID             string                  `json:"id"`
-	ExpectedAction pons.ActionDisposition  `json:"expected_action"`
+	ExpectedAction pons.Permission         `json:"expected_action"`
 	ExpectedRisk   string                  `json:"expected_risk,omitempty"`
-	Event          pons.ToolCallStartEvent `json:"event"`
+	Event          pons.ToolCallStartInput `json:"event"`
 }
 
 // LoadEvalCases decodes a strict, nonempty JSON array of labeled calls.
@@ -42,7 +42,7 @@ func LoadEvalCases(reader io.Reader) ([]EvalCase, error) {
 			return nil, fmt.Errorf("classifier eval case %d has an empty or duplicate id", i)
 		}
 		ids[item.ID] = true
-		if item.ExpectedAction != pons.DispositionAllow && item.ExpectedAction != pons.DispositionAsk {
+		if item.ExpectedAction != pons.PermissionAllow && item.ExpectedAction != pons.PermissionAsk {
 			return nil, fmt.Errorf("classifier eval case %q: expected_action must be allow or ask", item.ID)
 		}
 		if item.ExpectedRisk != "" && item.ExpectedRisk != "safe" && item.ExpectedRisk != "review" {
@@ -59,18 +59,18 @@ func LoadEvalCases(reader io.Reader) ([]EvalCase, error) {
 }
 
 type EvalOutcome struct {
-	ID                   string                 `json:"id"`
-	ExpectedRisk         string                 `json:"expected_risk,omitempty"`
-	Risk                 string                 `json:"risk,omitempty"`
-	RiskMismatch         bool                   `json:"risk_mismatch,omitempty"`
-	Confidence           float64                `json:"confidence"`
-	Classifier           string                 `json:"classifier,omitempty"`
-	AssessmentReasonCode string                 `json:"assessment_reason_code,omitempty"`
-	DecisionReasonCode   string                 `json:"decision_reason_code,omitempty"`
-	ExpectedAction       pons.ActionDisposition `json:"expected_action"`
-	Action               pons.ActionDisposition `json:"action"`
-	Passed               bool                   `json:"passed"`
-	Duration             time.Duration          `json:"duration_ns"`
+	ID                   string          `json:"id"`
+	ExpectedRisk         string          `json:"expected_risk,omitempty"`
+	Risk                 string          `json:"risk,omitempty"`
+	RiskMismatch         bool            `json:"risk_mismatch,omitempty"`
+	Confidence           float64         `json:"confidence"`
+	Classifier           string          `json:"classifier,omitempty"`
+	AssessmentReasonCode string          `json:"assessment_reason_code,omitempty"`
+	DecisionReasonCode   string          `json:"decision_reason_code,omitempty"`
+	ExpectedAction       pons.Permission `json:"expected_action"`
+	Action               pons.Permission `json:"action"`
+	Passed               bool            `json:"passed"`
+	Duration             time.Duration   `json:"duration_ns"`
 }
 
 type EvalReport struct {
@@ -136,26 +136,30 @@ func EvaluateClassifierWithProgress(
 		if err := ctx.Err(); err != nil {
 			return report, err
 		}
+		var assessment pons.ActionAssessment
+		if decision.Assessment != nil {
+			assessment = *decision.Assessment
+		}
 		outcome := EvalOutcome{
 			ID: item.ID, ExpectedRisk: item.ExpectedRisk,
-			Risk: decision.Assessment.Risk, Confidence: decision.Assessment.Confidence,
-			Classifier:           decision.Assessment.Classifier,
-			AssessmentReasonCode: decision.Assessment.ReasonCode,
-			DecisionReasonCode:   decision.ReasonCode,
-			ExpectedAction:       item.ExpectedAction, Action: decision.Action,
+			Risk: assessment.Risk, Confidence: assessment.Confidence,
+			Classifier:           assessment.Classifier,
+			AssessmentReasonCode: assessment.ReasonCode,
+			DecisionReasonCode:   decision.Reason,
+			ExpectedAction:       item.ExpectedAction, Action: decision.Permission,
 			Duration: duration,
 		}
-		outcome.Passed = outcome.Action == outcome.ExpectedAction && decision.ReasonCode != "classifier_unavailable"
+		outcome.Passed = outcome.Action == outcome.ExpectedAction && decision.Reason != "classifier_unavailable"
 		if outcome.Passed {
 			report.Passed++
 		}
-		if outcome.ExpectedAction != pons.DispositionAllow && outcome.Action == pons.DispositionAllow {
+		if outcome.ExpectedAction != pons.PermissionAllow && outcome.Action == pons.PermissionAllow {
 			report.FalseAllows++
 		}
-		if outcome.ExpectedAction == pons.DispositionAllow && outcome.Action != pons.DispositionAllow {
+		if outcome.ExpectedAction == pons.PermissionAllow && outcome.Action != pons.PermissionAllow {
 			report.FalseReviews++
 		}
-		if decision.ReasonCode == "classifier_unavailable" {
+		if decision.Reason == "classifier_unavailable" {
 			report.Unavailable++
 		} else if item.ExpectedRisk != "" && outcome.Risk != item.ExpectedRisk {
 			outcome.RiskMismatch = true

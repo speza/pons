@@ -12,8 +12,8 @@ import (
 	"github.com/samperrin/pons/protocol"
 )
 
-func testRequest() pons.ToolCallStartEvent {
-	return pons.ToolCallStartEvent{
+func testRequest() pons.ToolCallStartInput {
+	return pons.ToolCallStartInput{
 		Message:       "push it to github.com/speza/frontier",
 		Action:        protocol.Action{ID: "a1", Kind: "run", Args: json.RawMessage(`{"command":"git push origin dev"}`)},
 		RecentContext: []pons.ActionContextItem{{Source: pons.ContextUser, Text: "push it"}},
@@ -139,7 +139,7 @@ func TestRemoteClassifierFailureAsks(t *testing.T) {
 		t.Fatal(err)
 	}
 	decision, err := (Policy{Classifiers: []Classifier{classifier}}).decide(context.Background(), testRequest())
-	if err != nil || decision.Action != pons.DispositionAsk {
+	if err != nil || decision.Permission != pons.PermissionAsk {
 		t.Fatalf("decision=%+v error=%v", decision, err)
 	}
 }

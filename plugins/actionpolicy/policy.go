@@ -15,27 +15,27 @@ import (
 // Rule matches an exact pending request. Rules must come from trusted host
 // configuration, never from model output or repository content.
 type Rule struct {
-	Action     pons.ActionDisposition
+	Action     pons.Permission
 	ReasonCode string
-	Match      func(pons.ToolCallStartEvent) bool
+	Match      func(pons.ToolCallStartInput) bool
 }
 
 // Classifier provides advisory evidence. Its implementation may be
 // deterministic or model-backed; it cannot make a hard denial.
 type Classifier interface {
-	Assess(context.Context, pons.ToolCallStartEvent) (pons.ActionAssessment, error)
+	Assess(context.Context, pons.ToolCallStartInput) (pons.ActionAssessment, error)
 }
 
 // ClassifierFunc adapts a function to Classifier.
-type ClassifierFunc func(context.Context, pons.ToolCallStartEvent) (pons.ActionAssessment, error)
+type ClassifierFunc func(context.Context, pons.ToolCallStartInput) (pons.ActionAssessment, error)
 
-func (f ClassifierFunc) Assess(ctx context.Context, req pons.ToolCallStartEvent) (pons.ActionAssessment, error) {
+func (f ClassifierFunc) Assess(ctx context.Context, req pons.ToolCallStartInput) (pons.ActionAssessment, error) {
 	return f(ctx, req)
 }
 
 // ToolRule matches calls to the named tool kinds; "*" matches every tool.
-func ToolRule(action pons.ActionDisposition, reasonCode string, kinds ...string) Rule {
-	return Rule{Action: action, ReasonCode: reasonCode, Match: func(req pons.ToolCallStartEvent) bool {
+func ToolRule(action pons.Permission, reasonCode string, kinds ...string) Rule {
+	return Rule{Action: action, ReasonCode: reasonCode, Match: func(req pons.ToolCallStartInput) bool {
 		return slices.ContainsFunc(kinds, func(kind string) bool {
 			return kind == "*" || kind == string(req.Action.Kind)
 		})
@@ -76,7 +76,7 @@ func (p Policy) Setup(c *pons.Core) error {
 			return fmt.Errorf("actionpolicy: rule %d has no matcher", i)
 		}
 		switch rule.Action {
-		case pons.DispositionDeny, pons.DispositionAsk, pons.DispositionAllow:
+		case pons.PermissionDeny, pons.PermissionAsk, pons.PermissionAllow:
 		default:
 			return fmt.Errorf("actionpolicy: rule %d has invalid action %q", i, rule.Action)
 		}
@@ -92,19 +92,22 @@ func (p Policy) Setup(c *pons.Core) error {
 	return c.AddHooks(pons.Hooks{OnToolCallStart: p.onToolCallStart})
 }
 
-func (p Policy) onToolCallStart(ctx context.Context, event *pons.ToolCallStartEvent) error {
-	decision, err := p.decide(ctx, *event)
-	event.Decision = decision
-	return err
+func (p Policy) onToolCallStart(ctx context.Context, in pons.ToolCallStartInput) (pons.ToolCallStartOutput, error) {
+	decision, err := p.decide(ctx, in)
+	return pons.ToolCallStartOutput{
+		Permission: decision.Permission,
+		Reason:     decision.Reason,
+		Assessment: decision.Assessment,
+	}, err
 }
 
-func (p Policy) decide(ctx context.Context, req pons.ToolCallStartEvent) (pons.ActionDecision, error) {
-	for _, action := range []pons.ActionDisposition{
-		pons.DispositionDeny, pons.DispositionAsk, pons.DispositionAllow,
+func (p Policy) decide(ctx context.Context, req pons.ToolCallStartInput) (pons.PermissionDecision, error) {
+	for _, action := range []pons.Permission{
+		pons.PermissionDeny, pons.PermissionAsk, pons.PermissionAllow,
 	} {
 		for _, rule := range p.Rules {
 			if rule.Action == action && rule.Match(req) {
-				return pons.ActionDecision{Action: action, ReasonCode: rule.ReasonCode}, nil
+				return pons.PermissionDecision{Permission: action, Reason: rule.ReasonCode}, nil
 			}
 		}
 	}
@@ -120,23 +123,23 @@ func (p Policy) decide(ctx context.Context, req pons.ToolCallStartEvent) (pons.A
 			}
 			continue
 		}
-		decision := pons.ActionDecision{
-			Action:     pons.DispositionAsk,
-			Assessment: assessment,
-			ReasonCode: "classifier_review",
+		decision := pons.PermissionDecision{
+			Permission: pons.PermissionAsk,
+			Reason:     "classifier_review",
+			Assessment: &assessment,
 		}
 		if assessment.Risk == "safe" && assessment.Confidence >= threshold {
 			if assessment.ProbabilityConfidence || p.AllowGeneratedConfidence {
-				decision.Action = pons.DispositionAllow
-				decision.ReasonCode = "classifier_safe"
+				decision.Permission = pons.PermissionAllow
+				decision.Reason = "classifier_safe"
 			} else {
-				decision.ReasonCode = "classifier_generated_confidence"
+				decision.Reason = "classifier_generated_confidence"
 			}
 		}
 		return decision, nil
 	}
 	if len(p.Classifiers) == 0 {
-		return pons.ActionDecision{Action: pons.DispositionAsk, ReasonCode: "no_matching_rule"}, nil
+		return pons.PermissionDecision{Permission: pons.PermissionAsk, Reason: "no_matching_rule"}, nil
 	}
-	return pons.ActionDecision{Action: pons.DispositionAsk, ReasonCode: "classifier_unavailable"}, nil
+	return pons.PermissionDecision{Permission: pons.PermissionAsk, Reason: "classifier_unavailable"}, nil
 }

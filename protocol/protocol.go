@@ -178,7 +178,10 @@ type Observation struct {
 	Workspace string    `json:"workspace"`
 	Platform  string    `json:"platform,omitempty"` // execution GOOS/GOARCH; empty means host-local
 	History   []TurnLog `json:"history,omitempty"`
-	Now       time.Time `json:"now"`
+	// Context is host-supplied guidance for this turn only, such as a hook's
+	// additional context. Brains present it to the model as untrusted notes.
+	Context []string  `json:"context,omitempty"`
+	Now     time.Time `json:"now"`
 }
 
 // TurnLog is one completed round-trip (response + results). Actions contains the

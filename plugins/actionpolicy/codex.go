@@ -34,7 +34,7 @@ func NewCodexClassifier(client llm.Client, model string, timeout time.Duration) 
 	return &CodexClassifier{client: client, model: model, timeout: timeout}, nil
 }
 
-func (c *CodexClassifier) Assess(ctx context.Context, req pons.ToolCallStartEvent) (pons.ActionAssessment, error) {
+func (c *CodexClassifier) Assess(ctx context.Context, req pons.ToolCallStartInput) (pons.ActionAssessment, error) {
 	state, err := json.Marshal(classifierState(req))
 	if err != nil {
 		return pons.ActionAssessment{}, fmt.Errorf("actionpolicy: encode classifier state: %w", err)

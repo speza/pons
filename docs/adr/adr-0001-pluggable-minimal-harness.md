@@ -103,12 +103,11 @@ and end, turn end, finish, stopped, and exhausted); a checked event sink can
 fail the run before the next side effect. Tool calls within a turn execute
 concurrently and are recorded in call order, as specified by ADR-0006.
 
-Typed plugin hooks cover agent, agent-turn, and tool-call phases. They are
-observers except `OnToolCallStart`, which allows, asks, or denies a call, and
-`OnToolCallEnd`, which may change the model-visible result. `OnToolCallEnd`
-reports every recorded outcome, including denied calls, which never execute.
-Hooks cannot rewrite the brain's message, history, response, or tool
-arguments, so a stateful brain's transcript always matches what ran.
+Typed plugin hooks cover agent, agent-turn, permission, and tool-call phases.
+Every hook takes an Input and returns an Output with a shared envelope (stop,
+system message, additional context) plus at most one decision, as specified
+by ADR-0014. When `OnToolCallStart` updates a call's arguments, a stateful
+brain is reconciled so its transcript matches what ran.
 
 The shipped LLM brain makes one provider call per turn, discovers the schemas
 registered in `Core`, converts tool calls to `Action` values, and treats a

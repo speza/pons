@@ -48,7 +48,7 @@ func TestActionPolicyPreflightAndOrderedResults(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, req *ToolCallStartEvent) error {
+	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, req ToolCallStartInput) (ToolCallStartOutput, error) {
 		record("policy:" + req.Action.ID)
 		if req.Message != "goal" || req.Workspace != "/workspace" || req.Platform != "linux/amd64" ||
 			req.Environment.Provider != "sandbox" || req.Environment.Network != "disabled" || req.Tool == nil ||
@@ -56,17 +56,15 @@ func TestActionPolicyPreflightAndOrderedResults(t *testing.T) {
 			t.Errorf("incomplete action policy request: %+v", req)
 		}
 		if req.Action.ID == "second" {
-			req.Decision = ActionDecision{Action: DispositionAsk, ReasonCode: "needs_review"}
-			return nil
+			return ToolCallStartOutput{Permission: PermissionAsk, Reason: "needs_review"}, nil
 		}
-		req.Decision.Action = DispositionAllow
-		return nil
+		return ToolCallStartOutput{Permission: PermissionAllow}, nil
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.SetApprovalHandler(func(_ context.Context, req ApprovalRequest) (ActionDisposition, error) {
+	if err := c.SetApprovalHandler(func(_ context.Context, req PermissionRequestInput) (Permission, error) {
 		record("approve:" + req.Action.ID)
-		return DispositionDeny, nil
+		return PermissionDeny, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +72,7 @@ func TestActionPolicyPreflightAndOrderedResults(t *testing.T) {
 	c.OnEvent(func(e Event) {
 		switch e.Type {
 		case EventActionDecision:
-			decided = append(decided, e.Action.ID+":"+string(e.Decision.Action))
+			decided = append(decided, e.Action.ID+":"+string(e.Decision.Permission))
 		case EventActionStart:
 			started = append(started, e.Action.ID)
 		case EventActionEnd:
@@ -124,15 +122,14 @@ func TestAllowedDecisionReasonIsNotDenial(t *testing.T) {
 		}}); err != nil {
 			t.Fatal(err)
 		}
-		if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, req *ToolCallStartEvent) error {
-			req.Decision = ActionDecision{Action: DispositionAllow, ReasonCode: tt.input}
-			return nil
+		if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, req ToolCallStartInput) (ToolCallStartOutput, error) {
+			return ToolCallStartOutput{Permission: PermissionAllow, Reason: tt.input}, nil
 		}}); err != nil {
 			t.Fatal(err)
 		}
 		c.OnEvent(func(e Event) {
-			if e.Type == EventActionDecision && e.Decision.ReasonCode != tt.want {
-				t.Errorf("allowed decision has reason %q, want %q", e.Decision.ReasonCode, tt.want)
+			if e.Type == EventActionDecision && e.Decision.Reason != tt.want {
+				t.Errorf("allowed decision has reason %q, want %q", e.Decision.Reason, tt.want)
 			}
 		})
 		if _, err := c.Run(context.Background(), "goal"); err != nil {
@@ -158,10 +155,9 @@ func TestActionPolicyReceivesRecentConversationAndActions(t *testing.T) {
 		t.Fatal(err)
 	}
 	var seen [][]ActionContextItem
-	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, req *ToolCallStartEvent) error {
+	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, req ToolCallStartInput) (ToolCallStartOutput, error) {
 		seen = append(seen, req.RecentContext)
-		req.Decision.Action = DispositionAllow
-		return nil
+		return ToolCallStartOutput{Permission: PermissionAllow}, nil
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -205,18 +201,17 @@ func TestProjectionFailureCannotBypassHardDeny(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, req *ToolCallStartEvent) error {
+	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, req ToolCallStartInput) (ToolCallStartOutput, error) {
 		if !req.ResourceError {
 			t.Error("policy did not see projection failure")
 		}
-		req.Decision = ActionDecision{Action: DispositionDeny, ReasonCode: "hard_rule"}
-		return nil
+		return ToolCallStartOutput{Permission: PermissionDeny, Reason: "hard_rule"}, nil
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.SetApprovalHandler(func(context.Context, ApprovalRequest) (ActionDisposition, error) {
+	if err := c.SetApprovalHandler(func(context.Context, PermissionRequestInput) (Permission, error) {
 		t.Fatal("hard deny reached approval")
-		return DispositionAllow, nil
+		return PermissionAllow, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -232,30 +227,26 @@ func TestProjectionFailureCannotBypassHardDeny(t *testing.T) {
 func TestActionPolicyFailuresFailClosed(t *testing.T) {
 	tests := []struct {
 		name       string
-		policy     func(context.Context, *ToolCallStartEvent) error
+		policy     func(context.Context, ToolCallStartInput) (ToolCallStartOutput, error)
 		approver   ApprovalHandler
 		wantReason string
 	}{
-		{"ask without approver", func(_ context.Context, event *ToolCallStartEvent) error {
-			event.Decision.Action = DispositionAsk
-			return nil
+		{"ask without approver", func(context.Context, ToolCallStartInput) (ToolCallStartOutput, error) {
+			return ToolCallStartOutput{Permission: PermissionAsk}, nil
 		}, nil, "approval_required"},
-		{"classifier error", func(context.Context, *ToolCallStartEvent) error {
-			return errors.New("secret classifier failure")
+		{"classifier error", func(context.Context, ToolCallStartInput) (ToolCallStartOutput, error) {
+			return ToolCallStartOutput{}, errors.New("secret classifier failure")
 		}, nil, "approval_required"},
-		{"invalid decision", func(_ context.Context, event *ToolCallStartEvent) error {
-			event.Decision.Action = "yes"
-			return nil
+		{"invalid decision", func(context.Context, ToolCallStartInput) (ToolCallStartOutput, error) {
+			return ToolCallStartOutput{Permission: "yes"}, nil
 		}, nil, "approval_required"},
-		{"invalid approval", func(_ context.Context, event *ToolCallStartEvent) error {
-			event.Decision.Action = DispositionAsk
-			return nil
-		}, func(context.Context, ApprovalRequest) (ActionDisposition, error) {
-			return DispositionAsk, nil
+		{"invalid approval", func(context.Context, ToolCallStartInput) (ToolCallStartOutput, error) {
+			return ToolCallStartOutput{Permission: PermissionAsk}, nil
+		}, func(context.Context, PermissionRequestInput) (Permission, error) {
+			return PermissionAsk, nil
 		}, "invalid_approval"},
-		{"unsafe reason", func(_ context.Context, event *ToolCallStartEvent) error {
-			event.Decision = ActionDecision{Action: DispositionDeny, ReasonCode: "private key: abc"}
-			return nil
+		{"unsafe reason", func(context.Context, ToolCallStartInput) (ToolCallStartOutput, error) {
+			return ToolCallStartOutput{Permission: PermissionDeny, Reason: "private key: abc"}, nil
 		}, nil, "tool_call_denied"},
 	}
 	for _, tt := range tests {
@@ -294,13 +285,13 @@ func TestActionPolicyFailuresFailClosed(t *testing.T) {
 func TestToolCallStartHooksCombineWithoutLastWins(t *testing.T) {
 	tests := []struct {
 		name      string
-		decisions []ActionDecision
+		decisions []PermissionDecision
 		wantRun   bool
 		wantError string
 	}{
-		{"ask beats later allow", []ActionDecision{{Action: DispositionAsk}, {Action: DispositionAllow}}, false, "approval_required"},
-		{"deny beats earlier allow", []ActionDecision{{Action: DispositionAllow}, {Action: DispositionDeny, ReasonCode: "hard_rule"}}, false, "hard_rule"},
-		{"allow when all allow", []ActionDecision{{Action: DispositionAllow}, {Action: DispositionAllow}}, true, ""},
+		{"ask beats later allow", []PermissionDecision{{Permission: PermissionAsk}, {Permission: PermissionAllow}}, false, "approval_required"},
+		{"deny beats earlier allow", []PermissionDecision{{Permission: PermissionAllow}, {Permission: PermissionDeny, Reason: "hard_rule"}}, false, "hard_rule"},
+		{"allow when all allow", []PermissionDecision{{Permission: PermissionAllow}, {Permission: PermissionAllow}}, true, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -316,9 +307,8 @@ func TestToolCallStartHooksCombineWithoutLastWins(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, decision := range tt.decisions {
-				if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, event *ToolCallStartEvent) error {
-					event.Decision = decision
-					return nil
+				if err := c.AddHooks(Hooks{OnToolCallStart: func(context.Context, ToolCallStartInput) (ToolCallStartOutput, error) {
+					return ToolCallStartOutput{Permission: decision.Permission, Reason: decision.Reason}, nil
 				}}); err != nil {
 					t.Fatal(err)
 				}
@@ -348,19 +338,17 @@ func TestToolCallStartHooksCannotChangeExecutedArguments(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, req *ToolCallStartEvent) error {
+	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, req ToolCallStartInput) (ToolCallStartOutput, error) {
 		copy(req.Action.Args, []byte(`{"command":"evil"}`))
-		req.Decision.Action = DispositionAllow
-		return nil
+		return ToolCallStartOutput{Permission: PermissionAllow}, nil
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, req *ToolCallStartEvent) error {
+	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, req ToolCallStartInput) (ToolCallStartOutput, error) {
 		if string(req.Action.Args) != `{"command":"safe"}` {
 			t.Errorf("later hook saw mutated arguments: %s", req.Action.Args)
 		}
-		req.Decision.Action = DispositionAllow
-		return nil
+		return ToolCallStartOutput{Permission: PermissionAllow}, nil
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -380,16 +368,15 @@ func TestRepeatedDenialSkipsApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	policyChecks, approvals := 0, 0
-	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, event *ToolCallStartEvent) error {
+	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, event ToolCallStartInput) (ToolCallStartOutput, error) {
 		policyChecks++
-		event.Decision.Action = DispositionAsk
-		return nil
+		return ToolCallStartOutput{Permission: PermissionAsk}, nil
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.SetApprovalHandler(func(context.Context, ApprovalRequest) (ActionDisposition, error) {
+	if err := c.SetApprovalHandler(func(context.Context, PermissionRequestInput) (Permission, error) {
 		approvals++
-		return DispositionDeny, nil
+		return PermissionDeny, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -418,15 +405,15 @@ func TestPreflightDecidesCallsConcurrently(t *testing.T) {
 	}
 	var arrived sync.WaitGroup
 	arrived.Add(2)
-	if err := c.AddHooks(Hooks{OnToolCallStart: func(context.Context, *ToolCallStartEvent) error {
+	if err := c.AddHooks(Hooks{OnToolCallStart: func(context.Context, ToolCallStartInput) (ToolCallStartOutput, error) {
 		arrived.Done()
 		done := make(chan struct{})
 		go func() { arrived.Wait(); close(done) }()
 		select {
 		case <-done:
-			return nil
+			return ToolCallStartOutput{}, nil
 		case <-time.After(5 * time.Second):
-			return errors.New("start hooks ran one at a time")
+			return ToolCallStartOutput{}, errors.New("start hooks ran one at a time")
 		}
 	}}); err != nil {
 		t.Fatal(err)
@@ -453,15 +440,14 @@ func TestHookErrorCannotWeakenDeny(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, event *ToolCallStartEvent) error {
-		event.Decision = ActionDecision{Action: DispositionDeny, ReasonCode: "hard_rule"}
-		return errors.New("audit write failed")
+	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, event ToolCallStartInput) (ToolCallStartOutput, error) {
+		return ToolCallStartOutput{Permission: PermissionDeny, Reason: "hard_rule"}, errors.New("audit write failed")
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.SetApprovalHandler(func(context.Context, ApprovalRequest) (ActionDisposition, error) {
+	if err := c.SetApprovalHandler(func(context.Context, PermissionRequestInput) (Permission, error) {
 		t.Fatal("deny reached approval")
-		return DispositionAllow, nil
+		return PermissionAllow, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -471,5 +457,158 @@ func TestHookErrorCannotWeakenDeny(t *testing.T) {
 	}
 	if got := result.History[0].Results[0].Error; !strings.Contains(got, "hard_rule") {
 		t.Fatalf("denial reason: %s", got)
+	}
+}
+
+func TestUpdatedInputIsRecheckedAndRecorded(t *testing.T) {
+	c := New()
+	setBrain(t, c, &continueBrain{fakeBrain{turns: [][]protocol.Action{
+		{{ID: "a", Kind: "run", Args: protocol.MustArgsJSON(map[string]string{"value": "original"})}},
+		{Finish("done")},
+	}}})
+	var executed string
+	if err := c.AddTool("run", ToolDef{Handler: func(_ context.Context, a protocol.Action) (protocol.ToolResult, error) {
+		executed, _ = protocol.StringArg(a.Args, "value")
+		return protocol.ToolResult{OK: true}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var checked []string
+	for _, hook := range []func(string) ToolCallStartOutput{
+		func(value string) ToolCallStartOutput {
+			if value == "original" {
+				return ToolCallStartOutput{UpdatedInput: protocol.MustArgsJSON(map[string]string{"value": "changed"})}
+			}
+			return ToolCallStartOutput{}
+		},
+		func(value string) ToolCallStartOutput {
+			checked = append(checked, value)
+			return ToolCallStartOutput{}
+		},
+	} {
+		if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, in ToolCallStartInput) (ToolCallStartOutput, error) {
+			value, err := protocol.StringArg(in.Action.Args, "value")
+			return hook(value), err
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var recorded string
+	c.OnEvent(func(e Event) {
+		if e.Type == EventAssistantResponse {
+			recorded, _ = protocol.StringArg(e.Actions[0].Args, "value")
+		}
+	})
+	result, err := c.Run(context.Background(), "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executed != "changed" || recorded != "changed" || !reflect.DeepEqual(checked, []string{"changed"}) {
+		t.Fatalf("executed=%q recorded=%q checked=%v", executed, recorded, checked)
+	}
+	if got, _ := protocol.StringArg(result.History[0].Actions[0].Args, "value"); got != "changed" {
+		t.Fatalf("history args = %q", got)
+	}
+}
+
+func TestInvalidOrEndlessUpdatesAreDenied(t *testing.T) {
+	for name, update := range map[string]func(int) json.RawMessage{
+		"non-object": func(int) json.RawMessage { return json.RawMessage(`[]`) },
+		"endless": func(n int) json.RawMessage {
+			return protocol.MustArgsJSON(map[string]int{"n": n + 1})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := New()
+			setBrain(t, c, &continueBrain{fakeBrain{turns: [][]protocol.Action{
+				{{ID: "a", Kind: "run", Args: json.RawMessage(`{"n":0}`)}}, {Finish("done")},
+			}}})
+			if err := c.AddTool("run", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+				t.Fatal("updated call ran")
+				return protocol.ToolResult{}, nil
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, in ToolCallStartInput) (ToolCallStartOutput, error) {
+				var args struct{ N int }
+				_ = json.Unmarshal(in.Action.Args, &args)
+				return ToolCallStartOutput{UpdatedInput: update(args.N)}, nil
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			result, err := c.Run(context.Background(), "goal")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := result.History[0].Results[0]; got.OK {
+				t.Fatalf("result = %+v", got)
+			}
+		})
+	}
+}
+
+func TestPermissionRequestHooksResolveAsk(t *testing.T) {
+	tests := []struct {
+		name     string
+		answers  []Permission
+		hookErr  bool
+		approver Permission
+		wantRun  bool
+		reason   string
+	}{
+		{"hook allows", []Permission{PermissionAllow}, false, "", true, ""},
+		{"deny beats allow", []Permission{PermissionAllow, PermissionDeny}, false, "", false, "approval_denied"},
+		{"hook error denies", []Permission{PermissionAllow}, true, "", false, "permission_hook_failed"},
+		{"unresolved goes to approver", []Permission{""}, false, PermissionAllow, true, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := New()
+			setBrain(t, c, &continueBrain{fakeBrain{turns: [][]protocol.Action{
+				{{ID: "a", Kind: "run"}}, {Finish("done")},
+			}}})
+			ran := false
+			if err := c.AddTool("run", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+				ran = true
+				return protocol.ToolResult{OK: true}, nil
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.AddHooks(Hooks{OnToolCallStart: func(context.Context, ToolCallStartInput) (ToolCallStartOutput, error) {
+				return ToolCallStartOutput{Permission: PermissionAsk, Reason: "needs_review"}, nil
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			for _, answer := range tt.answers {
+				if err := c.AddHooks(Hooks{OnPermissionRequest: func(_ context.Context, in PermissionRequestInput) (PermissionRequestOutput, error) {
+					if in.Decision.Permission != PermissionAsk || in.Decision.Reason != "needs_review" || in.Action.ID != "a" {
+						t.Errorf("permission request: %+v", in)
+					}
+					if tt.hookErr {
+						return PermissionRequestOutput{}, errors.New("prompt failed")
+					}
+					return PermissionRequestOutput{Permission: answer}, nil
+				}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.approver != "" {
+				if err := c.SetApprovalHandler(func(_ context.Context, in PermissionRequestInput) (Permission, error) {
+					if in.Decision.Reason != "needs_review" {
+						t.Errorf("approval request: %+v", in)
+					}
+					return tt.approver, nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result, err := c.Run(context.Background(), "goal")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ran != tt.wantRun || !strings.Contains(result.History[0].Results[0].Error, tt.reason) {
+				t.Fatalf("ran=%v result=%+v", ran, result.History[0].Results[0])
+			}
+		})
 	}
 }

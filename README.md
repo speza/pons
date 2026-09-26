@@ -60,20 +60,34 @@ planned order. A text response, `finish` action, or `MaxTurns` ends a run;
 `OnEvent` can stream lifecycle events to a UI or audit consumer. The LLM brain
 can compact old context without changing the canonical runtime history.
 
-Trusted plugins register lifecycle callbacks through `Core.AddHooks(pons.Hooks{...})`:
+Trusted plugins register lifecycle hooks through `Core.AddHooks(pons.Hooks{...})`:
 `OnAgentStart`, `OnAgentTurnStart`, `OnAssistantResponse`, `OnToolCallStart`,
-`OnToolCallEnd`, `OnAgentTurnEnd`, and `OnAgentEnd`. A turn is one brain
-response and its planned tool calls; a run can contain several turns. Hooks
-are observers with two exceptions: `OnToolCallStart` sets the call's allow,
-ask, or deny `Decision`, and `OnToolCallEnd` may change the model-visible
-result. `OnToolCallEnd` reports every recorded outcome; for a denied call it
-carries the decision, and the call never executes. `OnAgentTurnEnd` and
-`OnAgentEnd` always close an opened turn or run, receive any failure as `Err`,
-and still run after the run's context is canceled.
-Plugins may implement any subset of the hooks. Callbacks run in registration
-order and their errors are collected with `errors.Join`; a hook error stops
-the run. Tool-call-start errors instead request approval, unless that hook
-also denied the call.
+`OnPermissionRequest`, `OnToolCallEnd`, `OnAgentTurnEnd`, and `OnAgentEnd`. A
+turn is one brain response and its planned tool calls; a run can contain
+several turns. Every hook takes an `Input` and returns an `Output` embedding
+`HookOutput`, so any hook can stop the run (`Stop`), show the user a
+`SystemMessage`, or give the brain `AdditionalContext` on its next turn:
+
+```go
+core.AddHooks(pons.Hooks{
+	OnToolCallStart: func(ctx context.Context, in pons.ToolCallStartInput) (pons.ToolCallStartOutput, error) {
+		if in.Action.Kind != "bash" {
+			return pons.ToolCallStartOutput{}, nil // no objection
+		}
+		return pons.ToolCallStartOutput{Permission: pons.PermissionAsk, Reason: "shell_review"}, nil
+	},
+})
+```
+
+Some outputs add one decision: `OnToolCallStart` returns allow, ask, or deny
+and may replace the call's arguments with `UpdatedInput` (every start hook
+then rechecks the new call); `OnPermissionRequest` resolves an ask;
+`OnToolCallEnd` may replace the result the brain sees and also reports denied
+calls; `OnAgentEnd` may `Continue` a finished run. Hooks run in registration
+order. A hook error is reported as a `hook_error` event and never stops the
+run by itself; deciding hooks fail closed (a start hook error asks, a
+permission hook error denies, a tool-end hook error withholds the result).
+`OnAgentTurnEnd` and `OnAgentEnd` still run when the run fails or is stopped.
 
 ### Action policy
 
@@ -82,8 +96,9 @@ An application can install the built-in policy plugin with
 `core.AddHooks(pons.Hooks{OnToolCallStart: check})`, and supply an exact-action approval callback
 with `core.SetApprovalHandler(...)`. The core decides every tool call in a turn
 before starting any handler: start hooks for different calls run concurrently,
-then asks are resolved one at a time in call order. Deny outranks ask, which
-outranks allow, whatever order the hooks run in.
+then asks are resolved one at a time in call order, first by
+`OnPermissionRequest` hooks and then by the approval handler. Deny outranks
+ask, which outranks allow, whatever order the hooks run in.
 A hard deny never reaches approval. An ask without an approval handler is
 denied. Denials appear as unsuccessful
 tool results, so the brain can try a different action. Repeated identical
@@ -425,12 +440,10 @@ plugin's settings without activating it. The `external` plugin accepts absolute
 manifest paths. An explicit `-plugin` flag replaces configured hands plugins;
 installed host hook plugins stay enabled. Only host hook plugins accept a
 `config` object; a non-empty config on a hands plugin fails startup. External
-host hooks are an untrusted boundary: they receive bounded event summaries,
-including recent conversation context for `on_tool_call_start`, but no Core
-handle or inherited credentials. Every external hook is an observer except
-`on_tool_call_start`, whose decision can add ask or deny but never overrides
-another plugin's. Tool-start hook failures request approval; without an
-approval handler, the action is denied. Other hook failures stop the run.
+host hooks implement the same hooks over JSON with the same effects, and may
+declare `tools` to receive only those tool kinds. Like Claude Code's hooks they
+are trusted code you install, but they still receive no Core handle or
+inherited credentials, and their inputs omit run history and cap tool output.
 See [the external policy example](examples/external-policy/README.md) for an
 installable hook provider.
 

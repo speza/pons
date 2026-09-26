@@ -14,6 +14,7 @@ const (
 	HookAgentTurnStart    = "on_agent_turn_start"
 	HookAssistantResponse = "on_assistant_response"
 	HookToolCallStart     = "on_tool_call_start"
+	HookPermissionRequest = "on_permission_request"
 	HookToolCallEnd       = "on_tool_call_end"
 	HookAgentTurnEnd      = "on_agent_turn_end"
 	HookAgentEnd          = "on_agent_end"
@@ -21,8 +22,8 @@ const (
 
 func validHookName(name string) bool {
 	switch name {
-	case HookAgentStart, HookAgentTurnStart, HookAssistantResponse,
-		HookToolCallStart, HookToolCallEnd, HookAgentTurnEnd, HookAgentEnd:
+	case HookAgentStart, HookAgentTurnStart, HookAssistantResponse, HookToolCallStart,
+		HookPermissionRequest, HookToolCallEnd, HookAgentTurnEnd, HookAgentEnd:
 		return true
 	default:
 		return false
@@ -30,13 +31,13 @@ func validHookName(name string) bool {
 }
 
 // maxHookText bounds each tool output or error string sent to a hook, so
-// event size does not grow with tool output.
+// hook inputs do not grow with tool output.
 const maxHookText = 16 << 10
 
-// HookPlugin adapts an explicitly installed host-side hook provider. The
-// executable is an untrusted boundary: it receives bounded event summaries
-// but no host credentials or Core handle, every hook except on_tool_call_start
-// is an observer, and its tool-call decisions can only add Ask or Deny.
+// HookPlugin adapts an explicitly installed host-side hook provider. Like a
+// Go plugin's hooks, it is trusted user code: its outputs are applied with
+// the same effect. The process still receives no host credentials or Core
+// handle, and its inputs omit run history and bound tool output.
 type HookPlugin struct{ host *Host }
 
 func (p *HookPlugin) Host() *Host { return p.host }
@@ -53,42 +54,6 @@ func NewHooks(manifestPath string, cfg HostConfig) (*HookPlugin, error) {
 	}
 	return &HookPlugin{host: host}, nil
 }
-
-// Wire events are explicit summaries rather than core structs, so history
-// and tool output never make a hook frame grow with the run.
-type (
-	hookTurnStart struct {
-		Turn    int
-		Message string
-	}
-	hookToolCallEnd struct {
-		Turn     int
-		Action   protocol.Action
-		Tool     *pons.ToolSpec
-		Result   protocol.ToolResult
-		Decision *pons.ActionDecision
-	}
-	hookToolOutcome struct {
-		ActionID string
-		Kind     string
-		OK       bool
-		Error    string
-	}
-	hookTurnEnd struct {
-		Turn         int
-		Actions      []protocol.Action
-		Results      []hookToolOutcome
-		ErrorMessage string
-	}
-	hookAgentEnd struct {
-		Answer       string
-		Turns        int
-		Exhausted    bool
-		Reason       pons.AgentEndReason
-		StopReason   string
-		ErrorMessage string
-	}
-)
 
 func boundText(text string) string {
 	if len(text) <= maxHookText {
@@ -116,9 +81,10 @@ func errorMessage(err error) string {
 	return boundText(err.Error())
 }
 
-func (p *HookPlugin) observe(ctx context.Context, name string, event any) error {
-	var patch struct{}
-	return p.host.CallHook(ctx, name, event, &patch)
+func callHook[Out any](ctx context.Context, p *HookPlugin, name string, in any) (Out, error) {
+	var out Out
+	err := p.host.CallHook(ctx, name, in, &out)
+	return out, err
 }
 
 func (p *HookPlugin) Setup(core *pons.Core) error {
@@ -136,58 +102,66 @@ func (p *HookPlugin) Setup(core *pons.Core) error {
 
 	var hooks pons.Hooks
 	if registered[HookAgentStart] {
-		hooks.OnAgentStart = func(ctx context.Context, e *pons.AgentStartEvent) error {
-			return p.observe(ctx, HookAgentStart, e)
+		hooks.OnAgentStart = func(ctx context.Context, in pons.AgentStartInput) (pons.AgentStartOutput, error) {
+			return callHook[pons.AgentStartOutput](ctx, p, HookAgentStart, in)
 		}
 	}
 	if registered[HookAgentTurnStart] {
-		hooks.OnAgentTurnStart = func(ctx context.Context, e *pons.AgentTurnStartEvent) error {
-			return p.observe(ctx, HookAgentTurnStart, hookTurnStart{Turn: e.Observation.Turn, Message: e.Observation.Message})
+		hooks.OnAgentTurnStart = func(ctx context.Context, in pons.AgentTurnStartInput) (pons.AgentTurnStartOutput, error) {
+			in.Observation.History = nil
+			return callHook[pons.AgentTurnStartOutput](ctx, p, HookAgentTurnStart, in)
 		}
 	}
 	if registered[HookAssistantResponse] {
-		hooks.OnAssistantResponse = func(ctx context.Context, e *pons.AssistantResponseEvent) error {
-			return p.observe(ctx, HookAssistantResponse, e)
+		hooks.OnAssistantResponse = func(ctx context.Context, in pons.AssistantResponseInput) (pons.AssistantResponseOutput, error) {
+			return callHook[pons.AssistantResponseOutput](ctx, p, HookAssistantResponse, in)
 		}
 	}
 	if registered[HookToolCallStart] {
-		hooks.OnToolCallStart = func(ctx context.Context, e *pons.ToolCallStartEvent) error {
-			var patch struct{ Decision *pons.ActionDecision }
-			if err := p.host.CallHook(ctx, HookToolCallStart, e, &patch); err != nil {
-				return err
+		hooks.OnToolCallStart = func(ctx context.Context, in pons.ToolCallStartInput) (pons.ToolCallStartOutput, error) {
+			if !p.host.HookWantsTool(string(in.Action.Kind)) {
+				return pons.ToolCallStartOutput{}, nil
 			}
-			if patch.Decision != nil {
-				// Assessments are classifier evidence owned by trusted plugins.
-				e.Decision = pons.ActionDecision{Action: patch.Decision.Action, ReasonCode: patch.Decision.ReasonCode}
+			return callHook[pons.ToolCallStartOutput](ctx, p, HookToolCallStart, in)
+		}
+	}
+	if registered[HookPermissionRequest] {
+		hooks.OnPermissionRequest = func(ctx context.Context, in pons.PermissionRequestInput) (pons.PermissionRequestOutput, error) {
+			if !p.host.HookWantsTool(string(in.Action.Kind)) {
+				return pons.PermissionRequestOutput{}, nil
 			}
-			return nil
+			return callHook[pons.PermissionRequestOutput](ctx, p, HookPermissionRequest, in)
 		}
 	}
 	if registered[HookToolCallEnd] {
-		hooks.OnToolCallEnd = func(ctx context.Context, e *pons.ToolCallEndEvent) error {
-			return p.observe(ctx, HookToolCallEnd, hookToolCallEnd{
-				Turn: e.Turn, Action: e.Action, Tool: e.Tool,
-				Result: boundResult(e.Result), Decision: e.Decision,
-			})
+		hooks.OnToolCallEnd = func(ctx context.Context, in pons.ToolCallEndInput) (pons.ToolCallEndOutput, error) {
+			if !p.host.HookWantsTool(string(in.Action.Kind)) {
+				return pons.ToolCallEndOutput{}, nil
+			}
+			in.Result = boundResult(in.Result)
+			return callHook[pons.ToolCallEndOutput](ctx, p, HookToolCallEnd, in)
 		}
 	}
 	if registered[HookAgentTurnEnd] {
-		hooks.OnAgentTurnEnd = func(ctx context.Context, e *pons.AgentTurnEndEvent) error {
-			event := hookTurnEnd{Turn: e.Turn, Actions: e.Log.Actions, ErrorMessage: errorMessage(e.Err)}
-			for _, result := range e.Log.Results {
-				event.Results = append(event.Results, hookToolOutcome{
-					ActionID: result.ActionID, Kind: result.Kind, OK: result.OK, Error: boundText(result.Error),
-				})
+		hooks.OnAgentTurnEnd = func(ctx context.Context, in pons.AgentTurnEndInput) (pons.AgentTurnEndOutput, error) {
+			results := make([]protocol.ToolResult, len(in.Log.Results))
+			for i, result := range in.Log.Results {
+				results[i] = boundResult(result)
 			}
-			return p.observe(ctx, HookAgentTurnEnd, event)
+			in.Log.Results = results
+			return callHook[pons.AgentTurnEndOutput](ctx, p, HookAgentTurnEnd, struct {
+				pons.AgentTurnEndInput
+				Error string `json:"error,omitempty"`
+			}{in, errorMessage(in.Err)})
 		}
 	}
 	if registered[HookAgentEnd] {
-		hooks.OnAgentEnd = func(ctx context.Context, e *pons.AgentEndEvent) error {
-			return p.observe(ctx, HookAgentEnd, hookAgentEnd{
-				Answer: e.Result.Answer, Turns: e.Result.Turns, Exhausted: e.Result.Exhausted,
-				Reason: e.Reason, StopReason: e.StopReason, ErrorMessage: errorMessage(e.Err),
-			})
+		hooks.OnAgentEnd = func(ctx context.Context, in pons.AgentEndInput) (pons.AgentEndOutput, error) {
+			in.Result.History = nil
+			return callHook[pons.AgentEndOutput](ctx, p, HookAgentEnd, struct {
+				pons.AgentEndInput
+				Error string `json:"error,omitempty"`
+			}{in, errorMessage(in.Err)})
 		}
 	}
 	if err := core.AddHooks(hooks); err != nil {

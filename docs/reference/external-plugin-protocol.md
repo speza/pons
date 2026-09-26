@@ -313,42 +313,46 @@ action to the proxy, and the proxy routes it to the child provider.
 ### 8.1 Host hook provider
 
 A host manifest sets `"placement":"host"`. Initialization advertises only
-`hook_provider: [1]`; the plugin returns a `hook_provider/v1` capability with
-a nonempty `hooks` list. Supported names are `on_agent_start`,
-`on_agent_turn_start`, `on_assistant_response`, `on_tool_call_start`,
-`on_tool_call_end`, `on_agent_turn_end`, and `on_agent_end`. Duplicate or
-unknown names and mixed hands/host capabilities are rejected. Only advertised
-hooks are called. The host sends the manifest entry's `config` object as
-`config` in `plugin/initialize`.
+`hook_provider: [1]`; the plugin returns a `hook_provider/v1` capability:
 
-A host hook executable is an untrusted boundary. The host sends `hooks/call`
-with the `hook` name and a bounded JSON event; Go field names keep their
-capitalized form:
+```json
+{"hooks": ["on_tool_call_start", "on_tool_call_end"], "tools": ["bash", "shell"]}
+```
 
-| Hook | Event fields |
+`hooks` is nonempty and names any of `on_agent_start`, `on_agent_turn_start`,
+`on_assistant_response`, `on_tool_call_start`, `on_permission_request`,
+`on_tool_call_end`, `on_agent_turn_end`, and `on_agent_end`. The optional
+`tools` list limits the three tool hooks to those tool kinds; the host answers
+other calls itself with an empty output. Duplicate or unknown names and mixed
+hands/host capabilities are rejected. The host sends the manifest entry's
+`config` object as `config` in `plugin/initialize`.
+
+The host sends `hooks/call` with the `hook` name and the hook's `Input` as
+`event`; the plugin returns the hook's `Output` as `patch`. Both use the
+snake_case JSON of the Go types in `hooks.go` and `tool_call_start.go`. Every
+output accepts the common fields:
+
+```json
+{"stop": false, "stop_reason": "", "system_message": "", "additional_context": ""}
+```
+
+and at most these hook-specific fields:
+
+| Hook | Output fields |
 | --- | --- |
-| `on_agent_start` | `Message`, `Workspace`, `Platform` |
-| `on_agent_turn_start` | `Turn`, `Message` |
-| `on_assistant_response` | `Turn`, `Response` |
-| `on_tool_call_start` | the full `ToolCallStartEvent`, including bounded recent context |
-| `on_tool_call_end` | `Turn`, `Action`, `Tool`, `Result`, `Decision` (set when denied) |
-| `on_agent_turn_end` | `Turn`, `Actions`, `Results` (`ActionID`, `Kind`, `OK`, `Error`), `ErrorMessage` |
-| `on_agent_end` | `Answer`, `Turns`, `Exhausted`, `Reason`, `StopReason`, `ErrorMessage` |
+| `on_tool_call_start` | `permission` (`allow`, `ask`, `deny`), `reason`, `assessment`, `updated_input` |
+| `on_permission_request` | `permission` (`allow`, `deny`) |
+| `on_tool_call_end` | `result` |
+| `on_agent_end` | `continue`, `reason` |
 
-Run history is never sent, and tool output and error strings are truncated to
-16 KiB, so event size does not grow with a run.
-
-The plugin returns `{"patch":{...}}`. Every hook except `on_tool_call_start`
-is an observer and must return `{"patch":{}}`; any other field is a malformed
-patch and fails the call. `on_tool_call_start` may return
-`{"patch":{"Decision":{"Action":"ask","ReasonCode":"needs_review"}}}`. Its
-`Action` is `allow`, `ask`, or `deny`, and Core keeps the strictest decision of
-all start hooks, so an external allow never overrides another plugin's ask or
-deny. Any `Assessment` is discarded: classifier evidence belongs to trusted
-plugins. External plugins cannot approve pending calls, rewrite arguments, or
-change results. A failed tool-start call requests approval, which is denied
-when no approval handler is installed. Other hook failures stop the run. Host
-deadlines and frame/result limits apply.
+Unknown fields make the output malformed. For example, a policy can return
+`{"patch":{"permission":"ask","reason":"shell_review"}}`, and an observer
+returns `{"patch":{}}`. A failed or malformed call is reported as a
+`hook_error` event and handled as in ADR-0014: a start hook asks, a permission
+hook denies, a tool-end hook withholds the result, and other hooks are
+skipped. Error-carrying inputs (`on_agent_turn_end`, `on_agent_end`) include
+an `error` string. Inputs never include run history, and tool output and error
+strings are truncated to 16 KiB. Host deadlines and frame/result limits apply.
 
 ## 9. Security requirements
 
@@ -361,8 +365,9 @@ deadlines and frame/result limits apply.
 - Keep credentials out of the child by default; use scoped credentials or a
   broker when necessary.
 - Put an untrusted hands child inside the hands deployment's OS sandbox. Host
-  hooks are explicitly installed control-plane code and receive policy context;
-  operators must trust or separately isolate their executable.
+  hooks are explicitly installed, trusted control-plane code that can approve
+  calls and change inputs and results; operators must trust or separately
+  isolate their executable.
 - Do not allow a plugin to elevate its placement.
 
 ## 10. Implementations and tests
@@ -381,6 +386,6 @@ and protocol write failures. Both SDKs keep application logs off stdout.
 ## 11. Capability scope
 
 Runtime protocol 1 defines no external brain or session-store capability.
-The host hook capability exposes the Core hooks as bounded observers plus the
-tool-call-start decision. A new hook, event field set, or patch contract
-requires a new capability version.
+The host hook capability exposes the Core hooks with bounded inputs. Adding
+an optional output field is compatible; a new hook, a removed or retyped
+field, or a changed effect requires a new capability version.

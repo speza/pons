@@ -135,8 +135,7 @@ protocol-only stdout. A plugin may implement the protocol directly.
   deployment isolation remains explicit under ADR-0004.
 - New capabilities require a new host-side contract and adapter rather than
   adding arbitrary methods at runtime. `hook_provider/v1` exposes the Core
-  hooks as observers, plus a tool-call-start decision that can only add ask
-  or deny.
+  hooks with the same input and output contract, for trusted host plugins.
 
 ## References
 

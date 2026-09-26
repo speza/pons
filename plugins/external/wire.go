@@ -103,9 +103,12 @@ type ExecuteParams struct {
 }
 
 // HookProviderConfiguration names the hook callbacks implemented by a host
-// plugin. Each call receives one event and returns a patch to mutable fields.
+// plugin. Each call receives one hook input and returns that hook's output.
 type HookProviderConfiguration struct {
 	Hooks []string `json:"hooks"`
+	// Tools limits on_tool_call_start, on_permission_request, and
+	// on_tool_call_end to these tool kinds; omitted means every tool.
+	Tools []string `json:"tools,omitempty"`
 }
 
 type HookCallParams struct {

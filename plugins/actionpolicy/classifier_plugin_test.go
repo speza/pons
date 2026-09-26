@@ -9,7 +9,7 @@ import (
 )
 
 func TestClassifierPluginResolvesIntoPolicy(t *testing.T) {
-	classifier := ClassifierFunc(func(context.Context, pons.ToolCallStartEvent) (pons.ActionAssessment, error) {
+	classifier := ClassifierFunc(func(context.Context, pons.ToolCallStartInput) (pons.ActionAssessment, error) {
 		return pons.ActionAssessment{Risk: "safe", Confidence: 0.99, ProbabilityConfidence: true}, nil
 	})
 	core := pons.New()

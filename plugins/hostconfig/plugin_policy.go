@@ -11,9 +11,9 @@ import (
 )
 
 type actionPolicyRule struct {
-	Action     pons.ActionDisposition `json:"action"`
-	Tools      []string               `json:"tools"`
-	ReasonCode string                 `json:"reason_code,omitempty"`
+	Action     pons.Permission `json:"action"`
+	Tools      []string        `json:"tools"`
+	ReasonCode string          `json:"reason_code,omitempty"`
 }
 
 type actionPolicySettings struct {
@@ -39,7 +39,7 @@ func decodeActionPolicyPlugin(id string, enabled bool, raw json.RawMessage) (Con
 	}
 	for i, rule := range config.Rules {
 		switch rule.Action {
-		case pons.DispositionAllow, pons.DispositionAsk, pons.DispositionDeny:
+		case pons.PermissionAllow, pons.PermissionAsk, pons.PermissionDeny:
 		default:
 			return nil, fmt.Errorf("config plugins.%s.rules[%d].action must be allow, ask, or deny", id, i)
 		}

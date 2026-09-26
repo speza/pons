@@ -482,3 +482,91 @@ func TestCompactionRefreshesMemory(t *testing.T) {
 		t.Fatalf("memory blocks after compaction = %q", memories)
 	}
 }
+func TestCoreReconcilesUpdatedToolInputInBrainHistory(t *testing.T) {
+	fake := &fakeClient{responses: []Turn{
+		{Role: "assistant", Blocks: []Block{
+			Raw{Item: json.RawMessage(`{"type":"reasoning","id":"r1"}`)},
+			ToolUse{ID: "call_1", Name: "write_file", Input: map[string]any{"path": "original.txt"}},
+		}},
+		{Role: "assistant", Blocks: []Block{Text{Value: "done"}}},
+	}}
+	core := pons.New()
+	brain := newBrain(t, fake)
+	if err := core.Use(brain); err != nil {
+		t.Fatal(err)
+	}
+	var executed string
+	if err := core.AddTool("write_file", pons.ToolDef{Handler: func(_ context.Context, action protocol.Action) (protocol.ToolResult, error) {
+		path, err := protocol.StringArg(action.Args, "path")
+		executed = path
+		return protocol.ToolResult{OK: err == nil, Output: "written"}, err
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.AddHooks(pons.Hooks{OnToolCallStart: func(_ context.Context, in pons.ToolCallStartInput) (pons.ToolCallStartOutput, error) {
+		path, err := protocol.StringArg(in.Action.Args, "path")
+		if err != nil || path != "original.txt" {
+			return pons.ToolCallStartOutput{}, err
+		}
+		return pons.ToolCallStartOutput{UpdatedInput: protocol.MustArgsJSON(map[string]string{"path": "approved.txt"})}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.Run(context.Background(), "write the approved file"); err != nil {
+		t.Fatal(err)
+	}
+	if executed != "approved.txt" {
+		t.Fatalf("executed path = %q", executed)
+	}
+	if len(fake.seen) != 2 || len(fake.seen[1]) < 2 {
+		t.Fatalf("provider turns: %+v", fake.seen)
+	}
+	blocks := fake.seen[1][1].Blocks
+	if len(blocks) != 2 {
+		t.Fatalf("assistant blocks: %+v", blocks)
+	}
+	if _, ok := blocks[0].(Raw); !ok {
+		t.Fatalf("reasoning block lost: %+v", blocks)
+	}
+	call, ok := blocks[1].(ToolUse)
+	if !ok || call.ID != "call_1" || call.Input["path"] != "approved.txt" {
+		t.Fatalf("provider saw stale tool call: %+v", blocks[1])
+	}
+}
+
+func TestHookContextReachesNextModelCall(t *testing.T) {
+	fake := &fakeClient{responses: []Turn{
+		{Role: "assistant", Blocks: []Block{ToolUse{ID: "call_1", Name: "ping", Input: map[string]any{}}}},
+		{Role: "assistant", Blocks: []Block{Text{Value: "done"}}},
+	}}
+	core := pons.New()
+	if err := core.Use(newBrain(t, fake)); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.AddTool("ping", pons.ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+		return protocol.ToolResult{OK: true, Output: "pong"}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.AddHooks(pons.Hooks{OnToolCallEnd: func(context.Context, pons.ToolCallEndInput) (pons.ToolCallEndOutput, error) {
+		return pons.ToolCallEndOutput{AdditionalContext: "the ping target is staging"}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.Run(context.Background(), "ping it"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.seen) != 2 {
+		t.Fatalf("provider calls: %d", len(fake.seen))
+	}
+	last := fake.seen[1][len(fake.seen[1])-1]
+	if last.Role != "user" || len(last.Blocks) != 2 {
+		t.Fatalf("user turn: %+v", last)
+	}
+	if _, ok := last.Blocks[0].(Result); !ok {
+		t.Fatalf("tool result must come first: %+v", last.Blocks)
+	}
+	if text, ok := last.Blocks[1].(Text); !ok || !strings.Contains(text.Value, "the ping target is staging") {
+		t.Fatalf("hook context missing: %+v", last.Blocks)
+	}
+}

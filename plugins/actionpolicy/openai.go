@@ -74,7 +74,7 @@ var openAIAssessmentSchema = map[string]any{
 	"additionalProperties": false,
 }
 
-func (c *OpenAIClassifier) Assess(ctx context.Context, req pons.ToolCallStartEvent) (pons.ActionAssessment, error) {
+func (c *OpenAIClassifier) Assess(ctx context.Context, req pons.ToolCallStartInput) (pons.ActionAssessment, error) {
 	state, err := json.Marshal(classifierState(req))
 	if err != nil {
 		return pons.ActionAssessment{}, fmt.Errorf("actionpolicy: encode classifier state: %w", err)

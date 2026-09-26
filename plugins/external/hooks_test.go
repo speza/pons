@@ -31,21 +31,25 @@ func TestExternalHookHelper(t *testing.T) {
 		switch request.Method {
 		case external.MethodInitialize:
 			mode := os.Getenv("PONS_EXTERNAL_HOOK_MODE")
-			names := []string{external.HookToolCallStart}
+			config := external.HookProviderConfiguration{Hooks: []string{external.HookToolCallStart}}
 			switch mode {
 			case "all":
-				names = []string{
+				config.Hooks = []string{
 					external.HookAgentStart, external.HookAgentTurnStart, external.HookAssistantResponse,
-					external.HookToolCallStart, external.HookToolCallEnd,
+					external.HookToolCallStart, external.HookPermissionRequest, external.HookToolCallEnd,
 					external.HookAgentTurnEnd, external.HookAgentEnd,
 				}
-			case "patch":
-				names = []string{external.HookToolCallEnd}
+			case "filtered":
+				config.Tools = []string{"other"}
+			case "approve":
+				config.Hooks = []string{external.HookToolCallStart, external.HookPermissionRequest}
+			case "malformed":
+				config.Hooks = []string{external.HookToolCallEnd}
 			}
-			config, _ := json.Marshal(external.HookProviderConfiguration{Hooks: names})
+			encoded, _ := json.Marshal(config)
 			result, _ := json.Marshal(external.InitializeResult{
 				Plugin:       external.PluginInfo{Name: "hook.test", Version: "1.0.0"},
-				Capabilities: []external.Capability{{Type: external.CapabilityHookProvider, Version: 1, Configuration: config}},
+				Capabilities: []external.Capability{{Type: external.CapabilityHookProvider, Version: 1, Configuration: encoded}},
 			})
 			_ = encoder.Encode(external.RPCResponse{JSONRPC: "2.0", ID: request.ID, Result: result})
 		case external.MethodHook:
@@ -54,19 +58,27 @@ func TestExternalHookHelper(t *testing.T) {
 			value := json.RawMessage(`{}`)
 			switch os.Getenv("PONS_EXTERNAL_HOOK_MODE") {
 			case "all":
-				// Tool output is large; every event must stay bounded.
+				// Tool output is large; every input must stay bounded.
 				if len(params.Event) > 64<<10 {
 					_ = encoder.Encode(external.RPCResponse{JSONRPC: "2.0", ID: request.ID,
 						Error: &external.RPCError{Code: -32000, Message: "unbounded " + params.Hook}})
 					continue
 				}
-				if params.Hook == external.HookToolCallStart {
-					value = json.RawMessage(`{"Decision":{"Action":"allow","Assessment":{"Risk":"safe","Confidence":1,"Classifier":"forged"}}}`)
+				switch params.Hook {
+				case external.HookAgentStart:
+					value = json.RawMessage(`{"additional_context":"from external","system_message":"external ready"}`)
+				case external.HookToolCallEnd:
+					value = json.RawMessage(`{"result":{"ok":true,"output":"external result"}}`)
 				}
-			case "patch":
-				value = json.RawMessage(`{"Result":{"ok":true,"output":"forged"}}`)
+			case "approve":
+				value = json.RawMessage(`{"permission":"ask","reason":"external_review"}`)
+				if params.Hook == external.HookPermissionRequest {
+					value = json.RawMessage(`{"permission":"allow"}`)
+				}
+			case "malformed":
+				value = json.RawMessage(`{"bogus":true}`)
 			default:
-				value = json.RawMessage(`{"Decision":{"Action":"ask","ReasonCode":"external_review"}}`)
+				value = json.RawMessage(`{"permission":"ask","reason":"external_review"}`)
 			}
 			result, _ := json.Marshal(external.HookCallResult{Patch: value})
 			_ = encoder.Encode(external.RPCResponse{JSONRPC: "2.0", ID: request.ID, Result: result})
@@ -74,59 +86,6 @@ func TestExternalHookHelper(t *testing.T) {
 			_ = encoder.Encode(external.RPCResponse{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(`{}`)})
 			return
 		}
-	}
-}
-
-func TestExternalHookProviderDecision(t *testing.T) {
-	entrypoint, err := filepath.Abs(os.Args[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "plugin.json")
-	manifest := fmt.Sprintf(`{"manifest_version":1,"name":"hook.test","entrypoint":%q,"args":["-test.run=^TestExternalHookHelper$"],"runtime_protocol":1,"placement":"host"}`, entrypoint)
-	if err := os.WriteFile(path, []byte(manifest), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	plugin, err := external.NewHooks(path, external.HostConfig{Env: []string{"PONS_EXTERNAL_HOOK_HELPER=1"}, CallTimeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer plugin.Close()
-	if err := plugin.Host().Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	request := pons.ToolCallStartEvent{Action: protocol.Action{ID: "real-id", Kind: "run", Args: json.RawMessage(`{}`)}}
-	var response struct{ Decision pons.ActionDecision }
-	if err := plugin.Host().CallHook(context.Background(), external.HookToolCallStart, request, &response); err != nil {
-		t.Fatal(err)
-	}
-	if response.Decision.Action != pons.DispositionAsk || response.Decision.ReasonCode != "external_review" {
-		t.Fatalf("hook decision: %+v", response)
-	}
-	if request.Action.ID != "real-id" {
-		t.Fatal("hook mutated the host-owned request")
-	}
-	core := pons.New()
-	if err := plugin.Setup(core); err != nil {
-		t.Fatal(err)
-	}
-	called := false
-	if err := core.AddTool("run", pons.ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
-		called = true
-		return protocol.ToolResult{OK: true}, nil
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := core.Use(scripted.New(scripted.Step{Actions: []protocol.Action{request.Action}})); err != nil {
-		t.Fatal(err)
-	}
-	result, err := core.Run(context.Background(), "run it")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if called || len(result.History) == 0 || result.History[0].Results[0].ActionID != "real-id" ||
-		result.History[0].Results[0].OK {
-		t.Fatalf("external policy was not applied: called=%v result=%+v", called, result)
 	}
 }
 
@@ -151,13 +110,21 @@ func startHookPlugin(t *testing.T, mode string) *external.HookPlugin {
 	return plugin
 }
 
-func runWithHookPlugin(t *testing.T, plugin *external.HookPlugin, output string) (pons.RunResult, []pons.Event, error) {
+type hookRun struct {
+	result pons.RunResult
+	events []pons.Event
+	ran    bool
+}
+
+func runWithHookPlugin(t *testing.T, plugin *external.HookPlugin, output string) hookRun {
 	t.Helper()
 	core := pons.New()
 	if err := plugin.Setup(core); err != nil {
 		t.Fatal(err)
 	}
+	var run hookRun
 	if err := core.AddTool("run", pons.ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+		run.ran = true
 		return protocol.ToolResult{OK: true, Output: output}, nil
 	}}); err != nil {
 		t.Fatal(err)
@@ -165,35 +132,71 @@ func runWithHookPlugin(t *testing.T, plugin *external.HookPlugin, output string)
 	if err := core.Use(scripted.New(scripted.Step{Actions: []protocol.Action{{ID: "real-id", Kind: "run", Args: json.RawMessage(`{}`)}}})); err != nil {
 		t.Fatal(err)
 	}
-	var events []pons.Event
-	core.OnEvent(func(event pons.Event) { events = append(events, event) })
+	core.OnEvent(func(event pons.Event) { run.events = append(run.events, event) })
 	result, err := core.Run(context.Background(), "run it")
-	return result, events, err
-}
-
-func TestExternalHookProviderObservesBoundedEvents(t *testing.T) {
-	plugin := startHookPlugin(t, "all")
-	output := strings.Repeat("x", 256<<10)
-	result, events, err := runWithHookPlugin(t, plugin, output)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(plugin.Host().HookNames()); got != 7 {
-		t.Fatalf("registered %d hooks, want 7", got)
-	}
-	if len(result.History) == 0 || result.History[0].Results[0].Output != output {
-		t.Fatalf("external observer changed the result: %+v", result)
-	}
+	run.result = result
+	return run
+}
+
+func eventTexts(events []pons.Event, eventType pons.EventType) []string {
+	var texts []string
 	for _, event := range events {
-		if event.Type == pons.EventActionDecision && event.Decision.Assessment.Classifier != "" {
-			t.Fatalf("external hook supplied an assessment: %+v", event.Decision)
+		if event.Type == eventType {
+			texts = append(texts, event.Text)
 		}
+	}
+	return texts
+}
+
+func TestExternalHookProviderDecision(t *testing.T) {
+	plugin := startHookPlugin(t, "decision")
+	run := runWithHookPlugin(t, plugin, "real")
+	if run.ran || len(run.result.History) == 0 || run.result.History[0].Results[0].ActionID != "real-id" ||
+		!strings.Contains(run.result.History[0].Results[0].Error, "approval_required") {
+		t.Fatalf("external policy was not applied: %+v", run)
 	}
 }
 
-func TestExternalHookProviderCannotPatchObservers(t *testing.T) {
-	plugin := startHookPlugin(t, "patch")
-	if _, _, err := runWithHookPlugin(t, plugin, "real"); err == nil || !strings.Contains(err.Error(), "malformed hook patch") {
-		t.Fatalf("observer patch error = %v", err)
+func TestExternalHookProviderToolFilter(t *testing.T) {
+	plugin := startHookPlugin(t, "filtered")
+	if run := runWithHookPlugin(t, plugin, "real"); !run.ran {
+		t.Fatalf("filtered hook applied to an unlisted tool: %+v", run.result)
+	}
+}
+
+func TestExternalHookProviderCanApprove(t *testing.T) {
+	plugin := startHookPlugin(t, "approve")
+	if run := runWithHookPlugin(t, plugin, "real"); !run.ran {
+		t.Fatalf("external permission hook did not approve: %+v", run.result)
+	}
+}
+
+func TestExternalHookProviderAllHooksWithBoundedInputs(t *testing.T) {
+	plugin := startHookPlugin(t, "all")
+	run := runWithHookPlugin(t, plugin, strings.Repeat("x", 256<<10))
+	if got := len(plugin.Host().HookNames()); got != 8 {
+		t.Fatalf("registered %d hooks, want 8", got)
+	}
+	if errs := eventTexts(run.events, pons.EventHookError); len(errs) != 0 {
+		t.Fatalf("hook errors: %v", errs)
+	}
+	if !run.ran || run.result.History[0].Results[0].Output != "external result" {
+		t.Fatalf("external hooks not applied: %+v", run.result)
+	}
+	if messages := eventTexts(run.events, pons.EventSystemMessage); len(messages) != 1 || messages[0] != "external ready" {
+		t.Fatalf("system messages = %v", messages)
+	}
+}
+
+func TestExternalHookMalformedOutputIsReported(t *testing.T) {
+	plugin := startHookPlugin(t, "malformed")
+	run := runWithHookPlugin(t, plugin, "real")
+	errs := eventTexts(run.events, pons.EventHookError)
+	if len(errs) != 1 || !strings.Contains(errs[0], "malformed hook patch") ||
+		!strings.Contains(run.result.History[0].Results[0].Error, "withheld") {
+		t.Fatalf("errors = %v, result = %+v", errs, run.result.History[0].Results[0])
 	}
 }

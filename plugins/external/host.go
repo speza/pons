@@ -191,6 +191,7 @@ type Host struct {
 
 	tools     map[string]ToolDescription
 	hooks     map[string]bool
+	hookTools map[string]bool // empty means every tool
 	plugin    PluginInfo
 	toolSem   chan struct{}
 	stderrMu  sync.Mutex
@@ -244,6 +245,7 @@ func newHost(manifest Manifest, cfg HostConfig, connector Connector) (*Host, err
 		stderrDone:  make(chan struct{}),
 		tools:       make(map[string]ToolDescription),
 		hooks:       make(map[string]bool),
+		hookTools:   make(map[string]bool),
 	}, nil
 }
 
@@ -458,6 +460,15 @@ func (h *Host) acceptCapabilities(capabilities []Capability) error {
 				}
 				h.hooks[name] = true
 			}
+			if config.Tools != nil && len(config.Tools) == 0 {
+				return errors.New("hook_provider tools must be omitted or nonempty")
+			}
+			for _, tool := range config.Tools {
+				if tool == "" {
+					return errors.New("hook_provider tools must not contain empty names")
+				}
+				h.hookTools[tool] = true
+			}
 			continue
 		}
 		cfg, err := validateCapability(cap, h.cfg.Placement, h.cfg.Limits.MaxTools)
@@ -520,6 +531,13 @@ func (h *Host) HookNames() []string {
 	}
 	slices.Sort(names)
 	return names
+}
+
+// HookWantsTool reports whether the plugin's tool hooks apply to kind.
+func (h *Host) HookWantsTool(kind string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.hookTools) == 0 || h.hookTools[kind]
 }
 
 // CallHook invokes one declared host hook with bounded input and output.

@@ -34,10 +34,10 @@ func TestClassifierEvalCasesLoad(t *testing.T) {
 func TestLoadEvalCasesRejectsInvalidLabelsAndCalls(t *testing.T) {
 	for _, input := range []string{
 		`[]`,
-		`[{"id":"one","expected_action":"maybe","event":{"Message":"task","Action":{"id":"a","kind":"run","args":{}}}}]`,
-		`[{"id":"one","expected_action":"ask","expected_risk":"maybe","event":{"Message":"task","Action":{"id":"a","kind":"run","args":{}}}}]`,
-		`[{"id":"one","expected_action":"allow","event":{"Message":"task","Action":{"id":"a","kind":"run","args":null}}}]`,
-		`[{"id":"one","expected_action":"allow","event":{"Message":"task","Action":{"id":"a","kind":"run","args":{}}}},{"id":"one","expected_action":"ask","event":{"Message":"task","Action":{"id":"b","kind":"run","args":{}}}}]`,
+		`[{"id":"one","expected_action":"maybe","event":{"message":"task","action":{"id":"a","kind":"run","args":{}}}}]`,
+		`[{"id":"one","expected_action":"ask","expected_risk":"maybe","event":{"message":"task","action":{"id":"a","kind":"run","args":{}}}}]`,
+		`[{"id":"one","expected_action":"allow","event":{"message":"task","action":{"id":"a","kind":"run","args":null}}}]`,
+		`[{"id":"one","expected_action":"allow","event":{"message":"task","action":{"id":"a","kind":"run","args":{}}}},{"id":"one","expected_action":"ask","event":{"message":"task","action":{"id":"b","kind":"run","args":{}}}}]`,
 	} {
 		if _, err := LoadEvalCases(strings.NewReader(input)); err == nil {
 			t.Fatalf("accepted invalid eval cases: %s", input)
@@ -47,14 +47,14 @@ func TestLoadEvalCasesRejectsInvalidLabelsAndCalls(t *testing.T) {
 
 func TestEvaluateClassifierReportsUnsafeAllowsAndUnavailable(t *testing.T) {
 	cases := []EvalCase{
-		{ID: "safe", ExpectedAction: pons.DispositionAllow, Event: pons.ToolCallStartEvent{Action: protocol.Action{ID: "safe"}}},
-		{ID: "review", ExpectedAction: pons.DispositionAsk, Event: pons.ToolCallStartEvent{Action: protocol.Action{ID: "review"}}},
-		{ID: "uncertain-safe", ExpectedAction: pons.DispositionAsk, ExpectedRisk: "review", Event: pons.ToolCallStartEvent{Action: protocol.Action{ID: "uncertain-safe"}}},
-		{ID: "false-allow", ExpectedAction: pons.DispositionAsk, ExpectedRisk: "review", Event: pons.ToolCallStartEvent{Action: protocol.Action{ID: "false-allow"}}},
-		{ID: "unavailable", ExpectedAction: pons.DispositionAllow, Event: pons.ToolCallStartEvent{Action: protocol.Action{ID: "unavailable"}}},
-		{ID: "unavailable-ask", ExpectedAction: pons.DispositionAsk, Event: pons.ToolCallStartEvent{Action: protocol.Action{ID: "unavailable-ask"}}},
+		{ID: "safe", ExpectedAction: pons.PermissionAllow, Event: pons.ToolCallStartInput{Action: protocol.Action{ID: "safe"}}},
+		{ID: "review", ExpectedAction: pons.PermissionAsk, Event: pons.ToolCallStartInput{Action: protocol.Action{ID: "review"}}},
+		{ID: "uncertain-safe", ExpectedAction: pons.PermissionAsk, ExpectedRisk: "review", Event: pons.ToolCallStartInput{Action: protocol.Action{ID: "uncertain-safe"}}},
+		{ID: "false-allow", ExpectedAction: pons.PermissionAsk, ExpectedRisk: "review", Event: pons.ToolCallStartInput{Action: protocol.Action{ID: "false-allow"}}},
+		{ID: "unavailable", ExpectedAction: pons.PermissionAllow, Event: pons.ToolCallStartInput{Action: protocol.Action{ID: "unavailable"}}},
+		{ID: "unavailable-ask", ExpectedAction: pons.PermissionAsk, Event: pons.ToolCallStartInput{Action: protocol.Action{ID: "unavailable-ask"}}},
 	}
-	classifier := ClassifierFunc(func(_ context.Context, event pons.ToolCallStartEvent) (pons.ActionAssessment, error) {
+	classifier := ClassifierFunc(func(_ context.Context, event pons.ToolCallStartInput) (pons.ActionAssessment, error) {
 		switch event.Action.ID {
 		case "review":
 			return pons.ActionAssessment{Risk: "review", Confidence: 0.99, ReasonCode: "needs_review"}, nil
@@ -79,7 +79,7 @@ func TestEvaluateClassifierReportsUnsafeAllowsAndUnavailable(t *testing.T) {
 		t.Fatalf("unexpected eval counts: %+v", report)
 	}
 	if !report.Outcomes[2].Passed || report.Outcomes[2].Risk != "safe" || !report.Outcomes[2].RiskMismatch ||
-		report.Outcomes[3].Action != pons.DispositionAllow || report.Outcomes[3].Passed ||
+		report.Outcomes[3].Action != pons.PermissionAllow || report.Outcomes[3].Passed ||
 		report.Outcomes[4].DecisionReasonCode != "classifier_unavailable" || report.Outcomes[5].Passed {
 		t.Fatalf("unexpected eval outcomes: %+v", report.Outcomes)
 	}

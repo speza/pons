@@ -765,9 +765,9 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 			decision := event.Decision
 			fields := []any{
 				"turn", event.Turn, "action_id", event.Action.ID, "tool", event.Action.Kind,
-				"disposition", decision.Action, "reason_code", decision.ReasonCode,
+				"permission", decision.Permission, "reason_code", decision.Reason,
 			}
-			if assessment := decision.Assessment; assessment.Classifier != "" {
+			if assessment := decision.Assessment; assessment != nil {
 				fields = append(fields,
 					"classifier", assessment.Classifier, "risk", assessment.Risk,
 					"confidence", assessment.Confidence,
@@ -778,6 +778,10 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 			} else {
 				runLog.Debug("tool preflight decided", fields...)
 			}
+		case pons.EventHookError:
+			runLog.Warn("hook failed", "turn", event.Turn, "error", event.Text)
+		case pons.EventSystemMessage:
+			runLog.Info("hook message", "turn", event.Turn, "message", event.Text)
 		case pons.EventAssistantResponse:
 			runLog.Debug("assistant turn", "turn", event.Turn, "tool_calls", len(event.Actions))
 			parts := make([]ponsruntime.MessagePart, 0, len(event.Parts))

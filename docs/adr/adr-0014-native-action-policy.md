@@ -27,95 +27,106 @@ responsibilities under ADR-0004.
 
 ## Decision
 
-Add a native **tool-call-start hook** to `Core`. The built-in action-policy
-plugin registers it through `Core.AddHooks(Hooks{OnToolCallStart: ...})`; policy
-rules, classification, and user interaction stay in plugins or the composing
-application. The same registration value accepts typed agent, turn, tool,
-and approval callbacks. Each callback can observe or apply the effects its
-event supports. `OnToolCallStart` is the pre-execution decision point.
+Add typed lifecycle **hooks** to `Core`, modelled on coding-agent hooks such
+as Claude Code's, with `OnToolCallStart` as the pre-execution permission
+point. The built-in action-policy plugin is an ordinary `OnToolCallStart`
+hook; policy rules, classification, and user interaction stay in plugins or
+the composing application.
 
-### 1. Tool-call-start hooks are control-plane checks, not tools
+### 1. One hook contract
 
-The core owns when hooks run, how their decisions combine, how an action is
-held for approval, and how a final denial is represented. It does not know why
-an action is dangerous, who the user is, or how a prompt is presented.
-
-The native concepts are intentionally small:
+Every hook takes an `Input` value and returns an `Output` that embeds a common
+`HookOutput`, plus at most one event-specific decision:
 
 ```go
-type ActionDisposition string
-
-const (
-    DispositionAllow ActionDisposition = "allow"
-    DispositionAsk   ActionDisposition = "ask"
-    DispositionDeny  ActionDisposition = "deny"
-)
-
-type ActionAssessment struct {
-    Risk       string  // "safe" or "review"
-    Confidence float64
-    ProbabilityConfidence bool // returned choice probability, not generated text
-    ReasonCode string  // stable, non-prose policy reason
-    Classifier string  // e.g. "jev-1.13"
+type HookOutput struct {
+    Stop              bool   // end the run once the current step is recorded
+    StopReason        string
+    SystemMessage     string // shown to the user (EventSystemMessage)
+    AdditionalContext string // added to the brain's next observation
 }
 
-type ToolCallStartEvent struct {
-    Turn      int
-    Message   string // current user/task instruction, not the full transcript
-    RecentContext []ActionContextItem // bounded, source-labeled history
-    Workspace string
-    Action    protocol.Action
-    Tool      *ToolSpec
-    Resources []ToolResource
-    Decision  ActionDecision // zero value observes and allows
-}
-
-type ApprovalRequest struct {
-    ToolCallStartEvent
-    Assessment ActionAssessment
-}
-
-type ApprovalHandler func(context.Context, ApprovalRequest) (ActionDisposition, error)
 type Hooks struct {
-    OnToolCallStart func(context.Context, *ToolCallStartEvent) error
-    OnToolCallEnd   func(context.Context, *ToolCallEndEvent) error // every outcome, including denials
-    // Observer callbacks for agent and turn phases sit alongside them.
+    OnAgentStart        func(context.Context, AgentStartInput) (AgentStartOutput, error)
+    OnAgentTurnStart    func(context.Context, AgentTurnStartInput) (AgentTurnStartOutput, error)
+    OnAssistantResponse func(context.Context, AssistantResponseInput) (AssistantResponseOutput, error)
+    OnToolCallStart     func(context.Context, ToolCallStartInput) (ToolCallStartOutput, error)
+    OnPermissionRequest func(context.Context, PermissionRequestInput) (PermissionRequestOutput, error)
+    OnToolCallEnd       func(context.Context, ToolCallEndInput) (ToolCallEndOutput, error)
+    OnAgentTurnEnd      func(context.Context, AgentTurnEndInput) (AgentTurnEndOutput, error)
+    OnAgentEnd          func(context.Context, AgentEndInput) (AgentEndOutput, error)
 }
 ```
 
-The exact exported names may change during implementation. The semantics are
-the contract:
+| Hook | Event-specific output |
+| --- | --- |
+| `OnToolCallStart` | `Permission` (allow, ask, deny; empty means no objection), `Reason`, `Assessment`, `UpdatedInput` |
+| `OnPermissionRequest` | `Permission` (allow or deny; empty defers) |
+| `OnToolCallEnd` | `Result *protocol.ToolResult` (nil leaves the result unchanged) |
+| `OnAgentEnd` | `Continue`, `Reason`: keep a finished run going with the reason as context |
+| others | none |
 
-- a classifier returns an assessment, not a permission grant;
-- the action-policy plugin maps the assessment to `Allow`, `Ask`, or `Deny`;
-- multiple hooks combine with `Deny` before `Ask` before `Allow`, independent
-  of registration order;
-- matching hooks run in registration order; a tool-call-start error requests
-  approval unless that hook also denied the call;
-- hooks decide but never rewrite a call: the brain's recorded call is always
-  the one that runs, and a hook that wants a different call denies it so the
-  brain can propose an alternative;
-- `Ask` invokes the single application-supplied approval handler or ADR-0021's
-  durable pause adapter; there are no separate approval hooks;
-- an approval handler may return only `Allow` or `Deny` for the exact pending
-  action; and
-- `Deny` is final for that invocation.
+Every Output is its own named type, so a hook can gain a field without a
+signature change. There is no matcher: a Go hook checks `Action.Kind` itself,
+and external plugins declare a tool filter (section 5).
 
-The core does not own a terminal, GUI, user identity, or persistence format.
-An explicitly installed host-side external plugin may also implement
-`on_tool_call_start` through the versioned `hook_provider/v1` protocol. It is
-an untrusted boundary: it receives the policy event but no Core handle or
-inherited credentials, and only the disposition and reason code of its
-decision are applied. Because decisions combine strictest-first, an external
-plugin can add ask or deny but cannot override another plugin or approve a
-pending call. Its other hooks are observers of bounded event summaries.
-An interactive CLI supplies an approval handler; an embedding application may
-block, display a request elsewhere, or bridge it to an asynchronous UI. A
-non-interactive caller may use ADR-0021's durable pause and exact-action
-resume. Without a handler or durable pause policy, `Ask` is denied rather
-than silently allowed.
+Inputs and outputs carry snake_case JSON tags and are the external wire
+format, so a Go field rename cannot silently change the protocol.
 
-### 2. Action policy happens before tool execution
+### 2. Permission flow
+
+```text
+OnToolCallStart (every hook, per call) → merge strictest: deny > ask > allow
+  UpdatedInput → validate object → every start hook runs again on the new call
+ask → OnPermissionRequest (every hook, in order; any deny wins)
+    → unresolved → SetApprovalHandler → no handler or anything but allow → deny
+```
+
+- A classifier returns an assessment, not a permission grant; the
+  action-policy plugin maps it to allow or ask.
+- `Deny` is final for that invocation; approval never sees it.
+- `UpdatedInput` replaces the call's arguments. Non-object updates, and calls
+  that keep changing after eight passes, are denied. Core records the updated
+  call in the durable assistant response and reconciles a stateful brain
+  (`AssistantResponseReconciler`) before execution, so the brain's transcript
+  always matches what ran.
+- `ApprovalHandler` receives the same `PermissionRequestInput`. Without a
+  handler or durable pause policy, an unresolved `Ask` is denied.
+
+### 3. Hook errors
+
+A hook error is reported through `EventHookError` and discards that hook's
+output; it never stops the run by itself. Hooks that decide fail closed:
+
+- `OnToolCallStart`: the call asks for approval, except that the failed
+  hook's own `Deny` still holds;
+- `OnPermissionRequest`: the call is denied;
+- `OnToolCallEnd`: the result is withheld from the brain.
+
+A hook stops the run deliberately with `Stop`. Checked persistence that must
+not fail silently belongs in `Core.OnEventError`, not in hooks.
+`OnAgentTurnEnd` and `OnAgentEnd` close every opened turn and run, including
+failed and canceled ones, on a context that is not canceled.
+
+### 4. Hooks are trusted user code
+
+Like Claude Code's hooks, pons hooks are trusted: the operator installs them,
+and they may approve calls, update input, and change results. The core does
+not own a terminal, GUI, user identity, or persistence format. An interactive
+CLI supplies an approval handler; an embedding application may block, display
+a request elsewhere, or bridge it to an asynchronous UI. A non-interactive
+caller may use ADR-0021's durable pause and exact-action resume.
+
+### 5. External hook plugins
+
+An explicitly installed host plugin implements hooks through the versioned
+`hook_provider/v1` protocol with the same inputs and outputs in JSON. It may
+declare `tools` so the host skips its tool hooks for other tool kinds. Its
+effects match an in-process hook's, but the process boundary still applies:
+no Core handle or inherited credentials, host deadlines and frame limits, and
+inputs without run history and with tool output capped at 16 KiB.
+
+### 6. Action policy happens before tool execution
 
 For every non-`finish` action in a plan, the core decides every action before
 launching any approved tool handler. Start hooks for different actions run
@@ -140,7 +151,7 @@ an identical or equivalent action.
 
 With no tool-call-start hook installed, current behavior is unchanged.
 
-### 3. Policy precedence
+### 7. Policy precedence
 
 The effective decision follows this order:
 
@@ -168,7 +179,7 @@ retaining an unoverrideable policy mechanism.
 persistent grant. Broader/session/project grants are configuration features,
 not approval decisions.
 
-### 4. Classifier input and trust context
+### 8. Classifier input and trust context
 
 The initial classifier request includes:
 
@@ -204,7 +215,7 @@ configuration express boundaries such as “ask outside the workspace,” but it
 is not a substitute for OS-level containment and cannot make arbitrary shell
 syntax safe.
 
-### 5. Configuration trust
+### 9. Configuration trust
 
 User/global or managed configuration may loosen policy. Project-local
 configuration may add restrictions but must not remove user/global hard denies
@@ -216,7 +227,7 @@ The eventual configuration format should support tool/resource-scoped
 semantics. Natural-language classifier context may supplement these rules but
 must not replace hard policy.
 
-### 6. Observability and response
+### 10. Observability and response
 
 Action policy decisions are observable as loop events and in the turn result
 history. The event API should distinguish an action denied before execution
@@ -236,7 +247,7 @@ A denied result is an unsuccessful observation, not a Go execution error. The
 brain may adapt and retry with a materially different, safer action. Repeated
 identical denials should be bounded by a circuit breaker.
 
-### 7. Jev and supported-model integration
+### 11. Jev and supported-model integration
 
 The action-policy plugin uses a classifier without making it a model-callable
 tool:
@@ -270,9 +281,17 @@ tool-call-start hook is for preflight decisions and approval.
   `Action.Danger`, is advisory and cannot approve its own execution.
 - **A classifier-only security boundary:** rejected. Jev and other models can
   misclassify shell semantics, prompt injection, and data exfiltration.
-- **An external policy capability:** not added to runtime protocol 1. The
-  host-side tool-call-start hook must remain outside the untrusted hands plugin
-  boundary.
+- **A separate permission-policy seam beside observer-only hooks:**
+  considered. It separates deciding from observing, but departs from the hook
+  model users know from coding agents and splits one lifecycle across two
+  mechanisms. A single hook contract with a shared output envelope keeps the
+  hooks consistent while `OnToolCallStart` and `OnPermissionRequest` carry the
+  permission decisions.
+- **Hooks that mutate their event in place:** replaced by returned Outputs, so
+  a hook's possible effects are visible in its signature.
+- **External hook plugins in the untrusted hands boundary:** rejected. Host
+  hooks run outside the hands sandbox and are installed by the operator as
+  trusted code; hands plugins remain untrusted.
 
 ## Consequences
 
@@ -292,11 +311,12 @@ tool-call-start hook is for preflight decisions and approval.
 
 ## Implementation notes and remaining work
 
-- The initial implementation exposes `Core.AddHooks` and
-  `Core.SetApprovalHandler`; `plugins/actionpolicy` registers a hook that
-  composes ordered policy rules and classifier fallbacks. Multiple trusted
-  hooks compose with deny before ask before allow. Approval is a synchronous
-  callback.
+- The implementation exposes `Core.AddHooks` with the eight hooks above and
+  `Core.SetApprovalHandler`; `plugins/actionpolicy` registers an
+  `OnToolCallStart` hook that composes ordered policy rules and classifier
+  fallbacks. Approval is a synchronous callback. `HookOutput.AdditionalContext`
+  reaches the brain as `protocol.Observation.Context`; the LLM brain adds it
+  to the next user turn and does not persist it across runs.
 - Core emits one `action_decision` event per call with the final decision
   after approval, and `action_denied` instead of `action_end` for a denied
   call. The runtime persists a denial with tool status `denied` and a failed

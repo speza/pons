@@ -1,5 +1,5 @@
 // Command external-policy is a minimal separately installed host hook plugin.
-// It asks for approval on shell calls and allows other tools.
+// It asks for approval on shell calls; other tools never reach it.
 package main
 
 import (
@@ -25,7 +25,11 @@ func main() {
 		var result any
 		switch request.Method {
 		case external.MethodInitialize:
-			config, _ := json.Marshal(external.HookProviderConfiguration{Hooks: []string{external.HookToolCallStart}})
+			// Only shell tools reach this plugin; the host skips the rest.
+			config, _ := json.Marshal(external.HookProviderConfiguration{
+				Hooks: []string{external.HookToolCallStart},
+				Tools: []string{"bash", "shell"},
+			})
 			result = external.InitializeResult{
 				Plugin:       external.PluginInfo{Name: "example.policy", Version: "1.0.0"},
 				Capabilities: []external.Capability{{Type: external.CapabilityHookProvider, Version: external.HookProviderVersion, Configuration: config}},
@@ -33,19 +37,15 @@ func main() {
 		case external.MethodHook:
 			var params external.HookCallParams
 			if err := json.Unmarshal(request.Params, &params); err != nil || params.Hook != external.HookToolCallStart {
-				result = external.HookCallResult{Patch: json.RawMessage(`{"Decision":{"Action":"ask","ReasonCode":"invalid_hook_request"}}`)}
+				result = external.HookCallResult{Patch: json.RawMessage(`{"permission":"ask","reason":"invalid_hook_request"}`)}
 				break
 			}
-			var event pons.ToolCallStartEvent
-			if err := json.Unmarshal(params.Event, &event); err != nil {
-				result = external.HookCallResult{Patch: json.RawMessage(`{"Decision":{"Action":"ask","ReasonCode":"invalid_tool_call"}}`)}
+			var input pons.ToolCallStartInput
+			if err := json.Unmarshal(params.Event, &input); err != nil {
+				result = external.HookCallResult{Patch: json.RawMessage(`{"permission":"ask","reason":"invalid_tool_call"}`)}
 				break
 			}
-			decision := pons.ActionDecision{Action: pons.DispositionAllow}
-			if event.Action.Kind == "bash" || event.Action.Kind == "shell" {
-				decision = pons.ActionDecision{Action: pons.DispositionAsk, ReasonCode: "shell_review"}
-			}
-			patch, _ := json.Marshal(struct{ Decision pons.ActionDecision }{decision})
+			patch, _ := json.Marshal(pons.ToolCallStartOutput{Permission: pons.PermissionAsk, Reason: "shell_review"})
 			result = external.HookCallResult{Patch: patch}
 		case external.MethodShutdown:
 			_ = encoder.Encode(external.RPCResponse{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(`{}`)})
