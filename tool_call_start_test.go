@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/samperrin/pons/protocol"
@@ -25,9 +28,17 @@ func TestActionPolicyPreflightAndOrderedResults(t *testing.T) {
 		},
 		{Finish("done")},
 	}}})
+	var mu sync.Mutex
 	var sequence []string
+	record := func(entry string) {
+		mu.Lock()
+		defer mu.Unlock()
+		sequence = append(sequence, entry)
+	}
 	if err := c.AddTool("run", ToolDef{
 		Handler: func(_ context.Context, a protocol.Action) (protocol.ToolResult, error) {
+			mu.Lock()
+			defer mu.Unlock()
 			if len(sequence) != 4 {
 				t.Errorf("handler started before preflight completed: %v", sequence)
 			}
@@ -38,7 +49,7 @@ func TestActionPolicyPreflightAndOrderedResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, req *ToolCallStartEvent) error {
-		sequence = append(sequence, "policy:"+req.Action.ID)
+		record("policy:" + req.Action.ID)
 		if req.Message != "goal" || req.Workspace != "/workspace" || req.Platform != "linux/amd64" ||
 			req.Environment.Provider != "sandbox" || req.Environment.Network != "disabled" || req.Tool == nil ||
 			len(req.Resources) != 1 || req.Resources[0].Kind != "command" {
@@ -54,16 +65,16 @@ func TestActionPolicyPreflightAndOrderedResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := c.SetApprovalHandler(func(_ context.Context, req ApprovalRequest) (ActionDisposition, error) {
-		sequence = append(sequence, "approve:"+req.Action.ID)
+		record("approve:" + req.Action.ID)
 		return DispositionDeny, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	var preflight, started, ended, denied, resultEvents []string
+	var decided, started, ended, denied, resultEvents []string
 	c.OnEvent(func(e Event) {
 		switch e.Type {
-		case EventActionPreflight:
-			preflight = append(preflight, e.Action.ID)
+		case EventActionDecision:
+			decided = append(decided, e.Action.ID+":"+string(e.Decision.Action))
 		case EventActionStart:
 			started = append(started, e.Action.ID)
 		case EventActionEnd:
@@ -78,20 +89,23 @@ func TestActionPolicyPreflightAndOrderedResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(sequence[:4], []string{"policy:first", "policy:second", "approve:second", "policy:third"}) {
+	// Start hooks run concurrently; approval follows once every call is decided.
+	policies := slices.Clone(sequence[:3])
+	slices.Sort(policies)
+	if !reflect.DeepEqual(policies, []string{"policy:first", "policy:second", "policy:third"}) || sequence[3] != "approve:second" {
 		t.Fatalf("preflight order: %v", sequence)
 	}
-	if !reflect.DeepEqual(preflight, []string{"first", "second", "third"}) ||
+	if !reflect.DeepEqual(decided, []string{"first:allow", "second:deny", "third:allow"}) ||
 		!reflect.DeepEqual(started, []string{"first", "third"}) ||
 		!reflect.DeepEqual(ended, []string{"first", "third"}) ||
 		!reflect.DeepEqual(denied, []string{"second"}) ||
 		!reflect.DeepEqual(resultEvents, []string{"first", "second", "third"}) {
-		t.Fatalf("events: preflight=%v started=%v ended=%v denied=%v results=%v", preflight, started, ended, denied, resultEvents)
+		t.Fatalf("events: decided=%v started=%v ended=%v denied=%v results=%v", decided, started, ended, denied, resultEvents)
 	}
 	results := res.History[0].Results
 	if len(results) != 3 || results[0].Output != "first" || results[2].Output != "third" ||
 		results[1].OK || results[1].ActionID != "second" || results[1].Kind != "run" ||
-		!strings.Contains(results[1].Error, "needs_review") {
+		!strings.Contains(results[1].Error, "approval_denied") {
 		t.Fatalf("results: %+v", results)
 	}
 }
@@ -391,66 +405,71 @@ func TestRepeatedDenialSkipsApproval(t *testing.T) {
 	}
 }
 
-func TestPreflightUsesTurnStartInstruction(t *testing.T) {
-	core := New()
-	setBrain(t, core, &continueBrain{fakeBrain{turns: [][]protocol.Action{
-		{{ID: "one", Kind: "run", Args: json.RawMessage(`{}`)}},
+func TestPreflightDecidesCallsConcurrently(t *testing.T) {
+	c := New()
+	setBrain(t, c, &continueBrain{fakeBrain{turns: [][]protocol.Action{
+		{{ID: "a", Kind: "run"}, {ID: "b", Kind: "run"}},
 		{Finish("done")},
 	}}})
-	if err := core.AddTool("run", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+	if err := c.AddTool("run", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
 		return protocol.ToolResult{OK: true}, nil
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	var seen string
-	if err := core.AddHooks(Hooks{
-		OnAgentTurnStart: func(_ context.Context, event *AgentTurnStartEvent) error {
-			event.Observation.Message = "revised instruction"
+	var arrived sync.WaitGroup
+	arrived.Add(2)
+	if err := c.AddHooks(Hooks{OnToolCallStart: func(context.Context, *ToolCallStartEvent) error {
+		arrived.Done()
+		done := make(chan struct{})
+		go func() { arrived.Wait(); close(done) }()
+		select {
+		case <-done:
 			return nil
-		},
-		OnToolCallStart: func(_ context.Context, event *ToolCallStartEvent) error {
-			seen = event.Message
-			return nil
-		},
-	}); err != nil {
+		case <-time.After(5 * time.Second):
+			return errors.New("start hooks ran one at a time")
+		}
+	}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := core.Run(context.Background(), "original instruction"); err != nil {
+	result, err := c.Run(context.Background(), "goal")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if seen != "revised instruction" {
-		t.Fatalf("preflight instruction = %q", seen)
+	for _, tr := range result.History[0].Results {
+		if !tr.OK {
+			t.Fatalf("result = %+v", tr)
+		}
 	}
 }
 
-func TestPreflightRejectsNonObjectArgumentUpdates(t *testing.T) {
-	for _, updated := range []string{`[]`, `"scalar"`, `null`} {
-		t.Run(updated, func(t *testing.T) {
-			core := New()
-			setBrain(t, core, &continueBrain{fakeBrain{turns: [][]protocol.Action{
-				{{ID: "one", Kind: "run", Args: json.RawMessage(`{}`)}},
-				{Finish("done")},
-			}}})
-			called := false
-			if err := core.AddTool("run", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
-				called = true
-				return protocol.ToolResult{OK: true}, nil
-			}}); err != nil {
-				t.Fatal(err)
-			}
-			if err := core.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, event *ToolCallStartEvent) error {
-				event.Decision = ActionDecision{Action: DispositionAllow, UpdatedArgs: json.RawMessage(updated)}
-				return nil
-			}}); err != nil {
-				t.Fatal(err)
-			}
-			result, err := core.Run(context.Background(), "task")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if called || len(result.History) == 0 || result.History[0].Results[0].OK {
-				t.Fatalf("non-object update executed: called=%v result=%+v", called, result)
-			}
-		})
+func TestHookErrorCannotWeakenDeny(t *testing.T) {
+	c := New()
+	setBrain(t, c, &continueBrain{fakeBrain{turns: [][]protocol.Action{
+		{{ID: "a", Kind: "run"}}, {Finish("done")},
+	}}})
+	if err := c.AddTool("run", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+		t.Fatal("denied tool ran")
+		return protocol.ToolResult{}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, event *ToolCallStartEvent) error {
+		event.Decision = ActionDecision{Action: DispositionDeny, ReasonCode: "hard_rule"}
+		return errors.New("audit write failed")
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetApprovalHandler(func(context.Context, ApprovalRequest) (ActionDisposition, error) {
+		t.Fatal("deny reached approval")
+		return DispositionAllow, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := c.Run(context.Background(), "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.History[0].Results[0].Error; !strings.Contains(got, "hard_rule") {
+		t.Fatalf("denial reason: %s", got)
 	}
 }

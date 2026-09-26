@@ -530,7 +530,7 @@ func (h *Host) CallHook(ctx context.Context, name string, event any, result any)
 	if !known {
 		return fmt.Errorf("external: plugin %q does not provide hook %q", h.manifest.Name, name)
 	}
-	encoded, err := json.Marshal(hookWireEvent(event))
+	encoded, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("external: encode hook event: %w", err)
 	}

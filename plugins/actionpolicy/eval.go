@@ -116,7 +116,9 @@ func EvaluateClassifierWithProgress(
 	if classifier == nil || len(cases) == 0 || threshold <= 0 || threshold > 1 || math.IsNaN(threshold) {
 		return EvalReport{}, fmt.Errorf("classifier, cases, and a threshold in (0, 1] are required")
 	}
-	policy := Policy{Classifiers: []Classifier{classifier}, MinSafeConfidence: threshold}
+	// The eval measures where the classifier's own allow boundary falls, so
+	// generated confidence is accepted as if the operator had opted in.
+	policy := Policy{Classifiers: []Classifier{classifier}, MinSafeConfidence: threshold, AllowGeneratedConfidence: true}
 	report := EvalReport{Threshold: threshold, Total: len(cases), Outcomes: make([]EvalOutcome, 0, len(cases))}
 	evalStarted := time.Now()
 	durations := make([]time.Duration, 0, len(cases))

@@ -156,3 +156,28 @@ func TestInstalledExternalPluginResolvesByID(t *testing.T) {
 		t.Fatalf("installed plugin config: %s", options.Plugins[0].Config)
 	}
 }
+
+func TestActionPolicyRulesAndGeneratedConfidence(t *testing.T) {
+	options, err := buildPluginOptions(pluginSettings{
+		pluginEntryForTest("action_policy", true, `{"allow_generated_confidence":true,"rules":[{"action":"allow","tools":["*"]},{"action":"ask","tools":["bash"],"reason_code":"shell_review"}]}`),
+	}, func(string) string { return "" }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, ok := options.Plugins[0].Host.(actionpolicy.Policy)
+	if !ok || policy.ClassifierID != "" || !policy.AllowGeneratedConfidence || len(policy.Rules) != 2 ||
+		policy.Rules[1].ReasonCode != "shell_review" || policy.Rules[0].ReasonCode != "rule_allow" {
+		t.Fatalf("policy plugin: %+v", options.Plugins[0].Host)
+	}
+
+	for _, config := range []string{
+		`{}`,
+		`{"rules":[{"action":"maybe","tools":["bash"]}]}`,
+		`{"rules":[{"action":"ask","tools":[]}]}`,
+		`{"rules":[{"action":"ask","tools":[""]}]}`,
+	} {
+		if err := Decode(pluginSettings{pluginEntryForTest("action_policy", true, config)}); err == nil {
+			t.Fatalf("accepted invalid action_policy config %s", config)
+		}
+	}
+}

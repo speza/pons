@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 
 	"github.com/samperrin/pons"
 )
@@ -32,14 +33,27 @@ func (f ClassifierFunc) Assess(ctx context.Context, req pons.ToolCallStartEvent)
 	return f(ctx, req)
 }
 
+// ToolRule matches calls to the named tool kinds; "*" matches every tool.
+func ToolRule(action pons.ActionDisposition, reasonCode string, kinds ...string) Rule {
+	return Rule{Action: action, ReasonCode: reasonCode, Match: func(req pons.ToolCallStartEvent) bool {
+		return slices.ContainsFunc(kinds, func(kind string) bool {
+			return kind == "*" || kind == string(req.Action.Kind)
+		})
+	}}
+}
+
 // Policy applies Deny, Ask, then Allow rules, independent of declaration
 // order. Unmatched requests pass through classifiers in order. A valid "safe"
-// assessment above MinSafeConfidence is allowed; all others require approval.
+// assessment at or above MinSafeConfidence is allowed when its confidence is a
+// returned probability, or when AllowGeneratedConfidence accepts a
+// model-generated estimate; everything else, including a request no rule or
+// classifier settles, requires approval.
 type Policy struct {
-	Rules             []Rule
-	Classifiers       []Classifier
-	ClassifierID      string  // resolves a classifier capability registered by another plugin
-	MinSafeConfidence float64 // zero uses 0.9
+	Rules                    []Rule
+	Classifiers              []Classifier
+	ClassifierID             string  // resolves a classifier capability registered by another plugin
+	MinSafeConfidence        float64 // zero uses 0.9
+	AllowGeneratedConfidence bool
 }
 
 func (p Policy) Setup(c *pons.Core) error {
@@ -112,10 +126,17 @@ func (p Policy) decide(ctx context.Context, req pons.ToolCallStartEvent) (pons.A
 			ReasonCode: "classifier_review",
 		}
 		if assessment.Risk == "safe" && assessment.Confidence >= threshold {
-			decision.Action = pons.DispositionAllow
-			decision.ReasonCode = "classifier_safe"
+			if assessment.ProbabilityConfidence || p.AllowGeneratedConfidence {
+				decision.Action = pons.DispositionAllow
+				decision.ReasonCode = "classifier_safe"
+			} else {
+				decision.ReasonCode = "classifier_generated_confidence"
+			}
 		}
 		return decision, nil
+	}
+	if len(p.Classifiers) == 0 {
+		return pons.ActionDecision{Action: pons.DispositionAsk, ReasonCode: "no_matching_rule"}, nil
 	}
 	return pons.ActionDecision{Action: pons.DispositionAsk, ReasonCode: "classifier_unavailable"}, nil
 }

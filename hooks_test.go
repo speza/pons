@@ -57,14 +57,10 @@ func TestTypedHooksRunTurnAndToolLifecycle(t *testing.T) {
 			appendPhase("tool_start")
 			return nil
 		},
-		OnToolCallError: func(_ context.Context, e *ToolCallErrorEvent) error {
-			if e.Err == nil || e.Result.OK {
-				t.Errorf("tool error event: %+v", e)
+		OnToolCallEnd: func(_ context.Context, e *ToolCallEndEvent) error {
+			if e.Result.OK || e.Decision != nil {
+				t.Errorf("tool end event: %+v", e)
 			}
-			appendPhase("tool_error")
-			return nil
-		},
-		OnToolCallEnd: func(context.Context, *ToolCallEndEvent) error {
 			appendPhase("tool_end")
 			return nil
 		},
@@ -74,67 +70,33 @@ func TestTypedHooksRunTurnAndToolLifecycle(t *testing.T) {
 	if _, err := c.Run(context.Background(), "task"); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"agent_start", "turn_start", "response", "tool_start", "tool_error", "tool_end", "turn_end", "turn_start", "response", "turn_end", "agent_end"}
+	want := []string{"agent_start", "turn_start", "response", "tool_start", "tool_end", "turn_end", "turn_start", "response", "turn_end", "agent_end"}
 	if !reflect.DeepEqual(phases, want) {
 		t.Fatalf("phases = %v, want %v", phases, want)
 	}
 }
 
-func TestTypedHooksCanChangeInputAndResult(t *testing.T) {
+func TestToolCallEndHookCanChangeResult(t *testing.T) {
 	c := New()
 	setBrain(t, c, &continueBrain{fakeBrain{turns: [][]protocol.Action{{{Kind: "ping"}}, {Finish("done")}}}})
-	if err := c.AddTool("ping", ToolDef{Handler: func(_ context.Context, a protocol.Action) (protocol.ToolResult, error) {
-		value, err := protocol.StringArg(a.Args, "value")
-		if err != nil {
-			return protocol.ToolResult{}, err
-		}
-		return protocol.ToolResult{OK: true, Output: value}, nil
+	if err := c.AddTool("ping", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+		return protocol.ToolResult{OK: true, Output: "pong"}, nil
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.AddHooks(Hooks{
-		OnAgentStart: func(_ context.Context, e *AgentStartEvent) error { e.Message = "changed task"; return nil },
-		OnAgentTurnStart: func(_ context.Context, e *AgentTurnStartEvent) error {
-			if e.Observation.Message != "changed task" {
-				t.Errorf("observation = %q", e.Observation.Message)
-			}
-			return nil
-		},
-		OnToolCallStart: func(_ context.Context, e *ToolCallStartEvent) error {
-			if len(e.Action.Args) == 0 {
-				e.Decision.UpdatedArgs = protocol.MustArgsJSON(map[string]string{"value": "changed"})
-			}
-			return nil
-		},
-		OnToolCallEnd: func(_ context.Context, e *ToolCallEndEvent) error {
-			e.Result.Output = "hooked: " + e.Result.Output
-			return nil
-		},
-		OnAgentEnd: func(_ context.Context, e *AgentEndEvent) error {
-			e.Result.Answer = "final answer"
-			return nil
-		},
-	}); err != nil {
+	if err := c.AddHooks(Hooks{OnToolCallEnd: func(_ context.Context, e *ToolCallEndEvent) error {
+		e.Result.Output = "hooked: " + e.Result.Output
+		e.Result.ActionID = "forged"
+		return nil
+	}}); err != nil {
 		t.Fatal(err)
 	}
-	var persistedArgs string
-	c.OnEvent(func(event Event) {
-		if event.Type == EventAssistantResponse {
-			persistedArgs, _ = protocol.StringArg(event.Actions[0].Args, "value")
-		}
-	})
 	result, err := c.Run(context.Background(), "task")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := result.History[0].Results[0].Output; got != "hooked: changed" {
-		t.Fatalf("output = %q", got)
-	}
-	if persistedArgs != "changed" {
-		t.Fatalf("assistant event arguments = %q", persistedArgs)
-	}
-	if result.Answer != "final answer" {
-		t.Fatalf("answer = %q", result.Answer)
+	if got := result.History[0].Results[0]; got.Output != "hooked: pong" || got.ActionID == "forged" {
+		t.Fatalf("result = %+v", got)
 	}
 }
 
@@ -155,13 +117,15 @@ func TestTypedHooksDeniedCallNeverStartsExecution(t *testing.T) {
 			e.Decision.Action = DispositionDeny
 			return nil
 		},
-		OnToolCallDenied: func(_ context.Context, e *ToolCallDeniedEvent) error {
+		OnToolCallEnd: func(_ context.Context, e *ToolCallEndEvent) error {
+			if e.Decision == nil || e.Decision.Action != DispositionDeny {
+				t.Errorf("denied end event: %+v", e)
+			}
 			e.Result.Error = "blocked by hook"
-			phases = append(phases, "denied")
+			e.Result.OK = true
+			phases = append(phases, "end")
 			return nil
 		},
-		OnToolCallError: func(context.Context, *ToolCallErrorEvent) error { phases = append(phases, "error"); return nil },
-		OnToolCallEnd:   func(context.Context, *ToolCallEndEvent) error { phases = append(phases, "end"); return nil },
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -169,11 +133,11 @@ func TestTypedHooksDeniedCallNeverStartsExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if called || !reflect.DeepEqual(phases, []string{"start", "denied"}) {
+	if called || !reflect.DeepEqual(phases, []string{"start", "end"}) {
 		t.Fatalf("called = %v, phases = %v", called, phases)
 	}
-	if got := result.History[0].Results[0].Error; got != "blocked by hook" {
-		t.Fatalf("error = %q", got)
+	if got := result.History[0].Results[0]; got.Error != "blocked by hook" || got.OK {
+		t.Fatalf("denied result = %+v", got)
 	}
 }
 
@@ -192,7 +156,7 @@ func TestTypedHooksCanStopRun(t *testing.T) {
 }
 
 func TestToolHookErrorsStillReportAllFinishedCalls(t *testing.T) {
-	for _, phase := range []string{"end", "error", "denied"} {
+	for _, phase := range []string{"end", "denied"} {
 		t.Run(phase, func(t *testing.T) {
 			c := New()
 			setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{
@@ -214,8 +178,6 @@ func TestToolHookErrorsStillReportAllFinishedCalls(t *testing.T) {
 					}
 					return nil
 				}
-			case "error":
-				hooks.OnToolCallError = func(context.Context, *ToolCallErrorEvent) error { return hookErr }
 			case "denied":
 				hooks.OnToolCallStart = func(_ context.Context, event *ToolCallStartEvent) error {
 					if event.Action.ID == "first" {
@@ -223,7 +185,12 @@ func TestToolHookErrorsStillReportAllFinishedCalls(t *testing.T) {
 					}
 					return nil
 				}
-				hooks.OnToolCallDenied = func(context.Context, *ToolCallDeniedEvent) error { return hookErr }
+				hooks.OnToolCallEnd = func(_ context.Context, event *ToolCallEndEvent) error {
+					if event.Decision != nil {
+						return hookErr
+					}
+					return nil
+				}
 			}
 			if err := c.AddHooks(hooks); err != nil {
 				t.Fatal(err)
@@ -245,97 +212,6 @@ func TestToolHookErrorsStillReportAllFinishedCalls(t *testing.T) {
 	}
 }
 
-func TestToolCallUpdateIsRecheckedBeforeExecution(t *testing.T) {
-	c := New()
-	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{{Kind: "ping", Args: protocol.MustArgsJSON(map[string]string{"value": "original"})}}}})
-	called := false
-	if err := c.AddTool("ping", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
-		called = true
-		return protocol.ToolResult{OK: true}, nil
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	var checked []string
-	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, e *ToolCallStartEvent) error {
-		value, err := protocol.StringArg(e.Action.Args, "value")
-		if err != nil {
-			return err
-		}
-		if value == "original" {
-			e.Decision.UpdatedArgs = protocol.MustArgsJSON(map[string]string{"value": "changed"})
-		}
-		return nil
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, e *ToolCallStartEvent) error {
-		value, err := protocol.StringArg(e.Action.Args, "value")
-		if err != nil {
-			return err
-		}
-		checked = append(checked, value)
-		if value == "changed" {
-			e.Decision.Action = DispositionDeny
-		}
-		return nil
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	result, err := c.Run(context.Background(), "task")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if called || !reflect.DeepEqual(checked, []string{"changed"}) || result.History[0].Results[0].OK {
-		t.Fatalf("called = %v, checked = %v, result = %+v", called, checked, result.History[0].Results[0])
-	}
-}
-
-func TestApprovalHooksCanResolveAskAndDenyWins(t *testing.T) {
-	c := New()
-	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{{Kind: "ping"}}}})
-	called := false
-	if err := c.AddTool("ping", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
-		called = true
-		return protocol.ToolResult{OK: true}, nil
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.AddHooks(Hooks{
-		OnToolCallStart: func(_ context.Context, e *ToolCallStartEvent) error {
-			e.Decision.Action = DispositionAsk
-			return nil
-		},
-		OnApprovalRequest: func(_ context.Context, e *ApprovalRequestEvent) error {
-			allow := DispositionAllow
-			e.Decision = &allow
-			return nil
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.AddHooks(Hooks{OnApprovalRequest: func(_ context.Context, e *ApprovalRequestEvent) error {
-		deny := DispositionDeny
-		e.Decision = &deny
-		return nil
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	var resolved ActionDisposition
-	if err := c.AddHooks(Hooks{OnApprovalResolved: func(_ context.Context, e *ApprovalResolvedEvent) error {
-		resolved = e.Decision
-		return nil
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	result, err := c.Run(context.Background(), "task")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if called || resolved != DispositionDeny || result.History[0].Results[0].OK {
-		t.Fatalf("called = %v, resolved = %q, result = %+v", called, resolved, result.History[0].Results[0])
-	}
-}
-
 func TestTurnEndHookFailureRunsOnce(t *testing.T) {
 	c := New()
 	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{Finish("done")}}})
@@ -354,20 +230,66 @@ func TestTurnEndHookFailureRunsOnce(t *testing.T) {
 	}
 }
 
-func TestErrorHookFailurePreservesBothErrors(t *testing.T) {
+func TestClosingHooksSeeFailureAndPreserveBothErrors(t *testing.T) {
 	c := New()
 	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{Finish("done")}}})
 	original := errors.New("turn blocked")
-	hookFailure := errors.New("error hook failed")
+	hookFailure := errors.New("turn end hook failed")
+	var turnErr, agentErr error
+	var reason AgentEndReason
 	if err := c.AddHooks(Hooks{
 		OnAgentTurnStart: func(context.Context, *AgentTurnStartEvent) error { return original },
-		OnAgentTurnError: func(context.Context, *AgentTurnErrorEvent) error { return hookFailure },
+		OnAgentTurnEnd: func(_ context.Context, e *AgentTurnEndEvent) error {
+			turnErr = e.Err
+			return hookFailure
+		},
+		OnAgentEnd: func(_ context.Context, e *AgentEndEvent) error {
+			agentErr, reason = e.Err, e.Reason
+			return nil
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	_, err := c.Run(context.Background(), "task")
 	if !errors.Is(err, original) || !errors.Is(err, hookFailure) {
 		t.Fatalf("error = %v", err)
+	}
+	if !errors.Is(turnErr, original) || !errors.Is(agentErr, hookFailure) || reason != AgentEndFailed {
+		t.Fatalf("turn err = %v, agent err = %v, reason = %q", turnErr, agentErr, reason)
+	}
+}
+
+func TestClosingHooksRunAfterCancellation(t *testing.T) {
+	c := New()
+	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{{Kind: "ping"}}}})
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := c.AddTool("ping", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+		return protocol.ToolResult{OK: true}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var closingCtxErrs []error
+	if err := c.AddHooks(Hooks{
+		OnToolCallStart: func(context.Context, *ToolCallStartEvent) error {
+			cancel()
+			return nil
+		},
+		OnAgentTurnEnd: func(ctx context.Context, _ *AgentTurnEndEvent) error {
+			closingCtxErrs = append(closingCtxErrs, ctx.Err())
+			return nil
+		},
+		OnAgentEnd: func(ctx context.Context, _ *AgentEndEvent) error {
+			closingCtxErrs = append(closingCtxErrs, ctx.Err())
+			return nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Run(ctx, "task"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v", err)
+	}
+	if !reflect.DeepEqual(closingCtxErrs, []error{nil, nil}) {
+		t.Fatalf("closing hook contexts = %v", closingCtxErrs)
 	}
 }
 
@@ -396,61 +318,6 @@ func TestHooksCollectErrorsInRegistrationOrder(t *testing.T) {
 	}
 }
 
-func TestApprovalHooksCollectErrorsBeforeExecution(t *testing.T) {
-	for _, phase := range []string{"request", "resolved"} {
-		t.Run(phase, func(t *testing.T) {
-			c := New()
-			setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{{Kind: "ping"}}}})
-			calledTool := false
-			if err := c.AddTool("ping", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
-				calledTool = true
-				return protocol.ToolResult{OK: true}, nil
-			}}); err != nil {
-				t.Fatal(err)
-			}
-			if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, e *ToolCallStartEvent) error {
-				e.Decision.Action = DispositionAsk
-				return nil
-			}}); err != nil {
-				t.Fatal(err)
-			}
-			if err := c.SetApprovalHandler(func(context.Context, ApprovalRequest) (ActionDisposition, error) {
-				return DispositionAllow, nil
-			}); err != nil {
-				t.Fatal(err)
-			}
-			first := errors.New("first approval hook failed")
-			second := errors.New("second approval hook failed")
-			var called []string
-			for _, item := range []struct {
-				name string
-				err  error
-			}{{"first", first}, {"second", second}} {
-				h := Hooks{}
-				if phase == "request" {
-					h.OnApprovalRequest = func(context.Context, *ApprovalRequestEvent) error {
-						called = append(called, item.name)
-						return item.err
-					}
-				} else {
-					h.OnApprovalResolved = func(context.Context, *ApprovalResolvedEvent) error {
-						called = append(called, item.name)
-						return item.err
-					}
-				}
-				if err := c.AddHooks(h); err != nil {
-					t.Fatal(err)
-				}
-			}
-			_, err := c.Run(context.Background(), "task")
-			if !errors.Is(err, first) || !errors.Is(err, second) || calledTool ||
-				!reflect.DeepEqual(called, []string{"first", "second"}) {
-				t.Fatalf("error = %v, called = %v, tool ran = %v", err, called, calledTool)
-			}
-		})
-	}
-}
-
 func TestToolStartDenyStillCallsLaterHooks(t *testing.T) {
 	c := New()
 	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{{Kind: "ping"}}}})
@@ -470,7 +337,7 @@ func TestToolStartDenyStillCallsLaterHooks(t *testing.T) {
 	}
 	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, e *ToolCallStartEvent) error {
 		called = append(called, "error")
-		e.Decision.UpdatedArgs = protocol.MustArgsJSON(map[string]string{"value": "unsafe"})
+		e.Decision.Action = DispositionAllow
 		return errors.New("private failure")
 	}}); err != nil {
 		t.Fatal(err)

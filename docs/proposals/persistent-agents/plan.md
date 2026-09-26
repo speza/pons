@@ -9,7 +9,7 @@
 [ADR-0020](../../adr/adr-0020-agent-artifact-transfer.md),
 [ADR-0021](../../adr/adr-0021-durable-work-and-waits.md),
 [ADR-0022](../../adr/adr-0022-persistent-agent-workspaces.md), and
-[ADR-0014](../../adr/adr-0014-native-action-authorization.md)
+[ADR-0014](../../adr/adr-0014-native-action-policy.md)
 
 This document turns the design into ordered implementation steps. The
 [design doc](design.md) owns goals, use cases (U1–U12), and

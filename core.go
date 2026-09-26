@@ -44,14 +44,6 @@ type ControlPort interface {
 	Close(ctx context.Context) error
 }
 
-// AssistantResponseReconciler lets a stateful brain record the final tool
-// calls after response hooks and tool-call-start hooks have changed them.
-// Core calls it before executing hands so the brain's next turn reflects
-// the action that actually ran.
-type AssistantResponseReconciler interface {
-	ReconcileAssistantResponse(AssistantResponse) error
-}
-
 type AssistantPartType string
 
 const (
@@ -94,16 +86,6 @@ func (c *Core) Execute(ctx context.Context, a protocol.Action) (protocol.ToolRes
 // ToolHandler executes one action kind. Tool plugins provide these.
 type ToolHandler func(ctx context.Context, a protocol.Action) (protocol.ToolResult, error)
 
-// TurnHook observes one completed turn (response + results). Observational hooks
-// cannot fail the run; use TurnErrorHook for persistence that must be checked.
-type TurnHook func(obs protocol.Observation, turn protocol.TurnLog)
-
-// TurnErrorHook observes one completed turn and can fail the run. Persistence
-// hooks should use this form so a durable-write failure is not silently lost.
-type TurnErrorHook func(obs protocol.Observation, turn protocol.TurnLog) error
-
-type turnHook func(obs protocol.Observation, turn protocol.TurnLog) error
-
 // Plugin adds capabilities to a Core. Purely additive by contract:
 // Setup only registers; it must not change existing registrations.
 type Plugin interface {
@@ -127,7 +109,6 @@ type Core struct {
 	handlers      map[protocol.ActionKind]ToolHandler
 	specs         map[protocol.ActionKind]ToolSpec
 	wraps         []func(ToolPort) ToolPort
-	onTurns       []turnHook
 	onEvents      []func(Event)
 	onEventErrors []func(Event) error
 	hooks         []Hooks
@@ -302,22 +283,6 @@ func (c *Core) SetBrain(b ControlPort) error {
 	return nil
 }
 
-// OnTurn appends an observational hook for every completed turn. Errors from
-// this form are intentionally not possible; checked persistence should use
-// OnTurnError.
-func (c *Core) OnTurn(h TurnHook) {
-	c.onTurns = append(c.onTurns, func(obs protocol.Observation, turn protocol.TurnLog) error {
-		h(obs, turn)
-		return nil
-	})
-}
-
-// OnTurnError appends a persistence/audit hook whose error is propagated from
-// Run. Hooks run in registration order with ordinary OnTurn observers.
-func (c *Core) OnTurnError(h TurnErrorHook) {
-	c.onTurns = append(c.onTurns, turnHook(h))
-}
-
 // EventType names one stage of the agent loop.
 type EventType string
 
@@ -325,11 +290,8 @@ const (
 	EventAgentStart        EventType = "agent_start"
 	EventTurnStart         EventType = "turn_start"
 	EventAssistantResponse EventType = "assistant_response"
-	EventActionPreflight   EventType = "action_preflight"
 	EventActionStart       EventType = "action_start"
 	EventActionDecision    EventType = "action_decision"
-	EventApprovalRequest   EventType = "approval_request"
-	EventApprovalResolved  EventType = "approval_resolved"
 	EventActionDenied      EventType = "action_denied"
 	EventActionEnd         EventType = "action_end"
 	EventTurnEnd           EventType = "turn_end"
@@ -349,7 +311,7 @@ type Event struct {
 	Actions  []protocol.Action    // set on assistant_response and turn_end
 	Results  []protocol.ToolResult
 	Parts    []AssistantPart // set on assistant_response (ordered assistant content)
-	Decision *ActionDecision // set on decision/approval/denial events
+	Decision *ActionDecision // set on action_decision / action_denied
 }
 
 // OnEvent subscribes to the loop's event stream. Multiple subscribers
@@ -406,109 +368,75 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 	if maxTurns <= 0 {
 		maxTurns = 25
 	}
-	currentTurn := 0
-	endReason := AgentEndReason("")
-	agentStopReason := ""
+
+	// Closing hooks must observe failures and cancellation, so they run on a
+	// context that outlives the run's cancellation.
+	endCtx := context.WithoutCancel(ctx)
 	agentOpen := false
-	turnOpen := false
+	var openTurn *protocol.TurnLog // set while a turn awaits OnAgentTurnEnd
+	var endReason AgentEndReason
+	var endStopReason string
 	defer func() {
-		if turnOpen {
-			if runErr != nil {
-				event := AgentTurnErrorEvent{Turn: currentTurn, Err: runErr}
-				hookErr := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AgentTurnErrorEvent) error {
-					return h.OnAgentTurnError
-				}, &event)
-				if event.Err != nil {
-					runErr = event.Err
-				}
-				if hookErr != nil {
-					runErr = errors.Join(runErr, hookErr)
-				}
-			}
-			event := AgentTurnEndEvent{Turn: currentTurn, Run: result}
-			if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AgentTurnEndEvent) error {
-				return h.OnAgentTurnEnd
-			}, &event); err != nil {
-				runErr = errors.Join(runErr, err)
-			}
+		if openTurn != nil {
+			runErr = joinErr(runErr, c.endTurn(endCtx, *openTurn, runErr))
 		}
-		if agentOpen {
-			if runErr != nil {
-				event := AgentErrorEvent{Turn: currentTurn, Err: runErr}
-				hookErr := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AgentErrorEvent) error {
-					return h.OnAgentError
-				}, &event)
-				if event.Err != nil {
-					runErr = event.Err
-				}
-				if hookErr != nil {
-					runErr = errors.Join(runErr, hookErr)
-				}
-			}
-			if runErr != nil {
-				endReason = AgentEndFailed
-			}
-			event := AgentEndEvent{Result: result, Err: runErr, Reason: endReason, StopReason: agentStopReason}
-			if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AgentEndEvent) error {
-				return h.OnAgentEnd
-			}, &event); err != nil {
-				runErr = errors.Join(runErr, err)
-			}
-			result = event.Result
+		if !agentOpen {
+			return
+		}
+		if runErr != nil {
+			endReason = AgentEndFailed
+		}
+		event := AgentEndEvent{Result: result, Err: runErr, Reason: endReason, StopReason: endStopReason}
+		if err := dispatchHook(endCtx, c.hooks, func(h Hooks) func(context.Context, *AgentEndEvent) error {
+			return h.OnAgentEnd
+		}, &event); err != nil {
+			runErr = joinErr(runErr, fmt.Errorf("agent end: %w", err))
 		}
 	}()
+
 	if err := c.emit(Event{Type: EventAgentStart, Text: message}); err != nil {
 		return result, fmt.Errorf("event agent_start: %w", err)
 	}
 	agentOpen = true
-	agentStart := AgentStartEvent{Message: message, Workspace: c.Workspace, Platform: c.Platform}
 	if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AgentStartEvent) error {
 		return h.OnAgentStart
-	}, &agentStart); err != nil {
+	}, &AgentStartEvent{Message: message, Workspace: c.Workspace, Platform: c.Platform}); err != nil {
 		return result, fmt.Errorf("agent start: %w", err)
 	}
-	message = agentStart.Message
-	obs.Message = message
 
 	for turn := 1; turn <= maxTurns; turn++ {
 		obs.Turn, obs.Now = turn, time.Now()
 		if err := c.emit(Event{Type: EventTurnStart, Turn: turn}); err != nil {
 			return result, fmt.Errorf("event turn_start: %w", err)
 		}
-		currentTurn, turnOpen = turn, true
-		turnStart := AgentTurnStartEvent{Observation: obs}
+		openTurn = &protocol.TurnLog{Turn: turn}
 		if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AgentTurnStartEvent) error {
 			return h.OnAgentTurnStart
-		}, &turnStart); err != nil {
+		}, &AgentTurnStartEvent{Observation: obs}); err != nil {
 			return result, fmt.Errorf("agent turn start: %w", err)
 		}
-		obs = turnStart.Observation
-		obs.Turn, obs.Workspace, obs.Platform = turn, c.Workspace, c.Platform
 
 		response, err := brain.Respond(ctx, obs)
 		if err != nil {
 			return result, fmt.Errorf("brain response (turn %d): %w", turn, err)
 		}
-		responseEvent := AssistantResponseEvent{Turn: turn, Response: response}
 		if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AssistantResponseEvent) error {
 			return h.OnAssistantResponse
-		}, &responseEvent); err != nil {
+		}, &AssistantResponseEvent{Turn: turn, Response: response}); err != nil {
 			return result, fmt.Errorf("assistant response (turn %d): %w", turn, err)
 		}
-		response = responseEvent.Response
 		actions := response.Actions
 		if len(actions) == 0 {
 			return result, fmt.Errorf("brain returned no actions at turn %d", turn)
 		}
+		openTurn.Actions = actions
 		for _, part := range response.Parts {
 			if part.Type == AssistantPartText {
-				recentContext = boundedActionContext(append(recentContext, ActionContextItem{
-					Source: ContextAssistant, Text: part.Text,
-				}))
+				recentContext = append(recentContext, ActionContextItem{Source: ContextAssistant, Text: part.Text})
 			}
 		}
+		recentContext = boundedActionContext(recentContext)
 
-		var results []protocol.ToolResult
 		var answer string
 		finished := false
 		// Everything before a finish action executes — concurrently. The
@@ -529,62 +457,32 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 			answer, _ = protocol.StringArg(actions[finishIdx].Args, "reason")
 			c.logf("[turn %d] brain signalled finish: answer_chars=%d", turn, len(answer))
 		}
-		var parts []AssistantPart
 		if len(run) > 0 {
-			parts, err = normalizeAssistantParts(response.Parts, run)
+			parts, err := normalizeAssistantParts(response.Parts, run)
 			if err != nil {
 				return result, fmt.Errorf("brain response (turn %d): %w", turn, err)
-			}
-		}
-
-		approved := make([]bool, len(run))
-		decisions := make([]*ActionDecision, len(run))
-		results = make([]protocol.ToolResult, len(run))
-		for i := range run {
-			a := run[i]
-			decision, action, err := c.evaluateToolCallStart(ctx, ToolCallStartEvent{
-				Turn: turn, Message: obs.Message, Workspace: c.Workspace,
-				Platform: c.Platform, Environment: c.ActionEnvironment,
-				Action: a, Tool: c.toolSpec(a.Kind), RecentContext: boundedActionContext(recentContext),
-			}, denials)
-			if err != nil {
-				return result, fmt.Errorf("tool call start (turn %d): %w", turn, err)
-			}
-			run[i] = action
-			if decision != nil && decision.Action == DispositionDeny {
-				decisions[i] = decision
-				results[i] = deniedResult(action, decision.ReasonCode)
-				continue
-			}
-			approved[i] = true
-		}
-		if len(run) > 0 {
-			if len(response.Parts) == 0 {
-				for i := range run {
-					parts[i].Action = run[i]
-				}
-			} else {
-				byID := make(map[string]protocol.Action, len(run))
-				for _, action := range run {
-					byID[action.ID] = action
-				}
-				for i := range parts {
-					if parts[i].Type == AssistantPartToolCall {
-						parts[i].Action = byID[parts[i].Action.ID]
-					}
-				}
-			}
-			if reconciler, ok := brain.(AssistantResponseReconciler); ok {
-				if err := reconciler.ReconcileAssistantResponse(AssistantResponse{Parts: parts, Actions: run}); err != nil {
-					return result, fmt.Errorf("reconcile assistant response (turn %d): %w", turn, err)
-				}
 			}
 			if err := c.emit(Event{Type: EventAssistantResponse, Turn: turn, Actions: slices.Clone(run), Parts: parts}); err != nil {
 				return result, fmt.Errorf("event assistant_response: %w", err)
 			}
 		}
+
+		requests := make([]ToolCallStartEvent, len(run))
+		for i, a := range run {
+			requests[i] = ToolCallStartEvent{
+				Turn: turn, Message: obs.Message, Workspace: c.Workspace,
+				Platform: c.Platform, Environment: c.ActionEnvironment,
+				Action: a, Tool: c.toolSpec(a.Kind), RecentContext: recentContext,
+			}
+		}
+		decisions, err := c.preflight(ctx, requests, denials)
+		if err != nil {
+			return result, fmt.Errorf("tool call start (turn %d): %w", turn, err)
+		}
+		denied := func(i int) bool { return decisions != nil && decisions[i].Action == DispositionDeny }
+
 		for i := range run {
-			if !approved[i] {
+			if denied(i) {
 				continue
 			}
 			a := run[i]
@@ -593,9 +491,11 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 			}
 		}
 
+		results := make([]protocol.ToolResult, len(run))
 		var wg sync.WaitGroup
 		for i, a := range run {
-			if !approved[i] {
+			if denied(i) {
+				results[i] = deniedResult(a, decisions[i].ReasonCode)
 				continue
 			}
 			wg.Add(1)
@@ -616,43 +516,28 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 
 		var toolHookErrors []error
 		for i := range run {
-			a, tr := run[i], results[i]
-			if !approved[i] {
-				denied := ToolCallDeniedEvent{Turn: turn, Action: a, Tool: c.toolSpec(a.Kind), Result: tr, Decision: *decisions[i]}
-				if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *ToolCallDeniedEvent) error {
-					return h.OnToolCallDenied
-				}, &denied); err != nil {
-					toolHookErrors = append(toolHookErrors, fmt.Errorf("tool call denied: %w", err))
-				}
-				results[i] = denied.Result
-				results[i].ActionID, results[i].Kind, results[i].OK = a.ID, string(a.Kind), false
-				if err := c.emit(Event{Type: EventActionDenied, Turn: turn, Action: &a,
-					Result: &results[i], Tool: c.toolSpec(a.Kind), Decision: decisions[i]}); err != nil {
-					return result, fmt.Errorf("event action_denied: %w", err)
-				}
-				continue
+			a := run[i]
+			end := ToolCallEndEvent{Turn: turn, Action: a, Tool: c.toolSpec(a.Kind), Result: results[i]}
+			eventType := EventActionEnd
+			if denied(i) {
+				end.Decision, eventType = &decisions[i], EventActionDenied
 			}
-			if !tr.OK {
-				failure := ToolCallErrorEvent{Turn: turn, Action: a, Tool: c.toolSpec(a.Kind), Result: tr, Err: fmt.Errorf("tool call failed: %s", tr.Error)}
-				if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *ToolCallErrorEvent) error {
-					return h.OnToolCallError
-				}, &failure); err != nil {
-					toolHookErrors = append(toolHookErrors, fmt.Errorf("tool call error: %w", err))
-				}
-				tr = failure.Result
-			}
-			completed := ToolCallEndEvent{Turn: turn, Action: a, Tool: c.toolSpec(a.Kind), Result: tr}
 			if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *ToolCallEndEvent) error {
 				return h.OnToolCallEnd
-			}, &completed); err != nil {
+			}, &end); err != nil {
 				toolHookErrors = append(toolHookErrors, fmt.Errorf("tool call end: %w", err))
 			}
-			results[i] = completed.Result
+			results[i] = end.Result
 			results[i].ActionID, results[i].Kind = a.ID, string(a.Kind)
-			if err := c.emit(Event{Type: EventActionEnd, Turn: turn, Action: &a, Result: &results[i], Tool: c.toolSpec(a.Kind)}); err != nil {
-				return result, fmt.Errorf("event action_end: %w", err)
+			if denied(i) {
+				results[i].OK = false
 			}
-			c.logf("[turn %d] ← %s ok=%v err=%q", turn, a.Kind, tr.OK, tr.Error)
+			openTurn.Results = results[:i+1]
+			if err := c.emit(Event{Type: eventType, Turn: turn, Action: &a, Result: &results[i],
+				Tool: c.toolSpec(a.Kind), Decision: end.Decision}); err != nil {
+				return result, fmt.Errorf("event %s: %w", eventType, err)
+			}
+			c.logf("[turn %d] ← %s ok=%v err=%q", turn, a.Kind, results[i].OK, results[i].Error)
 		}
 		if err := errors.Join(toolHookErrors...); err != nil {
 			return result, err
@@ -667,20 +552,12 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 		}
 		recentContext = boundedActionContext(recentContext)
 		result.Turns, result.History = turn, append(result.History, turnLog)
-		for _, h := range c.onTurns {
-			if err := h(obs, turnLog); err != nil {
-				return result, fmt.Errorf("turn hook (turn %d): %w", turn, err)
-			}
-		}
 		if err := c.emit(Event{Type: EventTurnEnd, Turn: turn, Actions: actions, Results: results}); err != nil {
 			return result, fmt.Errorf("event turn_end: %w", err)
 		}
-		turnOpen = false
-		turnEnd := AgentTurnEndEvent{Turn: turn, Run: result}
-		if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AgentTurnEndEvent) error {
-			return h.OnAgentTurnEnd
-		}, &turnEnd); err != nil {
-			return result, fmt.Errorf("agent turn end: %w", err)
+		openTurn = nil
+		if err := c.endTurn(ctx, turnLog, nil); err != nil {
+			return result, err
 		}
 
 		if finished {
@@ -707,8 +584,7 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 
 		obs.History = append(obs.History, turnLog)
 		if stopped {
-			endReason = AgentEndStopped
-			agentStopReason = stopReason
+			endReason, endStopReason = AgentEndStopped, stopReason
 			c.logf("[turn %d] brain stopped: reason_chars=%d", turn, len(stopReason))
 			if err := c.emit(Event{Type: EventStopped, Turn: turn, Text: stopReason}); err != nil {
 				return result, fmt.Errorf("event stopped: %w", err)
@@ -722,6 +598,23 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 		return result, fmt.Errorf("event exhausted: %w", err)
 	}
 	return result, nil
+}
+
+func (c *Core) endTurn(ctx context.Context, log protocol.TurnLog, turnErr error) error {
+	event := AgentTurnEndEvent{Turn: log.Turn, Log: log, Err: turnErr}
+	if err := dispatchHook(ctx, c.hooks, func(h Hooks) func(context.Context, *AgentTurnEndEvent) error {
+		return h.OnAgentTurnEnd
+	}, &event); err != nil {
+		return fmt.Errorf("agent turn end: %w", err)
+	}
+	return nil
+}
+
+func joinErr(err, next error) error {
+	if next == nil {
+		return err
+	}
+	return errors.Join(err, next)
 }
 
 func normalizeAssistantParts(parts []AssistantPart, actions []protocol.Action) ([]AssistantPart, error) {

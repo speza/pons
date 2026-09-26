@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	ponsruntime "github.com/samperrin/pons/runtime"
 )
@@ -153,8 +154,9 @@ VALUES(?, ?, ?, ?, ?, ?, ?)`, part.ToolCallID, event.ConversationID, event.RunID
 
 	case ponsruntime.EventToolOutcomeRecorded:
 		outcome := event.ToolOutcome
-		if outcome == nil || outcome.ToolCallID == "" || outcome.Result == nil ||
-			(outcome.Status != ponsruntime.ToolCompleted && outcome.Status != ponsruntime.ToolFailed && outcome.Status != ponsruntime.ToolInterrupted) {
+		if outcome == nil || outcome.ToolCallID == "" || outcome.Result == nil || !slices.Contains([]string{
+			ponsruntime.ToolCompleted, ponsruntime.ToolFailed, ponsruntime.ToolDenied, ponsruntime.ToolInterrupted,
+		}, outcome.Status) {
 			return errors.New("invalid tool outcome")
 		}
 		return updateOne(ctx, tx, `

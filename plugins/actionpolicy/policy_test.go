@@ -95,24 +95,49 @@ func TestPolicyInvalidAssessmentFallsBack(t *testing.T) {
 	}
 }
 
-func TestGeneratedConfidenceAboveThresholdAllows(t *testing.T) {
+func TestGeneratedConfidenceRequiresOptIn(t *testing.T) {
 	req := pons.ToolCallStartEvent{Action: protocol.Action{Kind: "run"}}
 	for _, tt := range []struct {
 		name        string
 		probability bool
+		optIn       bool
 		want        pons.ActionDisposition
+		reason      string
 	}{
-		{"generated estimate", false, pons.DispositionAllow},
-		{"choice probability", true, pons.DispositionAllow},
+		{"generated estimate", false, false, pons.DispositionAsk, "classifier_generated_confidence"},
+		{"generated estimate opted in", false, true, pons.DispositionAllow, "classifier_safe"},
+		{"choice probability", true, false, pons.DispositionAllow, "classifier_safe"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			classifier := ClassifierFunc(func(context.Context, pons.ToolCallStartEvent) (pons.ActionAssessment, error) {
 				return pons.ActionAssessment{Risk: "safe", Confidence: 0.99, ProbabilityConfidence: tt.probability}, nil
 			})
-			decision, err := (Policy{Classifiers: []Classifier{classifier}}).decide(context.Background(), req)
-			if err != nil || decision.Action != tt.want {
+			policy := Policy{Classifiers: []Classifier{classifier}, AllowGeneratedConfidence: tt.optIn}
+			decision, err := policy.decide(context.Background(), req)
+			if err != nil || decision.Action != tt.want || decision.ReasonCode != tt.reason {
 				t.Fatalf("decision=%+v error=%v", decision, err)
 			}
 		})
+	}
+}
+
+func TestToolRulesWithoutClassifier(t *testing.T) {
+	policy := Policy{Rules: []Rule{
+		ToolRule(pons.DispositionAllow, "rule_allow", "*"),
+		ToolRule(pons.DispositionAsk, "shell_review", "bash"),
+	}}
+	for kind, want := range map[protocol.ActionKind]pons.ActionDisposition{
+		"bash": pons.DispositionAsk, "read": pons.DispositionAllow,
+	} {
+		decision, err := policy.decide(context.Background(), pons.ToolCallStartEvent{Action: protocol.Action{Kind: kind}})
+		if err != nil || decision.Action != want {
+			t.Fatalf("%s: decision=%+v error=%v", kind, decision, err)
+		}
+	}
+
+	unmatched := Policy{Rules: []Rule{ToolRule(pons.DispositionDeny, "no_bash", "bash")}}
+	decision, err := unmatched.decide(context.Background(), pons.ToolCallStartEvent{Action: protocol.Action{Kind: "read"}})
+	if err != nil || decision.Action != pons.DispositionAsk || decision.ReasonCode != "no_matching_rule" {
+		t.Fatalf("unmatched decision=%+v error=%v", decision, err)
 	}
 }

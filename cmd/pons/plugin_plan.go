@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 
@@ -17,14 +18,15 @@ type hostPluginSource struct {
 	Config   json.RawMessage
 }
 
-func resolvePluginPlan(configured hostconfig.Options, explicit []string, replaceManifests bool) (
+// resolvePluginPlan routes configured and explicit manifests by placement.
+// Explicit --plugin manifests replace configured hands plugins only; host
+// hook plugins, such as an installed policy, stay enabled.
+func resolvePluginPlan(configured hostconfig.Options, explicit []string, replaceHands bool) (
 	hands []string,
 	host []hostPluginSource,
-	configs map[string]json.RawMessage,
 	err error,
 ) {
-	configs = make(map[string]json.RawMessage)
-	addManifest := func(path string, config json.RawMessage) error {
+	addManifest := func(path string, config json.RawMessage, configured bool) error {
 		manifest, loadErr := external.LoadManifest(path)
 		if loadErr != nil {
 			return loadErr
@@ -32,10 +34,17 @@ func resolvePluginPlan(configured hostconfig.Options, explicit []string, replace
 		path = manifest.Path()
 		if manifest.Placement == external.PlacementHost {
 			host = append(host, hostPluginSource{Manifest: path, Config: config})
-		} else {
-			hands = append(hands, path)
-			configs[path] = config
+			return nil
 		}
+		// Hands plugins run inside the execution environment, which has no
+		// channel for plugin config yet; refuse config instead of dropping it.
+		if trimmed := bytes.TrimSpace(config); len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("{}")) {
+			return fmt.Errorf("plugin %q: config is supported only for host hook plugins", manifest.Name)
+		}
+		if configured && replaceHands {
+			return nil
+		}
+		hands = append(hands, path)
 		return nil
 	}
 	for _, plugin := range configured.Plugins {
@@ -43,20 +52,17 @@ func resolvePluginPlan(configured hostconfig.Options, explicit []string, replace
 			host = append(host, hostPluginSource{Plugin: plugin.Host})
 			continue
 		}
-		if replaceManifests {
-			continue
-		}
 		if plugin.Manifest == "" {
-			return nil, nil, nil, fmt.Errorf("configured plugin has no host or manifest")
+			return nil, nil, fmt.Errorf("configured plugin has no host or manifest")
 		}
-		if err := addManifest(plugin.Manifest, plugin.Config); err != nil {
-			return nil, nil, nil, err
+		if err := addManifest(plugin.Manifest, plugin.Config, true); err != nil {
+			return nil, nil, err
 		}
 	}
 	for _, path := range explicit {
-		if err := addManifest(path, nil); err != nil {
-			return nil, nil, nil, err
+		if err := addManifest(path, nil, false); err != nil {
+			return nil, nil, err
 		}
 	}
-	return hands, host, configs, nil
+	return hands, host, nil
 }

@@ -78,7 +78,8 @@ type ApprovalRequest struct {
 type ApprovalHandler func(context.Context, ApprovalRequest) (ActionDisposition, error)
 type Hooks struct {
     OnToolCallStart func(context.Context, *ToolCallStartEvent) error
-    // Other event-specific callbacks may be registered alongside it.
+    OnToolCallEnd   func(context.Context, *ToolCallEndEvent) error // every outcome, including denials
+    // Observer callbacks for agent and turn phases sit alongside them.
 }
 ```
 
@@ -89,23 +90,25 @@ the contract:
 - the action-policy plugin maps the assessment to `Allow`, `Ask`, or `Deny`;
 - multiple hooks combine with `Deny` before `Ask` before `Allow`, independent
   of registration order;
-- matching hooks run in registration order and collect errors; a tool-call-start
-  error requests approval, while approval-hook errors stop execution;
-- a hook may replace tool arguments; every start hook reevaluates the changed
-  call, invalid or repeatedly changing arguments are denied, and the brain's
-  recorded call is reconciled with the final action before execution;
-- `Ask` invokes an application-supplied approval handler or ADR-0021's
-  durable pause adapter;
+- matching hooks run in registration order; a tool-call-start error requests
+  approval unless that hook also denied the call;
+- hooks decide but never rewrite a call: the brain's recorded call is always
+  the one that runs, and a hook that wants a different call denies it so the
+  brain can propose an alternative;
+- `Ask` invokes the single application-supplied approval handler or ADR-0021's
+  durable pause adapter; there are no separate approval hooks;
 - an approval handler may return only `Allow` or `Deny` for the exact pending
   action; and
 - `Deny` is final for that invocation.
 
 The core does not own a terminal, GUI, user identity, or persistence format.
 An explicitly installed host-side external plugin may also implement
-`on_tool_call_start` through the versioned `hook_provider/v1` protocol, which
-supports the full Core hook set. It receives the policy event but no Core
-handle or inherited credentials; only its decision is applied to the pending
-call.
+`on_tool_call_start` through the versioned `hook_provider/v1` protocol. It is
+an untrusted boundary: it receives the policy event but no Core handle or
+inherited credentials, and only the disposition and reason code of its
+decision are applied. Because decisions combine strictest-first, an external
+plugin can add ask or deny but cannot override another plugin or approve a
+pending call. Its other hooks are observers of bounded event summaries.
 An interactive CLI supplies an approval handler; an embedding application may
 block, display a request elsewhere, or bridge it to an asynchronous UI. A
 non-interactive caller may use ADR-0021's durable pause and exact-action
@@ -114,10 +117,12 @@ than silently allowed.
 
 ### 2. Action policy happens before tool execution
 
-For every non-`finish` action in a plan, the core evaluates actions in plan
-order before launching any approved tool handler. This gives interactive
-clients deterministic prompts and ensures no sibling action executes while a
-user is deciding about an earlier action.
+For every non-`finish` action in a plan, the core decides every action before
+launching any approved tool handler. Start hooks for different actions run
+concurrently, so classifier latency does not add up across a turn; approvals
+are then requested one at a time in plan order. This gives interactive clients
+deterministic prompts and ensures no sibling action executes while a user is
+deciding about an earlier action.
 
 After preflight:
 
@@ -292,10 +297,11 @@ tool-call-start hook is for preflight decisions and approval.
   composes ordered policy rules and classifier fallbacks. Multiple trusted
   hooks compose with deny before ask before allow. Approval is a synchronous
   callback.
-- Core emits `action_decision`, `approval_request`, `approval_resolved`, and
-  `action_denied` events. A denied call does not emit `action_end`; the runtime
-  persists it with tool status `denied` and a failed result. CLI rendering and
-  a remote pending-token/resume API remain open.
+- Core emits one `action_decision` event per call with the final decision
+  after approval, and `action_denied` instead of `action_end` for a denied
+  call. The runtime persists a denial with tool status `denied` and a failed
+  result, and index rebuild accepts that status. CLI rendering and a remote
+  pending-token/resume API remain open.
 - Three denials of the same action kind and JSON arguments within one run
   suppress further approval requests for that action. A materially different
   argument set is assessed afresh.
@@ -306,9 +312,15 @@ tool-call-start hook is for preflight decisions and approval.
   `RemoteConfig.Model`. The TypeSafe adapter defaults to `jev-latest` and also
   accepts a model name through `RemoteConfig.Model`. Jev's choice confidence
   is a returned probability.
-  The OpenAI adapter's confidence is a model-generated estimate rather than a
-  calibrated probability. A valid safe result above the configured threshold
-  allows the call; review and low-confidence results request approval.
+  The OpenAI and Codex adapters' confidence is a model-generated estimate
+  rather than a calibrated probability, so their `safe` results request
+  approval unless the policy sets `AllowGeneratedConfidence`
+  (`allow_generated_confidence`). A safe returned-probability result at or
+  above the threshold allows the call; review and low-confidence results
+  request approval.
+- Configured rules match tool kinds (`"*"` for all) with deny, ask, or allow,
+  applied before classifiers. A policy may be rules-only; a call that no rule
+  settles and no classifier assesses requests approval.
 - CLI configuration selects one enabled classifier by registered plugin ID,
   along with its model, key environment variable, timeout, and confidence
   behavior. An interactive CLI approval

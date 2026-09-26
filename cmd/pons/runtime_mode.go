@@ -47,7 +47,6 @@ type serverOptions struct {
 	BashMaxBytes            int
 	PluginPaths             []string
 	HostSources             []hostPluginSource
-	PluginConfigs           map[string]json.RawMessage
 	PluginPath              string
 	PluginMaxResultBytes    int
 	Debug                   bool
@@ -762,9 +761,6 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		"network", metadata.Network, "workspace", request.Workspace, "tools", len(core.ToolSpecs()))
 	core.OnEventError(func(event pons.Event) error {
 		switch event.Type {
-		case pons.EventActionPreflight:
-			runLog.Debug("tool preflight started", "turn", event.Turn,
-				"action_id", event.Action.ID, "tool", event.Action.Kind)
 		case pons.EventActionDecision:
 			decision := event.Decision
 			fields := []any{

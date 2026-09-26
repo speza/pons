@@ -134,8 +134,9 @@ protocol-only stdout. A plugin may implement the protocol directly.
 - A subprocess alone does not protect the host from a malicious child;
   deployment isolation remains explicit under ADR-0004.
 - New capabilities require a new host-side contract and adapter rather than
-  adding arbitrary methods at runtime. `hook_provider/v1` supports the Core
-  hook set with event-specific patch contracts.
+  adding arbitrary methods at runtime. `hook_provider/v1` exposes the Core
+  hooks as observers, plus a tool-call-start decision that can only add ask
+  or deny.
 
 ## References
 

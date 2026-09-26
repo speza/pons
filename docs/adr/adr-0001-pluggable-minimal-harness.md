@@ -59,11 +59,9 @@ is additive and conflicts fail during composition:
 - `WrapTool` composes execution middleware explicitly.
 - `RegisterCapability` rejects empty names, nil values, and duplicate names;
   `Capability` lets another trusted plugin resolve a registered value.
-- `AddHooks` composes typed agent, turn, tool, and approval callbacks through
-  one plugin registration value. `OnToolCallStart` is the pre-execution policy
-  and mutation point.
-- `OnTurn` and `OnTurnError` attach observational and checked persistence
-  hooks.
+- `AddHooks` composes typed agent, turn, and tool callbacks through one plugin
+  registration value. `OnToolCallStart` is the sole pre-execution decision
+  point; `OnAgentTurnEnd` replaces separate turn observers.
 
 The composing application chooses the plugin set and order. The core does not
 import or discover plugins.
@@ -101,16 +99,16 @@ contract is defined by ADR-0003.
   error.
 
 `OnEvent` exposes the loop stages (`agent_start`, `turn_start`, action start
-and end, turn end, finish, stopped, and exhausted). Ordinary turn observers
-cannot fail a run; checked persistence uses `OnTurnError`. Tool calls within a
-turn execute concurrently and are recorded in call order, as specified by
-ADR-0006.
+and end, turn end, finish, stopped, and exhausted); a checked event sink can
+fail the run before the next side effect. Tool calls within a turn execute
+concurrently and are recorded in call order, as specified by ADR-0006.
 
-Typed plugin hooks use agent, agent-turn, tool-call, and approval phases.
-`OnToolCallStart` can allow, ask, deny, or change tool arguments. A denied call
-emits `OnToolCallDenied` without executing; executed calls emit tool end and,
-on failure, tool error. Each hook can observe or apply its event's supported
-effects.
+Typed plugin hooks cover agent, agent-turn, and tool-call phases. They are
+observers except `OnToolCallStart`, which allows, asks, or denies a call, and
+`OnToolCallEnd`, which may change the model-visible result. `OnToolCallEnd`
+reports every recorded outcome, including denied calls, which never execute.
+Hooks cannot rewrite the brain's message, history, response, or tool
+arguments, so a stateful brain's transcript always matches what ran.
 
 The shipped LLM brain makes one provider call per turn, discovers the schemas
 registered in `Core`, converts tool calls to `Action` values, and treats a

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/samperrin/pons/protocol"
@@ -85,7 +86,7 @@ type ToolCallStartEvent struct {
 	Resources     []ToolResource
 	ResourceError bool // projection failed; policy can still apply hard denies
 	RecentContext []ActionContextItem
-	Decision      ActionDecision // set to allow, ask, deny, or replace arguments
+	Decision      ActionDecision // set to allow, ask, or deny
 }
 
 // ActionEnvironment is trusted host-supplied execution context. It is
@@ -101,9 +102,6 @@ type ActionDecision struct {
 	Action     ActionDisposition
 	Assessment ActionAssessment
 	ReasonCode string
-	// UpdatedArgs replaces the proposed tool arguments before execution. The
-	// core reruns every start hook on the changed call before it can proceed.
-	UpdatedArgs json.RawMessage
 }
 
 // ApprovalRequest is passed to the application for an exact pending action.
@@ -198,226 +196,138 @@ func cloneToolCallStartEvent(req ToolCallStartEvent) ToolCallStartEvent {
 	return req
 }
 
-func (c *Core) evaluateToolCallStart(ctx context.Context, req ToolCallStartEvent, denials map[string]int) (*ActionDecision, protocol.Action, error) {
-	hasStartHook := false
-	for _, registered := range c.hooks {
-		if registered.OnToolCallStart != nil {
-			hasStartHook = true
-			break
-		}
+func (c *Core) hasToolCallStartHooks() bool {
+	return slices.ContainsFunc(c.hooks, func(h Hooks) bool { return h.OnToolCallStart != nil })
+}
+
+// preflight decides every pending call of one turn before any of them runs.
+// Start hooks for different calls run concurrently; approvals are then
+// resolved one at a time in call order. Without start hooks every call is
+// allowed and preflight returns nil.
+func (c *Core) preflight(ctx context.Context, requests []ToolCallStartEvent, denials map[string]int) ([]ActionDecision, error) {
+	if !c.hasToolCallStartHooks() {
+		return nil, nil
 	}
-	if !hasStartHook {
-		return nil, req.Action, nil
-	}
-	if err := c.emit(Event{Type: EventActionPreflight, Turn: req.Turn, Action: &req.Action, Tool: req.Tool}); err != nil {
-		return nil, req.Action, fmt.Errorf("event action_preflight: %w", err)
-	}
-	decision := ActionDecision{Action: DispositionAllow}
-	for pass := range 8 {
-		key := denialKey(req.Action)
-		if denials[key] >= repeatedDenialLimit {
-			decision = ActionDecision{Action: DispositionDeny, ReasonCode: "repeated_denial"}
-			break
-		}
-		decision = ActionDecision{Action: DispositionAllow}
-		req.Resources, req.ResourceError = nil, false
-		if project := c.resources[req.Action.Kind]; project != nil {
-			projectedAction := req.Action
-			projectedAction.Args = slices.Clone(req.Action.Args)
-			resources, err := project(projectedAction)
-			if err != nil {
-				req.ResourceError = true
-			} else {
-				req.Resources = resources
-			}
-		}
-		changed := false
-		for _, registered := range c.hooks {
-			if registered.OnToolCallStart == nil {
-				continue
-			}
-			event := cloneToolCallStartEvent(req)
-			err := registered.OnToolCallStart(ctx, &event)
-			candidate := event.Decision
-			if err != nil {
-				candidate = ActionDecision{Action: DispositionAsk, ReasonCode: "tool_call_start_unavailable"}
-			} else if candidate.Action == "" {
-				candidate.Action = DispositionAllow
-			} else if candidate.Action != DispositionAllow && candidate.Action != DispositionAsk && candidate.Action != DispositionDeny {
-				candidate = ActionDecision{Action: DispositionAsk, ReasonCode: "tool_call_start_uncertain"}
-			}
-			if err := ctx.Err(); err != nil {
-				return nil, req.Action, err
-			}
-			if len(candidate.UpdatedArgs) > 0 && candidate.Action != DispositionDeny && decision.Action != DispositionDeny {
-				updated := bytes.TrimSpace(candidate.UpdatedArgs)
-				_, argsErr := protocol.ObjectArgs(updated)
-				if len(updated) == 0 || updated[0] != '{' || argsErr != nil {
-					candidate = ActionDecision{Action: DispositionDeny, ReasonCode: "invalid_tool_call_update"}
-				} else if !bytes.Equal(req.Action.Args, candidate.UpdatedArgs) {
-					req.Action.Args = slices.Clone(candidate.UpdatedArgs)
-					changed = true
-					break
-				}
-			}
-			candidate.UpdatedArgs = nil
-			if candidate.Action == DispositionDeny ||
-				(candidate.Action == DispositionAsk && decision.Action == DispositionAllow) ||
-				(candidate.Action == DispositionAllow && decision.Action == DispositionAllow && decision.ReasonCode == "") {
-				decision = candidate
-			}
-		}
-		if changed {
-			if pass == 7 {
-				decision = ActionDecision{Action: DispositionDeny, ReasonCode: "tool_call_update_limit"}
-				break
-			}
+
+	decisions := make([]ActionDecision, len(requests))
+	var wg sync.WaitGroup
+	for i, req := range requests {
+		if denials[denialKey(req.Action)] >= repeatedDenialLimit {
+			decisions[i] = ActionDecision{Action: DispositionDeny, ReasonCode: "repeated_denial"}
 			continue
 		}
-		if req.ResourceError && decision.Action != DispositionDeny {
-			decision = ActionDecision{Action: DispositionAsk, ReasonCode: "resource_projection_failed"}
-		}
-		break
+		wg.Go(func() { decisions[i] = c.decideToolCall(ctx, req) })
 	}
+	wg.Wait()
 	if err := ctx.Err(); err != nil {
-		return nil, req.Action, err
+		return nil, err
 	}
-	if decision.ReasonCode != "" {
-		fallback := "reason_unavailable"
-		if decision.Action == DispositionDeny {
-			fallback = "tool_call_denied"
+
+	for i, req := range requests {
+		if decisions[i].Action == DispositionAsk {
+			decisions[i] = c.resolveApproval(ctx, req, decisions[i])
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 		}
-		decision.ReasonCode = safeReasonCode(decision.ReasonCode, fallback)
-	} else if decision.Action == DispositionDeny {
-		decision.ReasonCode = "tool_call_denied"
+		if decisions[i].Action == DispositionDeny {
+			denials[denialKey(req.Action)]++
+		}
+		observed := decisions[i]
+		if err := c.emit(Event{Type: EventActionDecision, Turn: req.Turn, Action: &req.Action,
+			Tool: req.Tool, Decision: &observed}); err != nil {
+			return nil, fmt.Errorf("event action_decision: %w", err)
+		}
+	}
+	return decisions, nil
+}
+
+// decideToolCall runs every start hook on one call and merges their answers.
+// Hook failures and unknown answers fail closed to Ask; a Deny always holds.
+func (c *Core) decideToolCall(ctx context.Context, req ToolCallStartEvent) ActionDecision {
+	if project := c.resources[req.Action.Kind]; project != nil {
+		projected := req.Action
+		projected.Args = slices.Clone(req.Action.Args)
+		if resources, err := project(projected); err != nil {
+			req.ResourceError = true
+		} else {
+			req.Resources = resources
+		}
+	}
+
+	decision := ActionDecision{Action: DispositionAllow}
+	for _, registered := range c.hooks {
+		if registered.OnToolCallStart == nil {
+			continue
+		}
+		event := cloneToolCallStartEvent(req)
+		err := registered.OnToolCallStart(ctx, &event)
+		decision = mergeDecision(decision, hookDecision(event.Decision, err))
+	}
+	if req.ResourceError && decision.Action != DispositionDeny {
+		decision = ActionDecision{Action: DispositionAsk, ReasonCode: "resource_projection_failed"}
+	}
+
+	if decision.Action == DispositionDeny {
+		decision.ReasonCode = safeReasonCode(decision.ReasonCode, "tool_call_denied")
+	} else if decision.ReasonCode != "" {
+		decision.ReasonCode = safeReasonCode(decision.ReasonCode, "reason_unavailable")
 	}
 	if decision.Assessment.ReasonCode != "" {
 		decision.Assessment.ReasonCode = safeReasonCode(decision.Assessment.ReasonCode, "reason_unavailable")
 	}
-	observed := decision
-	if err := c.emit(Event{Type: EventActionDecision, Turn: req.Turn, Action: &req.Action,
-		Tool: req.Tool, Decision: &observed}); err != nil {
-		return nil, req.Action, fmt.Errorf("event action_decision: %w", err)
-	}
-	if decision.Action == DispositionAsk {
-		pending := decision
-		if err := c.emit(Event{Type: EventApprovalRequest, Turn: req.Turn, Action: &req.Action,
-			Tool: req.Tool, Decision: &pending}); err != nil {
-			return nil, req.Action, fmt.Errorf("event approval_request: %w", err)
-		}
-		approval := ApprovalRequest{ToolCallStartEvent: cloneToolCallStartEvent(req), Assessment: decision.Assessment}
-		hookDecision, err := c.resolveApprovalHooks(ctx, approval)
-		if err != nil {
-			return nil, req.Action, err
-		}
-		decision.Action = DispositionDeny
-		if hookDecision != nil {
-			decision.Action = *hookDecision
-			if decision.Action == DispositionDeny {
-				decision.ReasonCode = "approval_denied"
-			}
-		} else if c.approver != nil {
-			answer, err := c.approver(ctx, approval)
-			if err == nil && answer == DispositionAllow {
-				decision.Action = DispositionAllow
-			} else if err != nil {
-				decision.ReasonCode = "approval_unavailable"
-			} else if answer != DispositionDeny {
-				decision.ReasonCode = "invalid_approval"
-			} else if decision.ReasonCode == "" {
-				decision.ReasonCode = "approval_denied"
-			}
-		} else {
-			decision.ReasonCode = "approval_required"
-		}
-		if err := c.resolveApprovalResolvedHooks(ctx, approval, &decision); err != nil {
-			return nil, req.Action, err
-		}
-		if err := c.emit(Event{Type: EventApprovalResolved, Turn: req.Turn, Action: &req.Action,
-			Tool: req.Tool, Decision: &decision}); err != nil {
-			return nil, req.Action, fmt.Errorf("event approval_resolved: %w", err)
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, req.Action, err
-	}
-	if decision.Action == DispositionDeny {
-		denials[denialKey(req.Action)]++
-	}
-	return &decision, req.Action, nil
+	return decision
 }
 
-func (c *Core) resolveApprovalHooks(ctx context.Context, request ApprovalRequest) (*ActionDisposition, error) {
-	var errs []error
-	var allowed, denied bool
-	for i, registered := range c.hooks {
-		if registered.OnApprovalRequest == nil {
-			continue
-		}
-		event := ApprovalRequestEvent{Request: request}
-		if err := registered.OnApprovalRequest(ctx, &event); err != nil {
-			errs = append(errs, fmt.Errorf("approval request hook %d: %w", i+1, err))
-		}
-		if event.Decision == nil {
-			continue
-		}
-		if *event.Decision != DispositionAllow && *event.Decision != DispositionDeny {
-			errs = append(errs, fmt.Errorf("approval request hook %d: invalid decision", i+1))
-			continue
-		}
-		if *event.Decision == DispositionDeny {
-			denied = true
-		} else {
-			allowed = true
-		}
+// hookDecision normalizes one start hook's answer. An empty action means the
+// hook has no objection.
+func hookDecision(decision ActionDecision, err error) ActionDecision {
+	switch decision.Action {
+	case "":
+		decision.Action = DispositionAllow
+	case DispositionAllow, DispositionAsk, DispositionDeny:
+	default:
+		return ActionDecision{Action: DispositionAsk, ReasonCode: "tool_call_start_uncertain"}
 	}
-	if err := ctx.Err(); err != nil {
-		errs = append(errs, err)
+	if err != nil && decision.Action != DispositionDeny {
+		return ActionDecision{Action: DispositionAsk, ReasonCode: "tool_call_start_unavailable"}
 	}
-	if len(errs) > 0 {
-		return nil, errors.Join(errs...)
-	}
-	if denied {
-		deny := DispositionDeny
-		return &deny, nil
-	}
-	if allowed {
-		allow := DispositionAllow
-		return &allow, nil
-	}
-	return nil, nil
+	return decision
 }
 
-func (c *Core) resolveApprovalResolvedHooks(ctx context.Context, request ApprovalRequest, decision *ActionDecision) error {
-	original := decision.Action
-	denied := original == DispositionDeny
-	var errs []error
-	for i, registered := range c.hooks {
-		if registered.OnApprovalResolved == nil {
-			continue
-		}
-		event := ApprovalResolvedEvent{Request: request, Decision: decision.Action}
-		if err := registered.OnApprovalResolved(ctx, &event); err != nil {
-			errs = append(errs, fmt.Errorf("approval resolved hook %d: %w", i+1, err))
-		}
-		if event.Decision != DispositionAllow && event.Decision != DispositionDeny {
-			errs = append(errs, fmt.Errorf("approval resolved hook %d: invalid decision", i+1))
-			continue
-		}
-		if event.Decision == DispositionAllow && decision.Action == DispositionDeny {
-			errs = append(errs, fmt.Errorf("approval resolved hook %d: cannot override a denial", i+1))
-			continue
-		}
-		denied = denied || event.Decision == DispositionDeny
+// mergeDecision keeps the stricter of two decisions: Deny over Ask over
+// Allow. Between equally strict decisions the first explained one wins.
+func mergeDecision(current, candidate ActionDecision) ActionDecision {
+	rank := map[ActionDisposition]int{DispositionAllow: 0, DispositionAsk: 1, DispositionDeny: 2}
+	switch {
+	case rank[candidate.Action] > rank[current.Action]:
+		return candidate
+	case rank[candidate.Action] == rank[current.Action] && current.ReasonCode == "":
+		return candidate
+	default:
+		return current
 	}
-	if denied {
-		decision.Action = DispositionDeny
-		if original == DispositionAllow {
-			decision.ReasonCode = "approval_denied"
-		}
+}
+
+// resolveApproval asks the application to allow or deny one exact call.
+// Anything but an explicit Allow denies it.
+func (c *Core) resolveApproval(ctx context.Context, req ToolCallStartEvent, decision ActionDecision) ActionDecision {
+	decision.Action = DispositionDeny
+	if c.approver == nil {
+		decision.ReasonCode = "approval_required"
+		return decision
 	}
-	if err := ctx.Err(); err != nil {
-		errs = append(errs, err)
+
+	answer, err := c.approver(ctx, ApprovalRequest{ToolCallStartEvent: cloneToolCallStartEvent(req), Assessment: decision.Assessment})
+	switch {
+	case err != nil:
+		decision.ReasonCode = "approval_unavailable"
+	case answer == DispositionAllow:
+		decision.Action = DispositionAllow
+	case answer == DispositionDeny:
+		decision.ReasonCode = "approval_denied"
+	default:
+		decision.ReasonCode = "invalid_approval"
 	}
-	return errors.Join(errs...)
+	return decision
 }

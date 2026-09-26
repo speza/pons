@@ -165,9 +165,12 @@ func TestOnTurnAndWraps(t *testing.T) {
 		})
 	})
 	var turns []protocol.TurnLog
-	c.OnTurn(func(obs protocol.Observation, turn protocol.TurnLog) {
-		turns = append(turns, turn)
-	})
+	if err := c.AddHooks(Hooks{OnAgentTurnEnd: func(_ context.Context, e *AgentTurnEndEvent) error {
+		turns = append(turns, e.Log)
+		return nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := c.Run(context.Background(), "test goal"); err != nil {
 		t.Fatalf("run: %v", err)
@@ -210,12 +213,14 @@ func TestSetBrainRejectsNil(t *testing.T) {
 	}
 }
 
-func TestTurnErrorHookPropagates(t *testing.T) {
+func TestTurnEndHookErrorPropagates(t *testing.T) {
 	c := New()
 	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{Finish("done")}}})
-	c.OnTurnError(func(protocol.Observation, protocol.TurnLog) error {
+	if err := c.AddHooks(Hooks{OnAgentTurnEnd: func(context.Context, *AgentTurnEndEvent) error {
 		return errors.New("disk full")
-	})
+	}}); err != nil {
+		t.Fatal(err)
+	}
 	res, err := c.Run(context.Background(), "goal")
 	if err == nil || !strings.Contains(err.Error(), "disk full") {
 		t.Fatalf("hook error = %v", err)

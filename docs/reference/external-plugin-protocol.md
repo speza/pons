@@ -314,38 +314,41 @@ action to the proxy, and the proxy routes it to the child provider.
 
 A host manifest sets `"placement":"host"`. Initialization advertises only
 `hook_provider: [1]`; the plugin returns a `hook_provider/v1` capability with
-a nonempty `hooks` list. Supported names are `on_agent_start`, `on_agent_end`,
-`on_agent_error`, `on_agent_turn_start`, `on_assistant_response`,
-`on_agent_turn_end`, `on_agent_turn_error`, `on_tool_call_start`,
-`on_tool_call_end`, `on_tool_call_error`, `on_tool_call_denied`,
-`on_approval_request`, and `on_approval_resolved`. Duplicate or unknown names
-and mixed hands/host capabilities are rejected. Only advertised hooks are called.
+a nonempty `hooks` list. Supported names are `on_agent_start`,
+`on_agent_turn_start`, `on_assistant_response`, `on_tool_call_start`,
+`on_tool_call_end`, `on_agent_turn_end`, and `on_agent_end`. Duplicate or
+unknown names and mixed hands/host capabilities are rejected. Only advertised
+hooks are called. The host sends the manifest entry's `config` object as
+`config` in `plugin/initialize`.
 
-The host sends `hooks/call` with the `hook` name and the JSON event. Go event
-field names retain their capitalized form. Error events expose `ErrorMessage`
-as text instead of Go's `Err` interface. The plugin returns
-`{"patch":{...}}`; an observer returns `{"patch":{}}`. Only the fields in
-this table are accepted in a patch:
+A host hook executable is an untrusted boundary. The host sends `hooks/call`
+with the `hook` name and a bounded JSON event; Go field names keep their
+capitalized form:
 
-| Hook | Patch fields |
+| Hook | Event fields |
 | --- | --- |
-| `on_agent_start` | `Message` |
-| `on_agent_end` | `Result` |
-| `on_agent_error`, `on_agent_turn_error` | `ErrorMessage` (nonempty) |
-| `on_agent_turn_start` | `Observation` (message and history only) |
-| `on_assistant_response` | `Response` |
-| `on_agent_turn_end` | none |
-| `on_tool_call_start` | `Decision` |
-| `on_tool_call_end`, `on_tool_call_error`, `on_tool_call_denied` | `Result` |
-| `on_approval_request`, `on_approval_resolved` | `Decision` |
+| `on_agent_start` | `Message`, `Workspace`, `Platform` |
+| `on_agent_turn_start` | `Turn`, `Message` |
+| `on_assistant_response` | `Turn`, `Response` |
+| `on_tool_call_start` | the full `ToolCallStartEvent`, including bounded recent context |
+| `on_tool_call_end` | `Turn`, `Action`, `Tool`, `Result`, `Decision` (set when denied) |
+| `on_agent_turn_end` | `Turn`, `Actions`, `Results` (`ActionID`, `Kind`, `OK`, `Error`), `ErrorMessage` |
+| `on_agent_end` | `Answer`, `Turns`, `Exhausted`, `Reason`, `StopReason`, `ErrorMessage` |
 
-For example, tool preflight can return `{"patch":{"Decision":{"Action":
-"ask","ReasonCode":"needs_review"}}}`. It may allow, ask, deny, or
-replace arguments under Core's normal validation and replay rules. Host-owned
-action identity, workspace, and resource projection cannot be patched. Failed
-tool-start calls request approval and deny execution when no approval handler
-is installed. Other hook failures follow Core's normal error collection and
-run termination behavior. Host deadlines and frame/result limits apply.
+Run history is never sent, and tool output and error strings are truncated to
+16 KiB, so event size does not grow with a run.
+
+The plugin returns `{"patch":{...}}`. Every hook except `on_tool_call_start`
+is an observer and must return `{"patch":{}}`; any other field is a malformed
+patch and fails the call. `on_tool_call_start` may return
+`{"patch":{"Decision":{"Action":"ask","ReasonCode":"needs_review"}}}`. Its
+`Action` is `allow`, `ask`, or `deny`, and Core keeps the strictest decision of
+all start hooks, so an external allow never overrides another plugin's ask or
+deny. Any `Assessment` is discarded: classifier evidence belongs to trusted
+plugins. External plugins cannot approve pending calls, rewrite arguments, or
+change results. A failed tool-start call requests approval, which is denied
+when no approval handler is installed. Other hook failures stop the run. Host
+deadlines and frame/result limits apply.
 
 ## 9. Security requirements
 
@@ -378,5 +381,6 @@ and protocol write failures. Both SDKs keep application logs off stdout.
 ## 11. Capability scope
 
 Runtime protocol 1 defines no external brain or session-store capability.
-The host hook capability exposes the full typed Core hook set. A future hook
-or a change to these patch contracts requires a new capability version.
+The host hook capability exposes the Core hooks as bounded observers plus the
+tool-call-start decision. A new hook, event field set, or patch contract
+requires a new capability version.

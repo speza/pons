@@ -8,11 +8,12 @@ import (
 	"github.com/samperrin/pons/protocol"
 )
 
-// Each hook receives the state available at its particular point in a run.
-// Hooks may change fields that their event documents as mutable or return an
-// error to stop the run. A hook that only reads its event is an observer.
+// Each hook receives the state available at its point in a run. Hooks are
+// observers except where an event documents a mutable field: OnToolCallStart
+// sets a decision and OnToolCallEnd may replace the result passed to the brain.
+// A hook error stops the run.
 type AgentStartEvent struct {
-	Message   string // may be changed before the brain observes it
+	Message   string
 	Workspace string
 	Platform  string
 }
@@ -27,19 +28,14 @@ const (
 )
 
 type AgentEndEvent struct {
-	Result     RunResult // may be changed before Run returns
-	Err        error     // final error snapshot
+	Result     RunResult
+	Err        error
 	Reason     AgentEndReason
 	StopReason string
 }
 
-type AgentErrorEvent struct {
-	Turn int
-	Err  error // may be replaced with a non-nil error
-}
-
 type AgentTurnStartEvent struct {
-	Observation protocol.Observation // message and history may be changed
+	Observation protocol.Observation
 }
 
 type AssistantResponseEvent struct {
@@ -47,68 +43,36 @@ type AssistantResponseEvent struct {
 	Response AssistantResponse
 }
 
+// AgentTurnEndEvent closes every opened turn. Err is set when the turn failed;
+// Log then holds only the results that were recorded before the failure.
 type AgentTurnEndEvent struct {
 	Turn int
-	Run  RunResult // completed turn snapshot
+	Log  protocol.TurnLog
+	Err  error
 }
 
-type AgentTurnErrorEvent struct {
-	Turn int
-	Err  error // may be replaced with a non-nil error
-}
-
+// ToolCallEndEvent reports every recorded tool outcome. Decision is set when
+// a start hook denied the call, in which case it never executed.
 type ToolCallEndEvent struct {
-	Turn   int
-	Action protocol.Action
-	Tool   *ToolSpec
-	Result protocol.ToolResult
-}
-
-type ToolCallErrorEvent struct {
-	Turn   int
-	Action protocol.Action
-	Tool   *ToolSpec
-	Result protocol.ToolResult
-	Err    error // original execution error; change Result to recover
-}
-
-type ToolCallDeniedEvent struct {
 	Turn     int
 	Action   protocol.Action
 	Tool     *ToolSpec
-	Result   protocol.ToolResult
-	Decision ActionDecision
+	Result   protocol.ToolResult // may be changed before the brain observes it
+	Decision *ActionDecision
 }
 
-type ApprovalRequestEvent struct {
-	Request  ApprovalRequest    // exact pending call; read only
-	Decision *ActionDisposition // nil defers to the application approval handler
-}
-
-type ApprovalResolvedEvent struct {
-	Request  ApprovalRequest   // exact pending call; read only
-	Decision ActionDisposition // may be changed from allow to deny
-}
-
-// Hooks are event-specific extension points for trusted plugins. Start hooks
-// run before the corresponding work and may reject it; tool end hooks may
-// change the result passed to the brain, and agent end may change the returned
-// result. OnToolCallStart is the sole pre-execution tool decision point.
-// Denied calls never execute and do not emit OnToolCallEnd or OnToolCallError.
+// Hooks are event-specific extension points for trusted plugins.
+// OnToolCallStart is the sole pre-execution decision point and may be called
+// concurrently for the calls of one turn. OnAgentTurnEnd and OnAgentEnd run
+// even when the run fails or its context is canceled.
 type Hooks struct {
 	OnAgentStart        func(context.Context, *AgentStartEvent) error
-	OnAgentEnd          func(context.Context, *AgentEndEvent) error
-	OnAgentError        func(context.Context, *AgentErrorEvent) error
 	OnAgentTurnStart    func(context.Context, *AgentTurnStartEvent) error
 	OnAssistantResponse func(context.Context, *AssistantResponseEvent) error
-	OnAgentTurnEnd      func(context.Context, *AgentTurnEndEvent) error
-	OnAgentTurnError    func(context.Context, *AgentTurnErrorEvent) error
 	OnToolCallStart     func(context.Context, *ToolCallStartEvent) error
 	OnToolCallEnd       func(context.Context, *ToolCallEndEvent) error
-	OnToolCallError     func(context.Context, *ToolCallErrorEvent) error
-	OnToolCallDenied    func(context.Context, *ToolCallDeniedEvent) error
-	OnApprovalRequest   func(context.Context, *ApprovalRequestEvent) error
-	OnApprovalResolved  func(context.Context, *ApprovalResolvedEvent) error
+	OnAgentTurnEnd      func(context.Context, *AgentTurnEndEvent) error
+	OnAgentEnd          func(context.Context, *AgentEndEvent) error
 }
 
 // AddHooks registers a plugin's hooks in composition order. Every matching

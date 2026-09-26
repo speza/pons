@@ -2,8 +2,8 @@ package external
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/samperrin/pons"
 	"github.com/samperrin/pons/protocol"
@@ -11,34 +11,32 @@ import (
 
 const (
 	HookAgentStart        = "on_agent_start"
-	HookAgentEnd          = "on_agent_end"
-	HookAgentError        = "on_agent_error"
 	HookAgentTurnStart    = "on_agent_turn_start"
 	HookAssistantResponse = "on_assistant_response"
-	HookAgentTurnEnd      = "on_agent_turn_end"
-	HookAgentTurnError    = "on_agent_turn_error"
 	HookToolCallStart     = "on_tool_call_start"
 	HookToolCallEnd       = "on_tool_call_end"
-	HookToolCallError     = "on_tool_call_error"
-	HookToolCallDenied    = "on_tool_call_denied"
-	HookApprovalRequest   = "on_approval_request"
-	HookApprovalResolved  = "on_approval_resolved"
+	HookAgentTurnEnd      = "on_agent_turn_end"
+	HookAgentEnd          = "on_agent_end"
 )
 
 func validHookName(name string) bool {
 	switch name {
-	case HookAgentStart, HookAgentEnd, HookAgentError, HookAgentTurnStart,
-		HookAssistantResponse, HookAgentTurnEnd, HookAgentTurnError,
-		HookToolCallStart, HookToolCallEnd, HookToolCallError,
-		HookToolCallDenied, HookApprovalRequest, HookApprovalResolved:
+	case HookAgentStart, HookAgentTurnStart, HookAssistantResponse,
+		HookToolCallStart, HookToolCallEnd, HookAgentTurnEnd, HookAgentEnd:
 		return true
 	default:
 		return false
 	}
 }
 
-// HookPlugin adapts an explicitly installed host-side hook provider.
-// It receives bounded event data but no host credentials or Core handle.
+// maxHookText bounds each tool output or error string sent to a hook, so
+// event size does not grow with tool output.
+const maxHookText = 16 << 10
+
+// HookPlugin adapts an explicitly installed host-side hook provider. The
+// executable is an untrusted boundary: it receives bounded event summaries
+// but no host credentials or Core handle, every hook except on_tool_call_start
+// is an observer, and its tool-call decisions can only add Ask or Deny.
 type HookPlugin struct{ host *Host }
 
 func (p *HookPlugin) Host() *Host { return p.host }
@@ -56,51 +54,71 @@ func NewHooks(manifestPath string, cfg HostConfig) (*HookPlugin, error) {
 	return &HookPlugin{host: host}, nil
 }
 
-// hookWireEvent exposes errors as text; encoding an error interface directly
-// would otherwise produce an empty JSON object for most Go errors.
-func hookWireEvent(event any) any {
-	switch e := event.(type) {
-	case *pons.AgentErrorEvent:
-		return struct {
-			Turn         int
-			ErrorMessage string
-		}{e.Turn, errorMessage(e.Err)}
-	case *pons.AgentTurnErrorEvent:
-		return struct {
-			Turn         int
-			ErrorMessage string
-		}{e.Turn, errorMessage(e.Err)}
-	case *pons.AgentEndEvent:
-		return struct {
-			Result       pons.RunResult
-			ErrorMessage string
-			Reason       pons.AgentEndReason
-			StopReason   string
-		}{e.Result, errorMessage(e.Err), e.Reason, e.StopReason}
-	case *pons.ToolCallErrorEvent:
-		return struct {
-			Turn         int
-			Action       protocol.Action
-			Tool         *pons.ToolSpec
-			Result       protocol.ToolResult
-			ErrorMessage string
-		}{e.Turn, e.Action, e.Tool, e.Result, errorMessage(e.Err)}
-	default:
-		return event
+// Wire events are explicit summaries rather than core structs, so history
+// and tool output never make a hook frame grow with the run.
+type (
+	hookTurnStart struct {
+		Turn    int
+		Message string
 	}
+	hookToolCallEnd struct {
+		Turn     int
+		Action   protocol.Action
+		Tool     *pons.ToolSpec
+		Result   protocol.ToolResult
+		Decision *pons.ActionDecision
+	}
+	hookToolOutcome struct {
+		ActionID string
+		Kind     string
+		OK       bool
+		Error    string
+	}
+	hookTurnEnd struct {
+		Turn         int
+		Actions      []protocol.Action
+		Results      []hookToolOutcome
+		ErrorMessage string
+	}
+	hookAgentEnd struct {
+		Answer       string
+		Turns        int
+		Exhausted    bool
+		Reason       pons.AgentEndReason
+		StopReason   string
+		ErrorMessage string
+	}
+)
+
+func boundText(text string) string {
+	if len(text) <= maxHookText {
+		return text
+	}
+	text = text[:maxHookText]
+	for !utf8.ValidString(text) {
+		text = text[:len(text)-1]
+	}
+	return text
+}
+
+func boundResult(result protocol.ToolResult) protocol.ToolResult {
+	result.Output, result.Error = boundText(result.Output), boundText(result.Error)
+	if len(result.Payload) > maxHookText {
+		result.Payload = nil
+	}
+	return result
 }
 
 func errorMessage(err error) string {
 	if err == nil {
 		return ""
 	}
-	return err.Error()
+	return boundText(err.Error())
 }
 
-func callPatch[T any](p *HookPlugin, ctx context.Context, name string, event any) (T, error) {
-	var patch T
-	err := p.host.CallHook(ctx, name, event, &patch)
-	return patch, err
+func (p *HookPlugin) observe(ctx context.Context, name string, event any) error {
+	var patch struct{}
+	return p.host.CallHook(ctx, name, event, &patch)
 }
 
 func (p *HookPlugin) Setup(core *pons.Core) error {
@@ -119,132 +137,57 @@ func (p *HookPlugin) Setup(core *pons.Core) error {
 	var hooks pons.Hooks
 	if registered[HookAgentStart] {
 		hooks.OnAgentStart = func(ctx context.Context, e *pons.AgentStartEvent) error {
-			patch, err := callPatch[struct{ Message *string }](p, ctx, HookAgentStart, e)
-			if err == nil && patch.Message != nil {
-				e.Message = *patch.Message
-			}
-			return err
-		}
-	}
-	if registered[HookAgentEnd] {
-		hooks.OnAgentEnd = func(ctx context.Context, e *pons.AgentEndEvent) error {
-			patch, err := callPatch[struct{ Result *pons.RunResult }](p, ctx, HookAgentEnd, e)
-			if err == nil && patch.Result != nil {
-				e.Result = *patch.Result
-			}
-			return err
-		}
-	}
-	if registered[HookAgentError] {
-		hooks.OnAgentError = func(ctx context.Context, e *pons.AgentErrorEvent) error {
-			patch, err := callPatch[struct{ ErrorMessage *string }](p, ctx, HookAgentError, e)
-			if err == nil && patch.ErrorMessage != nil {
-				if *patch.ErrorMessage == "" {
-					return errors.New("external: replacement error must be nonempty")
-				}
-				e.Err = errors.New(*patch.ErrorMessage)
-			}
-			return err
+			return p.observe(ctx, HookAgentStart, e)
 		}
 	}
 	if registered[HookAgentTurnStart] {
 		hooks.OnAgentTurnStart = func(ctx context.Context, e *pons.AgentTurnStartEvent) error {
-			patch, err := callPatch[struct {
-				Observation *struct {
-					Message *string
-					History *[]protocol.TurnLog
-				}
-			}](p, ctx, HookAgentTurnStart, e)
-			if err == nil && patch.Observation != nil {
-				if patch.Observation.Message != nil {
-					e.Observation.Message = *patch.Observation.Message
-				}
-				if patch.Observation.History != nil {
-					e.Observation.History = *patch.Observation.History
-				}
-			}
-			return err
+			return p.observe(ctx, HookAgentTurnStart, hookTurnStart{Turn: e.Observation.Turn, Message: e.Observation.Message})
 		}
 	}
 	if registered[HookAssistantResponse] {
 		hooks.OnAssistantResponse = func(ctx context.Context, e *pons.AssistantResponseEvent) error {
-			patch, err := callPatch[struct{ Response *pons.AssistantResponse }](p, ctx, HookAssistantResponse, e)
-			if err == nil && patch.Response != nil {
-				e.Response = *patch.Response
-			}
-			return err
-		}
-	}
-	if registered[HookAgentTurnEnd] {
-		hooks.OnAgentTurnEnd = func(ctx context.Context, e *pons.AgentTurnEndEvent) error {
-			_, err := callPatch[struct{}](p, ctx, HookAgentTurnEnd, e)
-			return err
-		}
-	}
-	if registered[HookAgentTurnError] {
-		hooks.OnAgentTurnError = func(ctx context.Context, e *pons.AgentTurnErrorEvent) error {
-			patch, err := callPatch[struct{ ErrorMessage *string }](p, ctx, HookAgentTurnError, e)
-			if err == nil && patch.ErrorMessage != nil {
-				if *patch.ErrorMessage == "" {
-					return errors.New("external: replacement error must be nonempty")
-				}
-				e.Err = errors.New(*patch.ErrorMessage)
-			}
-			return err
+			return p.observe(ctx, HookAssistantResponse, e)
 		}
 	}
 	if registered[HookToolCallStart] {
 		hooks.OnToolCallStart = func(ctx context.Context, e *pons.ToolCallStartEvent) error {
-			patch, err := callPatch[struct{ Decision *pons.ActionDecision }](p, ctx, HookToolCallStart, e)
-			if err == nil && patch.Decision != nil {
-				e.Decision = *patch.Decision
+			var patch struct{ Decision *pons.ActionDecision }
+			if err := p.host.CallHook(ctx, HookToolCallStart, e, &patch); err != nil {
+				return err
 			}
-			return err
+			if patch.Decision != nil {
+				// Assessments are classifier evidence owned by trusted plugins.
+				e.Decision = pons.ActionDecision{Action: patch.Decision.Action, ReasonCode: patch.Decision.ReasonCode}
+			}
+			return nil
 		}
 	}
 	if registered[HookToolCallEnd] {
 		hooks.OnToolCallEnd = func(ctx context.Context, e *pons.ToolCallEndEvent) error {
-			patch, err := callPatch[struct{ Result *protocol.ToolResult }](p, ctx, HookToolCallEnd, e)
-			if err == nil && patch.Result != nil {
-				e.Result = *patch.Result
-			}
-			return err
+			return p.observe(ctx, HookToolCallEnd, hookToolCallEnd{
+				Turn: e.Turn, Action: e.Action, Tool: e.Tool,
+				Result: boundResult(e.Result), Decision: e.Decision,
+			})
 		}
 	}
-	if registered[HookToolCallError] {
-		hooks.OnToolCallError = func(ctx context.Context, e *pons.ToolCallErrorEvent) error {
-			patch, err := callPatch[struct{ Result *protocol.ToolResult }](p, ctx, HookToolCallError, e)
-			if err == nil && patch.Result != nil {
-				e.Result = *patch.Result
+	if registered[HookAgentTurnEnd] {
+		hooks.OnAgentTurnEnd = func(ctx context.Context, e *pons.AgentTurnEndEvent) error {
+			event := hookTurnEnd{Turn: e.Turn, Actions: e.Log.Actions, ErrorMessage: errorMessage(e.Err)}
+			for _, result := range e.Log.Results {
+				event.Results = append(event.Results, hookToolOutcome{
+					ActionID: result.ActionID, Kind: result.Kind, OK: result.OK, Error: boundText(result.Error),
+				})
 			}
-			return err
+			return p.observe(ctx, HookAgentTurnEnd, event)
 		}
 	}
-	if registered[HookToolCallDenied] {
-		hooks.OnToolCallDenied = func(ctx context.Context, e *pons.ToolCallDeniedEvent) error {
-			patch, err := callPatch[struct{ Result *protocol.ToolResult }](p, ctx, HookToolCallDenied, e)
-			if err == nil && patch.Result != nil {
-				e.Result = *patch.Result
-			}
-			return err
-		}
-	}
-	if registered[HookApprovalRequest] {
-		hooks.OnApprovalRequest = func(ctx context.Context, e *pons.ApprovalRequestEvent) error {
-			patch, err := callPatch[struct{ Decision *pons.ActionDisposition }](p, ctx, HookApprovalRequest, e)
-			if err == nil && patch.Decision != nil {
-				e.Decision = patch.Decision
-			}
-			return err
-		}
-	}
-	if registered[HookApprovalResolved] {
-		hooks.OnApprovalResolved = func(ctx context.Context, e *pons.ApprovalResolvedEvent) error {
-			patch, err := callPatch[struct{ Decision *pons.ActionDisposition }](p, ctx, HookApprovalResolved, e)
-			if err == nil && patch.Decision != nil {
-				e.Decision = *patch.Decision
-			}
-			return err
+	if registered[HookAgentEnd] {
+		hooks.OnAgentEnd = func(ctx context.Context, e *pons.AgentEndEvent) error {
+			return p.observe(ctx, HookAgentEnd, hookAgentEnd{
+				Answer: e.Result.Answer, Turns: e.Result.Turns, Exhausted: e.Result.Exhausted,
+				Reason: e.Reason, StopReason: e.StopReason, ErrorMessage: errorMessage(e.Err),
+			})
 		}
 	}
 	if err := core.AddHooks(hooks); err != nil {

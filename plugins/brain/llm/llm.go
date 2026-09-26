@@ -2,7 +2,7 @@
 //
 // Architecture (mirrors how pi's agent loop works):
 //
-//   - One model call per agent turn. Respond sends the conversation and the
+//   - ONE model call per turn. Respond sends the conversation and the
 //     tool schemas; tool_use blocks in the response become protocol.Actions.
 //   - Interpret is bookkeeping, not a second model call: tool results are
 //     queued and sent back as tool_result blocks with the next call.
@@ -166,16 +166,15 @@ var errEventPersistence = errors.New("llm: persist event")
 // process and is not safe for concurrent use: drive one Core.Run at a
 // time (the interactive CLI does this).
 type Brain struct {
-	cfg           Config
-	model         string
-	client        Client
-	core          *pons.Core
-	turns         []Turn
-	pending       []Result
-	seenMessage   string // last message folded into context
-	seededPending bool   // first response may replace the seed after an agent-start hook
-	hands         Hands  // what the seeded run's hands see; shown in <env>
-	logf          func(string, ...any)
+	cfg         Config
+	model       string
+	client      Client
+	core        *pons.Core
+	turns       []Turn
+	pending     []Result
+	seenMessage string // last message folded into context
+	hands       Hands  // what the seeded run's hands see; shown in <env>
+	logf        func(string, ...any)
 }
 
 // New creates the brain plugin (installed with pons.Core.Use).
@@ -364,17 +363,6 @@ func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.Ass
 	if len(b.turns) == 0 {
 		// First turn: the goal as the opening user message.
 		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: b.userPrompt(obs)}}})
-	} else if b.seededPending && obs.Message != b.seenMessage {
-		// Agent-start hooks can replace the new instruction before the
-		// first model call. Keep the memory block while replacing the seed.
-		blocks := b.turns[len(b.turns)-1].Blocks
-		if len(blocks) > 0 && isMemoryBlock(blocks[0]) {
-			blocks = blocks[:1]
-		} else {
-			blocks = nil
-		}
-		blocks = append(blocks, Text{Value: b.userPrompt(obs)})
-		b.turns[len(b.turns)-1] = Turn{Role: "user", Blocks: blocks}
 	} else if obs.Message != "" && obs.Message != b.seenMessage {
 		// A new instruction arrived (interactive follow-up, resumed run
 		// with a fresh goal): append it with a fresh <env> block. This is
@@ -383,7 +371,6 @@ func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.Ass
 		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: b.userPrompt(obs)}}})
 	}
 	b.seenMessage = obs.Message
-	b.seededPending = false
 
 	if b.shouldCompact() {
 		if err := b.compact(ctx, obs.Turn); err != nil {
@@ -457,62 +444,6 @@ func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.Ass
 		}
 	}
 	return pons.AssistantResponse{Parts: parts, Actions: actions}, nil
-}
-
-// ReconcileAssistantResponse updates the provider transcript after Core's
-// hooks settle the response and pending tool calls. Opaque reasoning blocks
-// remain in their original positions relative to the visible blocks.
-func (b *Brain) ReconcileAssistantResponse(response pons.AssistantResponse) error {
-	if len(b.turns) == 0 || b.turns[len(b.turns)-1].Role != "assistant" {
-		return errors.New("llm: no assistant turn to reconcile")
-	}
-
-	partBlock := func(part pons.AssistantPart) (Block, error) {
-		switch part.Type {
-		case pons.AssistantPartText:
-			return Text{Value: part.Text}, nil
-		case pons.AssistantPartToolCall:
-			if _, err := protocol.ObjectArgs(part.Action.Args); err != nil {
-				return nil, fmt.Errorf("llm: invalid reconciled tool arguments: %w", err)
-			}
-			input := decodeToolInput(part.Action.Args)
-			if input == nil {
-				input = map[string]any{}
-			}
-			return ToolUse{ID: part.Action.ID, Name: string(part.Action.Kind), Input: input}, nil
-		default:
-			return nil, fmt.Errorf("llm: unsupported assistant part %q", part.Type)
-		}
-	}
-
-	original := b.turns[len(b.turns)-1]
-	updated := make([]Block, 0, len(original.Blocks)+len(response.Parts))
-	next := 0
-	for _, block := range original.Blocks {
-		if raw, ok := block.(Raw); ok {
-			updated = append(updated, raw)
-			continue
-		}
-		if next >= len(response.Parts) {
-			continue
-		}
-		converted, err := partBlock(response.Parts[next])
-		if err != nil {
-			return err
-		}
-		updated = append(updated, converted)
-		next++
-	}
-	for next < len(response.Parts) {
-		converted, err := partBlock(response.Parts[next])
-		if err != nil {
-			return err
-		}
-		updated = append(updated, converted)
-		next++
-	}
-	b.turns[len(b.turns)-1].Blocks = updated
-	return nil
 }
 
 func (b *Brain) Interpret(ctx context.Context, obs protocol.Observation, tr protocol.ToolResult) (protocol.Interpretation, error) {
@@ -761,7 +692,6 @@ func (b *Brain) Seed(turns []Turn, message string, hands Hands) error {
 	})})
 	b.turns = append(append([]Turn(nil), turns...), Turn{Role: "user", Blocks: blocks})
 	b.seenMessage = message
-	b.seededPending = true
 	return nil
 }
 

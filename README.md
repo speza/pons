@@ -60,33 +60,30 @@ planned order. A text response, `finish` action, or `MaxTurns` ends a run;
 `OnEvent` can stream lifecycle events to a UI or audit consumer. The LLM brain
 can compact old context without changing the canonical runtime history.
 
-Trusted plugins register lifecycle callbacks through `Core.AddHooks(pons.Hooks{...})`.
-The API covers agent start/end/error, turn start/end/error, assistant response,
-tool call start/end/error/denial, and approval request/resolution. A turn is one
-brain response and its planned tool calls; a run can contain several turns.
-Each hook has its own event type. Hooks can observe, return an error to stop the
-run, or change the values their event permits. `OnToolCallStart` can allow,
-ask, deny, or replace tool arguments by setting the event's `Decision`;
-changed arguments are checked again by all start hooks. `OnToolCallEnd` can
-change the model-visible result. A denied call emits `OnToolCallDenied` and
-never executes or emits tool end/error hooks.
-Plugins may implement any subset of the hooks. Event callbacks run in
-registration order and ordinary hook errors are collected with `errors.Join`.
-Pending work does not proceed when a hook phase returns an error. Tool-call-start
-errors instead request approval; the remaining start hooks still run, and a
-hard deny wins.
-
-Stateful brains can implement `AssistantResponseReconciler` to record the
-final calls after response and preflight hooks change them; the built-in LLM
-brain does this before hands execute.
+Trusted plugins register lifecycle callbacks through `Core.AddHooks(pons.Hooks{...})`:
+`OnAgentStart`, `OnAgentTurnStart`, `OnAssistantResponse`, `OnToolCallStart`,
+`OnToolCallEnd`, `OnAgentTurnEnd`, and `OnAgentEnd`. A turn is one brain
+response and its planned tool calls; a run can contain several turns. Hooks
+are observers with two exceptions: `OnToolCallStart` sets the call's allow,
+ask, or deny `Decision`, and `OnToolCallEnd` may change the model-visible
+result. `OnToolCallEnd` reports every recorded outcome; for a denied call it
+carries the decision, and the call never executes. `OnAgentTurnEnd` and
+`OnAgentEnd` always close an opened turn or run, receive any failure as `Err`,
+and still run after the run's context is canceled.
+Plugins may implement any subset of the hooks. Callbacks run in registration
+order and their errors are collected with `errors.Join`; a hook error stops
+the run. Tool-call-start errors instead request approval, unless that hook
+also denied the call.
 
 ### Action policy
 
 An application can install the built-in policy plugin with
 `core.Use(actionpolicy.Policy{...})`, register other trusted checks with
 `core.AddHooks(pons.Hooks{OnToolCallStart: check})`, and supply an exact-action approval callback
-with `core.SetApprovalHandler(...)`. The core runs hooks for every tool call in
-plan order before starting any handler. Deny outranks ask, which outranks allow.
+with `core.SetApprovalHandler(...)`. The core decides every tool call in a turn
+before starting any handler: start hooks for different calls run concurrently,
+then asks are resolved one at a time in call order. Deny outranks ask, which
+outranks allow, whatever order the hooks run in.
 A hard deny never reaches approval. An ask without an approval handler is
 denied. Denials appear as unsuccessful
 tool results, so the brain can try a different action. Repeated identical
@@ -114,8 +111,10 @@ model available to the TypeSafe account. Jev returns a choice
 probability; the OpenAI adapter generates a confidence estimate. The OpenAI
 adapter defaults to `gpt-6-luna`; set `RemoteConfig.Model` to use another
 Responses API model that supports JSON Schema structured outputs. A valid
-`safe` assessment above the confidence threshold is allowed, including when
-the confidence is a model-generated estimate rather than a calibrated probability.
+`safe` assessment at or above the confidence threshold is allowed when its
+confidence is a returned probability. A model-generated estimate (OpenAI or
+Codex) still asks unless the policy sets `AllowGeneratedConfidence`
+(`allow_generated_confidence` in config).
 Classifier failures and uncertain assessments require approval. Built-in tools
 project paths or commands for policy matching; generic tools still expose
 their typed action arguments. Requests also carry the current instruction,
@@ -383,7 +382,11 @@ Configure registered plugins in the global file only:
       "enabled": true,
       "config": {
         "classifier": "classifier/typesafe-jev",
-        "min_safe_confidence": 0.9
+        "min_safe_confidence": 0.9,
+        "rules": [
+          {"action": "deny", "tools": ["github_delete_repo"]},
+          {"action": "ask", "tools": ["bash"], "reason_code": "shell_review"}
+        ]
       }
     },
     {
@@ -412,15 +415,22 @@ its own `config` and declares the capabilities it provides or
 needs. The loader preserves list order except where dependencies require a
 provider to come first, then calls `Core.Use`. A plugin's `Setup` method
 registers its tools, hooks, or named capabilities.
-`action_policy`'s `config.classifier` names exactly one enabled classifier;
-unknown or disabled references fail startup. Set `enabled: false` to retain a
+`action_policy`'s `config.classifier` names one enabled classifier; unknown
+or disabled references fail startup. `config.rules` matches tool kinds
+(`"*"` matches all) with `deny`, `ask`, or `allow`, applied in that order
+before any classifier. A rules-only policy is allowed; calls no rule settles
+then ask. `allow_generated_confidence: true` lets a `safe` OpenAI or Codex
+assessment allow a call without approval. Set `enabled: false` to retain a
 plugin's settings without activating it. The `external` plugin accepts absolute
-manifest paths. An explicit `-plugin` flag replaces its manifest list. External
-host hooks can subscribe to all Core events. They receive bounded event data,
+manifest paths. An explicit `-plugin` flag replaces configured hands plugins;
+installed host hook plugins stay enabled. Only host hook plugins accept a
+`config` object; a non-empty config on a hands plugin fails startup. External
+host hooks are an untrusted boundary: they receive bounded event summaries,
 including recent conversation context for `on_tool_call_start`, but no Core
-handle or inherited credentials. Tool-start hook failures request approval;
-without an approval handler, the action is denied. Other hook failures follow
-Core's run error handling.
+handle or inherited credentials. Every external hook is an observer except
+`on_tool_call_start`, whose decision can add ask or deny but never overrides
+another plugin's. Tool-start hook failures request approval; without an
+approval handler, the action is denied. Other hook failures stop the run.
 See [the external policy example](examples/external-policy/README.md) for an
 installable hook provider.
 

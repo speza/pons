@@ -257,7 +257,7 @@ func main() {
 		logger.Printf("%v", err)
 		os.Exit(1)
 	}
-	handsPluginPaths, hostSources, pluginConfigs, err := resolvePluginPlan(configuredPlugins, pluginPaths, setFlags["plugin"])
+	handsPluginPaths, hostSources, err := resolvePluginPlan(configuredPlugins, pluginPaths, setFlags["plugin"])
 	if err != nil {
 		logger.Printf("plugin: %v", err)
 		os.Exit(1)
@@ -302,7 +302,7 @@ func main() {
 		Address: *runtimeAddress, StateDir: statePath, WorkspaceRoot: root, ClientWorkspace: conversationOptions.Workspace,
 		MaxConcurrent: *runtimeConcurrency, MaxTurns: *maxTurns, Brain: brainConfig, ProviderSlot: primary.ID,
 		FSReadBytes: *fsReadBytes, BashTimeout: *bashTimeout, BashMaxLines: *bashMaxLines, BashMaxBytes: *bashMaxBytes,
-		PluginPaths: handsPluginPaths, HostSources: hostSources, PluginConfigs: pluginConfigs,
+		PluginPaths: handsPluginPaths, HostSources: hostSources,
 		PluginPath: *pluginPath, PluginMaxResultBytes: *pluginMaxResultBytes, Debug: *debug,
 		Sandbox: *sandbox, E2BTemplate: *e2bTemplate, E2BHandsPath: *e2bHandsPath,
 		GitRepository: *gitRepository, GitRevision: selectedGitRevision,
