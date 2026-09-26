@@ -146,37 +146,39 @@ action arguments, conversation text, and credentials are omitted.
 Action policy is a host-side control-plane check. Shell safety still depends
 on the execution environment's isolation policy.
 
-### Classifier evals
+### Plugin evals
 
-The [classifier cases](plugins/actionpolicy/testdata/classifier_eval.json)
-label the expected policy action (`allow` or `ask`) and a separate reference
-risk (`safe` or `review`). A low-confidence `safe` can pass the action check by
-asking for approval, while still counting as a raw risk mismatch. The cases
-cover routine reads and edits, multi-step work, ambiguous destinations, an
-exact approval follow-up, changed or revoked approval, secret access,
-destructive commands, and instructions planted in tool results. Run them
-against a live classifier explicitly:
+`pons eval <plugin-id>` scores a configured plugin's hooks against labeled
+cases, building the plugin from the global config exactly as a run would
+(including provider slots and the Pons login) and never executing a tool. A
+disabled entry can be evaluated before you enable it. Cases are data in the
+[plugin eval format](docs/reference/plugin-evals.md): a hook `input` and the
+`expect`ed fields of its output. An installed plugin's cases are read from
+`~/.pons/plugins/<id>/evals/` by default; built-in plugins take `-cases`.
+
+The [classifier cases](plugins/actionpolicy/evals/classifier_cases.json) cover
+routine reads and edits, multi-step work, ambiguous destinations, an exact
+approval follow-up, changed or revoked approval, secret access, destructive
+commands, and instructions planted in tool results. Run them against your
+configured policy, or against one classifier:
 
 ```sh
-go run ./cmd/pons-eval -classifier codex -auth-id codex -model gpt-6-luna
-go run ./cmd/pons-eval -classifier openai -model gpt-6-luna
-go run ./cmd/pons-eval -classifier typesafe-jev -model jev-latest
+pons eval -cases plugins/actionpolicy/evals action_policy
+pons eval -cases plugins/actionpolicy/evals classifier/codex
+make eval-classifier EVAL_ARGS='classifier/typesafe-jev'
 ```
 
-The Codex run uses the named Pons login and requires `-model` so it cannot
-silently evaluate a different model from the configured plugin. The others use
-`OPENAI_API_KEY` or `TYPESAFE_API_KEY`. Use
-`-case confirmed_push_destination` for one case,
-`-threshold` to test another policy threshold, or `-json` for a report that can
-be saved and compared. `make eval-classifier EVAL_ARGS='-classifier codex'`
-is a shorthand. The command sends synthetic case data to the selected provider
-but never executes the proposed tools. It exits nonzero on a mismatch and
-reports false allows separately; these are the cases to inspect first. Text
-output prints each case and its latency as it completes, then wall time, mean,
-p50, p95, minimum, and maximum decision latency. `-json` includes timing in
-nanoseconds without progress output. These timings exclude classifier setup and
-`go run` compilation; cases run sequentially. Live calls are never part of
-`make check`.
+A classifier plugin is evaluated through a bare policy that accepts its
+confidence, so the run measures the classifier's own allow boundary;
+`-threshold` sets that boundary. Each case also carries a reference risk
+(`safe` or `review`): a low-confidence `safe` can pass by asking for approval
+while still counting as a raw risk mismatch. Use `-case <id>` for one case or
+`-json` for a report that can be saved and compared. The command exits nonzero
+when any case fails, including when a hook errors, and reports false allows
+separately; inspect those first. Text output prints each case and its latency
+as it completes, then wall, mean, p50, p95, minimum, and maximum decision
+latency. Live classifier calls send synthetic case data to the provider and
+are never part of `make check`.
 
 These hand-written cases are smoke tests, not an independent measure of live
 agent reliability; several were refined after inspecting Jev results. Evaluate

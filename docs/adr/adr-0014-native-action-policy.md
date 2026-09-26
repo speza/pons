@@ -338,6 +338,13 @@ tool-call-start hook is for preflight decisions and approval.
   (`allow_generated_confidence`). A safe returned-probability result at or
   above the threshold allows the call; review and low-confidence results
   request approval.
+- `pons eval <plugin-id>` evaluates a configured plugin's hooks against
+  labeled cases through `Core.CheckToolCall`, a dry run of the start hooks
+  without approval or execution. Cases are data in the hook_provider/v1 JSON
+  (`docs/reference/plugin-evals.md`), so external plugins can ship evals in
+  their `evals/` directory. When every classifier fails, `action_policy`
+  still asks but reports the outage as a hook error, which fails an eval case
+  and logs a warning in a run.
 - Configured rules match tool kinds (`"*"` for all) with deny, ask, or allow,
   applied before classifiers. A policy may be rules-only; a call that no rule
   settles and no classifier assesses requests approval.

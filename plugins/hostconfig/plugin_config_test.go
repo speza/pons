@@ -181,3 +181,27 @@ func TestActionPolicyRulesAndGeneratedConfidence(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildPluginIncludesOnlyItsDependencies(t *testing.T) {
+	settings := Settings{
+		pluginEntryForTest("classifier/typesafe-jev", true, `{"api_key_env":"JEV_KEY"}`),
+		pluginEntryForTest("classifier/openai", true, `{}`),
+		pluginEntryForTest("action_policy", false, `{"classifier":"classifier/typesafe-jev"}`),
+	}
+	getenv := func(name string) string {
+		if name == "JEV_KEY" {
+			return "test-key"
+		}
+		return ""
+	}
+	options, err := NewRegistry().BuildPlugin(settings, "action_policy", getenv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(options.Plugins) != 2 || options.Plugins[0].ID != "classifier/typesafe-jev" || options.Plugins[1].ID != "action_policy" {
+		t.Fatalf("plugins = %+v", options.Plugins)
+	}
+	if _, err := NewRegistry().BuildPlugin(settings, "missing", getenv, nil); err == nil {
+		t.Fatal("built an unconfigured plugin")
+	}
+}

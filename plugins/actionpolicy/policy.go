@@ -115,9 +115,14 @@ func (p Policy) decide(ctx context.Context, req pons.ToolCallStartInput) (pons.P
 	if threshold == 0 {
 		threshold = 0.9
 	}
-	for _, classifier := range p.Classifiers {
+	var failures []error
+	for i, classifier := range p.Classifiers {
 		assessment, err := classifier.Assess(ctx, req)
-		if err != nil || !validAssessment(assessment) {
+		if err == nil && !validAssessment(assessment) {
+			err = errors.New("invalid assessment")
+		}
+		if err != nil {
+			failures = append(failures, fmt.Errorf("classifier %d: %w", i+1, err))
 			if ctx.Err() != nil {
 				break
 			}
@@ -141,5 +146,7 @@ func (p Policy) decide(ctx context.Context, req pons.ToolCallStartInput) (pons.P
 	if len(p.Classifiers) == 0 {
 		return pons.PermissionDecision{Permission: pons.PermissionAsk, Reason: "no_matching_rule"}, nil
 	}
-	return pons.PermissionDecision{Permission: pons.PermissionAsk, Reason: "classifier_unavailable"}, nil
+	// No classifier could decide: ask, and report the outage as a hook error.
+	return pons.PermissionDecision{Permission: pons.PermissionAsk, Reason: "classifier_unavailable"},
+		fmt.Errorf("actionpolicy: no classifier assessed the call: %w", errors.Join(failures...))
 }

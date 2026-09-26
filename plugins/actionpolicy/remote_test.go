@@ -139,7 +139,8 @@ func TestRemoteClassifierFailureAsks(t *testing.T) {
 		t.Fatal(err)
 	}
 	decision, err := (Policy{Classifiers: []Classifier{classifier}}).decide(context.Background(), testRequest())
-	if err != nil || decision.Permission != pons.PermissionAsk {
+	if err == nil || decision.Permission != pons.PermissionAsk ||
+		strings.Contains(err.Error(), "sensitive") || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("decision=%+v error=%v", decision, err)
 	}
 }

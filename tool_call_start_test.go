@@ -612,3 +612,54 @@ func TestPermissionRequestHooksResolveAsk(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckToolCallIsADryRun(t *testing.T) {
+	c := New()
+	executed := false
+	if err := c.AddTool("run", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+		executed = true
+		return protocol.ToolResult{OK: true}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetApprovalHandler(func(context.Context, PermissionRequestInput) (Permission, error) {
+		t.Fatal("dry run reached approval")
+		return PermissionAllow, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, hook := range []func(ToolCallStartInput) (ToolCallStartOutput, error){
+		func(in ToolCallStartInput) (ToolCallStartOutput, error) {
+			if len(in.Resources) != 1 || in.Resources[0].Value != "git push" {
+				t.Errorf("caller resources lost: %+v", in.Resources)
+			}
+			return ToolCallStartOutput{Permission: PermissionAsk, Reason: "shell_review", AdditionalContext: "first"}, nil
+		},
+		func(ToolCallStartInput) (ToolCallStartOutput, error) {
+			return ToolCallStartOutput{AdditionalContext: "second"}, errors.New("audit failed")
+		},
+	} {
+		if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, in ToolCallStartInput) (ToolCallStartOutput, error) {
+			return hook(in)
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var events []EventType
+	c.OnEvent(func(e Event) { events = append(events, e.Type) })
+
+	check, err := c.CheckToolCall(context.Background(), ToolCallStartInput{
+		Action:    protocol.Action{ID: "a", Kind: "run", Args: json.RawMessage(`{}`)},
+		Resources: []ToolResource{{Kind: "command", Value: "git push"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if check.Decision.Permission != PermissionAsk || check.Decision.Reason != "shell_review" ||
+		check.Output.AdditionalContext != "first" || len(check.HookErrors) != 1 {
+		t.Fatalf("check = %+v", check)
+	}
+	if executed || len(events) != 0 {
+		t.Fatalf("executed=%v events=%v", executed, events)
+	}
+}

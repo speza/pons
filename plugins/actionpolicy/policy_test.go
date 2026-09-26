@@ -47,17 +47,18 @@ func TestPolicyClassifierFailureAndUncertaintyAsk(t *testing.T) {
 		name        string
 		classifiers []Classifier
 		want        pons.Permission
+		wantErr     bool // an outage is reported as a hook error
 	}{
-		{"missing", nil, pons.PermissionAsk},
+		{"missing", nil, pons.PermissionAsk, false},
 		{"failure", []Classifier{ClassifierFunc(func(context.Context, pons.ToolCallStartInput) (pons.ActionAssessment, error) {
 			return pons.ActionAssessment{}, errors.New("unavailable")
-		})}, pons.PermissionAsk},
+		})}, pons.PermissionAsk, true},
 		{"low confidence", []Classifier{ClassifierFunc(func(context.Context, pons.ToolCallStartInput) (pons.ActionAssessment, error) {
 			return pons.ActionAssessment{Risk: "safe", Confidence: 0.5}, nil
-		})}, pons.PermissionAsk},
+		})}, pons.PermissionAsk, false},
 		{"risky", []Classifier{ClassifierFunc(func(context.Context, pons.ToolCallStartInput) (pons.ActionAssessment, error) {
 			return pons.ActionAssessment{Risk: "dangerous", Confidence: 1}, nil
-		})}, pons.PermissionAsk},
+		})}, pons.PermissionAsk, true},
 		{"fallback", []Classifier{
 			ClassifierFunc(func(context.Context, pons.ToolCallStartInput) (pons.ActionAssessment, error) {
 				return pons.ActionAssessment{}, errors.New("first unavailable")
@@ -65,12 +66,12 @@ func TestPolicyClassifierFailureAndUncertaintyAsk(t *testing.T) {
 			ClassifierFunc(func(context.Context, pons.ToolCallStartInput) (pons.ActionAssessment, error) {
 				return pons.ActionAssessment{Risk: "safe", Confidence: 0.95, ProbabilityConfidence: true}, nil
 			}),
-		}, pons.PermissionAllow},
+		}, pons.PermissionAllow, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			decision, err := (Policy{Classifiers: tt.classifiers}).decide(context.Background(), req)
-			if err != nil || decision.Permission != tt.want {
+			if (err != nil) != tt.wantErr || decision.Permission != tt.want {
 				t.Fatalf("decision=%+v error=%v", decision, err)
 			}
 		})

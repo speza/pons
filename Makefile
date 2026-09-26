@@ -55,8 +55,10 @@ lint:
 
 check: fmt-check test vet lint
 
+# Evaluate a configured plugin against the shipped classifier cases, e.g.
+# make eval-classifier EVAL_ARGS='classifier/codex'
 eval-classifier:
-	go run ./cmd/pons-eval $(EVAL_ARGS)
+	go run ./cmd/pons eval -cases plugins/actionpolicy/evals $(EVAL_ARGS)
 
 smoke-runtime:
 	./scripts/smoke-runtime.sh

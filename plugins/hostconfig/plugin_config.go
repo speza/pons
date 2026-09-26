@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 
 	"github.com/samperrin/pons"
 	"github.com/samperrin/pons/plugins/brain/llm"
@@ -108,6 +109,7 @@ func (b *BuildContext) AddManifestConfig(path string, config json.RawMessage) {
 // BuiltPlugin is one enabled registration in dependency-resolved config order.
 // Exactly one of Host and Manifest is populated.
 type BuiltPlugin struct {
+	ID       string // the configured plugin that produced this registration
 	Host     pons.Plugin
 	Manifest string
 	Config   json.RawMessage
@@ -242,10 +244,59 @@ func (r *Registry) Build(raw Settings, getenv func(string) string, providers map
 	if err != nil {
 		return Options{}, err
 	}
+	return buildPlugins(plugins, getenv, providers)
+}
+
+// BuildPlugin builds one configured plugin and the plugins providing the
+// capabilities it requires, in dependency order. The entry is built even when
+// disabled, so a plugin can be evaluated before it is enabled.
+func (r *Registry) BuildPlugin(raw Settings, id string, getenv func(string) string, providers map[string]llm.Fallback) (Options, error) {
+	settings := slices.Clone(raw)
+	index := slices.IndexFunc(settings, func(entry Entry) bool { return entry.ID == id })
+	if index < 0 {
+		return Options{}, fmt.Errorf("plugin %q is not in the plugins config", id)
+	}
+	enabled := true
+	settings[index].Enabled = &enabled
+
+	plugins, err := r.decodePluginConfigs(settings)
+	if err != nil {
+		return Options{}, err
+	}
+	providedBy := make(map[string]ConfiguredPlugin)
+	for _, plugin := range plugins {
+		for _, capability := range plugin.Provides() {
+			providedBy[capability] = plugin
+		}
+	}
+	needed := make(map[string]bool)
+	var need func(ConfiguredPlugin)
+	need = func(plugin ConfiguredPlugin) {
+		if needed[plugin.ID()] {
+			return
+		}
+		needed[plugin.ID()] = true
+		for _, capability := range plugin.Requires() {
+			need(providedBy[capability]) // decoding guarantees a provider
+		}
+	}
+	for _, plugin := range plugins {
+		if plugin.ID() == id {
+			need(plugin)
+		}
+	}
+	return buildPlugins(slices.DeleteFunc(plugins, func(plugin ConfiguredPlugin) bool { return !needed[plugin.ID()] }), getenv, providers)
+}
+
+func buildPlugins(plugins []ConfiguredPlugin, getenv func(string) string, providers map[string]llm.Fallback) (Options, error) {
 	build := &BuildContext{getenv: getenv, providers: providers}
 	for _, plugin := range plugins {
+		first := len(build.plugins)
 		if err := plugin.Build(build); err != nil {
 			return Options{}, fmt.Errorf("config plugins.%s: %w", plugin.ID(), err)
+		}
+		for i := first; i < len(build.plugins); i++ {
+			build.plugins[i].ID = plugin.ID()
 		}
 	}
 	return Options{Plugins: build.plugins}, nil

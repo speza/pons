@@ -41,6 +41,18 @@ func main() {
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if mode == "bundled" && len(os.Args) > 1 && os.Args[1] == "eval" {
+		home, _ := os.UserHomeDir()
+		if err := runEval(rootCtx, os.Args[2:], os.Stdout, os.Stderr, home, hostconfig.NewRegistry()); err != nil {
+			if !errors.Is(err, flag.ErrHelp) {
+				logger.Printf("eval: %v", err)
+			}
+			stop()
+			os.Exit(1)
+		}
+		return
+	}
+
 	provider := flag.String("provider", "anthropic", "LLM provider: anthropic | openai | codex | openai-responses")
 	model := flag.String("model", "", "model id (default: provider default)")
 	baseURL := flag.String("base-url", "", "override provider endpoint (for OpenAI-compatible servers)")

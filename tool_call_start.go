@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"unicode/utf8"
 
@@ -203,6 +204,37 @@ type callDecision struct {
 	errs     []error
 }
 
+// ToolCallCheck is the start-hook outcome for one call.
+type ToolCallCheck struct {
+	Action     protocol.Action // with any UpdatedInput applied
+	Decision   PermissionDecision
+	Output     HookOutput // first stop request; context and messages joined by newlines
+	HookErrors []error
+}
+
+// CheckToolCall runs the OnToolCallStart hooks for one call and merges their
+// decisions exactly as Run does before execution. It does not resolve an Ask,
+// execute the call, count repeated denials, or emit events. Evals and dry
+// runs use it; Resources in the input are used when the tool registers no
+// projection.
+func (c *Core) CheckToolCall(ctx context.Context, in ToolCallStartInput) (ToolCallCheck, error) {
+	call := c.decideToolCall(ctx, in)
+	if err := ctx.Err(); err != nil {
+		return ToolCallCheck{}, err
+	}
+	return ToolCallCheck{
+		Action:   call.action,
+		Decision: call.decision,
+		Output: HookOutput{
+			Stop:              call.fx.stop,
+			StopReason:        call.fx.stopReason,
+			SystemMessage:     strings.Join(call.fx.messages, "\n"),
+			AdditionalContext: strings.Join(call.fx.context, "\n"),
+		},
+		HookErrors: call.errs,
+	}, nil
+}
+
 // preflight decides every pending call of one turn before any of them runs.
 // Start hooks for different calls run concurrently; hook errors and messages
 // are then reported and asks resolved one at a time in call order. A hook's
@@ -272,8 +304,10 @@ func (c *Core) preflight(ctx context.Context, requests []ToolCallStartInput, den
 func (c *Core) decideToolCall(ctx context.Context, req ToolCallStartInput) callDecision {
 	for range maxInputUpdates {
 		call := callDecision{action: req.Action, decision: PermissionDecision{Permission: PermissionAllow}}
-		req.Resources, req.ResourceError = nil, false
+		// A registered projection owns the resources; otherwise any the
+		// caller supplied (as CheckToolCall callers may) are kept.
 		if project := c.resources[req.Action.Kind]; project != nil {
+			req.Resources, req.ResourceError = nil, false
 			projected := req.Action
 			projected.Args = slices.Clone(req.Action.Args)
 			if resources, err := project(projected); err != nil {
