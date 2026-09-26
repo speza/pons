@@ -53,7 +53,7 @@ func main() {
 		return
 	}
 
-	provider := flag.String("provider", "anthropic", "LLM provider: anthropic | openai | codex | openai-responses")
+	provider := flag.String("provider", "anthropic", "LLM provider: anthropic | openai | codex | openai-responses | opencode-go")
 	model := flag.String("model", "", "model id (default: provider default)")
 	baseURL := flag.String("base-url", "", "override provider endpoint (for OpenAI-compatible servers)")
 	workspace := flag.String("workspace", "", "host workspace selected for a new local, Seatbelt, or E2B archive conversation (default: current directory)")
@@ -256,6 +256,7 @@ func main() {
 		Model:        primary.Model,
 		BaseURL:      primary.BaseURL,
 		APIKey:       primary.APIKey,
+		API:          primary.API,
 		CompactChars: *compactChars,
 		Fallbacks:    fallbacks,
 	}

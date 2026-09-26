@@ -216,9 +216,14 @@ go run ./cmd/pons -login
 go run ./cmd/pons -message "inspect this project"
 ```
 
-The supported provider names are `anthropic`, `openai`, `codex`, and
-`openai-responses`. Codex uses a ChatGPT subscription. For a temporary
-provider override, use flags:
+The supported provider names are `anthropic`, `openai`, `codex`,
+`openai-responses`, and `opencode-go`. Codex uses a ChatGPT subscription.
+`opencode-go` uses an [OpenCode Go](https://opencode.ai/docs/go/)
+subscription key from `OPENCODE_API_KEY`; set `model` to any Go model ID
+(for example `glm-5.3` or `qwen3.8-max`, default `kimi-k3`) and pons picks
+the matching wire format by model family. If it guesses wrong for a new
+model, set `"api": "chat" | "messages" | "responses"` on that entry in the
+`providers` or `fallbacks` list. For a temporary provider override, use flags:
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-…

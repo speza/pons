@@ -57,7 +57,7 @@ func providerSlots(cfg settings, flagSet map[string]bool, flagProvider, flagMode
 		for _, f := range cfg.Fallbacks {
 			backups = append(backups, llm.Fallback{
 				ID: f.Provider, Provider: f.Provider, Model: f.Model, BaseURL: f.BaseURL,
-				APIKey: f.APIKey,
+				APIKey: f.APIKey, API: f.API,
 			})
 		}
 	}
@@ -81,7 +81,7 @@ func providerSlots(cfg settings, flagSet map[string]bool, flagProvider, flagMode
 func toFallback(p providerSettings) llm.Fallback {
 	return llm.Fallback{
 		ID: p.ID, Provider: p.Provider, Model: p.Model, BaseURL: p.BaseURL,
-		APIKey: p.APIKey,
+		APIKey: p.APIKey, API: p.API,
 	}
 }
 
