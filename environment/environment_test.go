@@ -40,12 +40,25 @@ func TestProxyRegistersSessionCatalog(t *testing.T) {
 	}
 }
 
+// twoToolSession's second tool conflicts in TestProxyPreflightsConflicts.
+type twoToolSession struct{ fakeSession }
+
+func (twoToolSession) Catalog() []external.ToolDescription {
+	return append(fakeSession{}.Catalog(), external.ToolDescription{
+		Kind: "taken", Description: "conflicting tool",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+	})
+}
+
 func TestProxyPreflightsConflicts(t *testing.T) {
 	core := pons.New()
-	if err := core.AddTool("remote", pons.ToolDef{Handler: fakeSession{}.Execute}); err != nil {
+	if err := core.AddTool("taken", pons.ToolDef{Handler: fakeSession{}.Execute}); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.Use(Proxy(fakeSession{})); err == nil || !strings.Contains(err.Error(), "already registered") {
+	if err := core.Use(Proxy(twoToolSession{})); err == nil || !strings.Contains(err.Error(), "already registered") {
 		t.Fatalf("conflict error = %v", err)
+	}
+	if core.HasTool("remote") {
+		t.Fatal("a conflicting session partially registered its catalog")
 	}
 }

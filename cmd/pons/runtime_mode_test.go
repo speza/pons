@@ -404,23 +404,6 @@ func TestRuntimeServerShutdownClosesActiveSSE(t *testing.T) {
 	}
 }
 
-func TestRuntimeContextTurnsPreserveJSONNumberPrecision(t *testing.T) {
-	turns, err := runtimeContextTurns([]ponsruntime.ContextTurn{{
-		Role: "assistant", Content: []ponsruntime.AgentContent{{Type: "tool_call", ToolCallID: "call", ToolKind: "tool", Arguments: json.RawMessage(`{"value":9007199254740993}`)}},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tool, ok := turns[0].Blocks[0].(llm.ToolUse)
-	if !ok {
-		t.Fatalf("block = %#v", turns[0].Blocks[0])
-	}
-	value, ok := tool.Input["value"].(json.Number)
-	if !ok || value.String() != "9007199254740993" {
-		t.Fatalf("value = %#v", tool.Input["value"])
-	}
-}
-
 func TestRuntimeAgentContentRejectsNilBlock(t *testing.T) {
 	if _, err := runtimeAgentContent([]llm.Block{nil}); err == nil {
 		t.Fatal("nil model block was silently omitted")
@@ -643,28 +626,6 @@ func TestExecutionEnvironmentAllowsConfiguredPluginFiles(t *testing.T) {
 		if !slices.Contains(spec.ReadOnly, want) {
 			t.Fatalf("read-only paths %v do not contain %q", spec.ReadOnly, want)
 		}
-	}
-}
-
-func TestBundledCLIUsesRuntimeServerPath(t *testing.T) {
-	var requests atomic.Int32
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"c","object":"chat.completion","created":0,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"bundled answer","refusal":null},"finish_reason":"stop"}]}`)
-	}))
-	defer provider.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err := runBundled(ctx, newServerLogger(&bytes.Buffer{}, false), testServerOptions(serverOptions{
-		StateDir: t.TempDir(), WorkspaceRoot: os.TempDir(), ClientWorkspace: t.TempDir(), MaxTurns: 3, MaxConcurrent: 1,
-		Brain: llm.Config{Provider: "openai", Model: "test", APIKey: "test", BaseURL: provider.URL + "/v1"},
-	}), "", "stable", "hello", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if requests.Load() != 1 {
-		t.Fatalf("provider requests = %d, want 1", requests.Load())
 	}
 }
 

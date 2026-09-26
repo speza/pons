@@ -512,11 +512,14 @@ func TestUpdatedInputIsRecheckedAndRecorded(t *testing.T) {
 }
 
 func TestInvalidOrEndlessUpdatesAreDenied(t *testing.T) {
-	for name, update := range map[string]func(int) json.RawMessage{
-		"non-object": func(int) json.RawMessage { return json.RawMessage(`[]`) },
-		"endless": func(n int) json.RawMessage {
+	for name, tt := range map[string]struct {
+		update func(int) json.RawMessage
+		reason string
+	}{
+		"non-object": {func(int) json.RawMessage { return json.RawMessage(`[]`) }, "invalid_tool_call_update"},
+		"endless": {func(n int) json.RawMessage {
 			return protocol.MustArgsJSON(map[string]int{"n": n + 1})
-		},
+		}, "tool_call_update_limit"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := New()
@@ -532,7 +535,7 @@ func TestInvalidOrEndlessUpdatesAreDenied(t *testing.T) {
 			if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, in ToolCallStartInput) (ToolCallStartOutput, error) {
 				var args struct{ N int }
 				_ = json.Unmarshal(in.Action.Args, &args)
-				return ToolCallStartOutput{UpdatedInput: update(args.N)}, nil
+				return ToolCallStartOutput{UpdatedInput: tt.update(args.N)}, nil
 			}}); err != nil {
 				t.Fatal(err)
 			}
@@ -540,8 +543,8 @@ func TestInvalidOrEndlessUpdatesAreDenied(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := result.History[0].Results[0]; got.OK {
-				t.Fatalf("result = %+v", got)
+			if got := result.History[0].Results[0]; got.OK || !strings.Contains(got.Error, tt.reason) {
+				t.Fatalf("result = %+v, want %s", got, tt.reason)
 			}
 		})
 	}

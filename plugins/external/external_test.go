@@ -248,6 +248,7 @@ func TestManifestResolutionAndSchemaValidation(t *testing.T) {
 		`{"type":"string"}`,
 		`{"type":"object","unknown":true}`,
 		`{"type":"object","properties":{"x":{"type":"array"}}}`,
+		`{"type":"object","properties":{"x":{"type":"invalid"}}}`,
 		`{"type":"object","required":["missing"]}`,
 		`{"type":"object","additionalProperties":true}`,
 	}

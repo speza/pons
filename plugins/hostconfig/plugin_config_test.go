@@ -14,13 +14,13 @@ import (
 )
 
 func TestBuildPluginOptionsSelectsClassifier(t *testing.T) {
-	plugins := pluginSettings{
+	plugins := Settings{
 		pluginEntryForTest("classifier/typesafe-jev", true, `{"api_key_env":"JEV_KEY"}`),
 		pluginEntryForTest("action_policy", true, `{"classifier":"classifier/typesafe-jev","min_safe_confidence":0.95}`),
 		pluginEntryForTest("classifier/openai", true, `{"model":"custom-model","timeout":"5s"}`),
 		pluginEntryForTest("external", true, `{"manifests":["/opt/plugin.json"]}`),
 	}
-	options, err := buildPluginOptions(plugins, func(name string) string {
+	options, err := Build(plugins, func(name string) string {
 		if name == "JEV_KEY" || name == "OPENAI_API_KEY" {
 			return "test-key"
 		}
@@ -49,18 +49,18 @@ func TestBuildPluginOptionsSelectsClassifier(t *testing.T) {
 }
 
 func TestBuildPluginOptionsDisabledAndMissingKey(t *testing.T) {
-	plugins := pluginSettings{
+	plugins := Settings{
 		pluginEntryForTest("classifier/openai", false, `{}`),
 		pluginEntryForTest("action_policy", false, `{"classifier":"classifier/openai"}`),
 	}
-	options, err := buildPluginOptions(plugins, func(string) string { return "" }, nil)
+	options, err := Build(plugins, func(string) string { return "" }, nil)
 	if err != nil || len(options.Plugins) != 0 {
 		t.Fatalf("disabled policy = %+v, %v", options, err)
 	}
 
 	plugins[0] = pluginEntryForTest("classifier/openai", true, `{}`)
 	plugins[1] = pluginEntryForTest("action_policy", true, `{"classifier":"classifier/openai"}`)
-	_, err = buildPluginOptions(plugins, func(string) string { return "" }, nil)
+	_, err = Build(plugins, func(string) string { return "" }, nil)
 	if err == nil || !strings.Contains(err.Error(), "OPENAI_API_KEY is not set") {
 		t.Fatalf("missing key error: %v", err)
 	}
@@ -76,12 +76,12 @@ func TestBuildCodexClassifierFromProvider(t *testing.T) {
 		[]byte(`{"codex":{"access":"test-token","accountId":"test-account","refresh":"test-refresh","expires":9999999999999}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	plugins := pluginSettings{
+	plugins := Settings{
 		pluginEntryForTest("classifier/codex", true, `{"provider_id":"primary","model":"gpt-6-luna"}`),
 		pluginEntryForTest("action_policy", true, `{"classifier":"classifier/codex"}`),
 	}
 	providers := map[string]llm.Fallback{"primary": {ID: "primary", Provider: "codex"}}
-	options, err := buildPluginOptions(plugins, func(string) string { return "" }, providers)
+	options, err := Build(plugins, func(string) string { return "" }, providers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,16 +94,16 @@ func TestBuildCodexClassifierFromProvider(t *testing.T) {
 	}
 
 	providers["primary"] = llm.Fallback{ID: "primary", Provider: "openai"}
-	if _, err := buildPluginOptions(plugins, func(string) string { return "" }, providers); err == nil || !strings.Contains(err.Error(), "must use the codex provider") {
+	if _, err := Build(plugins, func(string) string { return "" }, providers); err == nil || !strings.Contains(err.Error(), "must use the codex provider") {
 		t.Fatalf("wrong provider error: %v", err)
 	}
-	if _, err := buildPluginOptions(plugins, func(string) string { return "" }, nil); err == nil || !strings.Contains(err.Error(), "does not match") {
+	if _, err := Build(plugins, func(string) string { return "" }, nil); err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("missing provider error: %v", err)
 	}
 }
 
-func pluginEntryForTest(id string, enabled bool, config string) pluginEntry {
-	return pluginEntry{ID: id, Version: "1.0.0", Enabled: &enabled, Config: json.RawMessage(config)}
+func pluginEntryForTest(id string, enabled bool, config string) Entry {
+	return Entry{ID: id, Version: "1.0.0", Enabled: &enabled, Config: json.RawMessage(config)}
 }
 
 type customPlugin struct{}
@@ -158,7 +158,7 @@ func TestInstalledExternalPluginResolvesByID(t *testing.T) {
 }
 
 func TestActionPolicyRulesAndGeneratedConfidence(t *testing.T) {
-	options, err := buildPluginOptions(pluginSettings{
+	options, err := Build(Settings{
 		pluginEntryForTest("action_policy", true, `{"allow_generated_confidence":true,"rules":[{"action":"allow","tools":["*"]},{"action":"ask","tools":["bash"],"reason_code":"shell_review"}]}`),
 	}, func(string) string { return "" }, nil)
 	if err != nil {
@@ -176,7 +176,7 @@ func TestActionPolicyRulesAndGeneratedConfidence(t *testing.T) {
 		`{"rules":[{"action":"ask","tools":[]}]}`,
 		`{"rules":[{"action":"ask","tools":[""]}]}`,
 	} {
-		if err := Decode(pluginSettings{pluginEntryForTest("action_policy", true, config)}); err == nil {
+		if err := Decode(Settings{pluginEntryForTest("action_policy", true, config)}); err == nil {
 			t.Fatalf("accepted invalid action_policy config %s", config)
 		}
 	}

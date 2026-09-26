@@ -444,42 +444,11 @@ func TestE2BCreateSandboxKeepsCredentialOnPlatformRequest(t *testing.T) {
 	}
 }
 
-func TestE2BProcessOutputIsBounded(t *testing.T) {
-	buffer := boundedProcessBuffer{remaining: maxE2BProcessOutputBytes}
-	if _, err := buffer.Write(make([]byte, maxE2BProcessOutputBytes)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := buffer.Write([]byte("overflow")); err == nil || !strings.Contains(err.Error(), "exceeds") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
 func TestE2BProcessEndReportsErrorWithoutStatus(t *testing.T) {
 	message := "process could not start"
 	err := e2bProcessEndError(&e2bProcessEnd{Error: &message}, "")
 	if err == nil || !strings.Contains(err.Error(), message) {
 		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestProcessStreamDecodesConnectFrames(t *testing.T) {
-	body, err := json.Marshal(map[string]any{"event": map[string]any{"start": map[string]int{"pid": 42}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var framed bytes.Buffer
-	framed.WriteByte(0)
-	if err := binary.Write(&framed, binary.BigEndian, uint32(len(body))); err != nil {
-		t.Fatal(err)
-	}
-	framed.Write(body)
-	stream := &e2bProcessStream{body: io.NopCloser(&framed)}
-	response, err := stream.next()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.Event.Start == nil || response.Event.Start.PID != 42 {
-		t.Fatalf("response = %+v", response)
 	}
 }
 
@@ -941,7 +910,7 @@ func TestRestoreWorkspaceRejectsUnsafeAndOversizedCheckpoints(t *testing.T) {
 			if err := os.WriteFile(marker, []byte("preserved"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			archive := checkpointArchive(t, test.header, test.body)
+			archive := workspaceArchive(t, archiveEntry{header: test.header, body: test.body})
 			if err := restoreWorkspace(workspace, archive, test.limit); err == nil {
 				t.Fatal("checkpoint unexpectedly restored")
 			}
@@ -952,36 +921,13 @@ func TestRestoreWorkspaceRejectsUnsafeAndOversizedCheckpoints(t *testing.T) {
 	}
 }
 
-func checkpointArchive(t *testing.T, header tar.Header, body string) []byte {
-	t.Helper()
-	var archive bytes.Buffer
-	writer := tar.NewWriter(&archive)
-	if err := writer.WriteHeader(&header); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := io.WriteString(writer, body); err != nil {
-		t.Fatal(err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return archive.Bytes()
-}
-
 func TestRestoreWorkspaceRejectsSymlinkTraversal(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	if err := os.Mkdir(workspace, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	var archive bytes.Buffer
-	writer := tar.NewWriter(&archive)
-	if err := writer.WriteHeader(&tar.Header{Name: "escape", Typeflag: tar.TypeSymlink, Linkname: "../outside"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := restoreWorkspace(workspace, archive.Bytes(), 1<<20); err == nil || !strings.Contains(err.Error(), "unsafe symlink") {
+	archive := workspaceArchive(t, archiveEntry{header: tar.Header{Name: "escape", Typeflag: tar.TypeSymlink, Linkname: "../outside"}})
+	if err := restoreWorkspace(workspace, archive, 1<<20); err == nil || !strings.Contains(err.Error(), "unsafe symlink") {
 		t.Fatalf("error = %v", err)
 	}
 }

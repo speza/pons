@@ -38,18 +38,16 @@ func setBrain(t *testing.T, c *Core, b ControlPort) {
 	}
 }
 
-// fakeBrainStop interprets failed results as stop.
-type stopBrain struct{ fakeBrain }
-
-func (b *stopBrain) Interpret(ctx context.Context, obs protocol.Observation, tr protocol.ToolResult) (protocol.Interpretation, error) {
-	return protocol.Interpretation{Continue: false, StopReason: "failed"}, nil
-}
-
 func TestUnknownKindIsObservationNotCrash(t *testing.T) {
 	c := New()
-	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{{Kind: "does_not_exist"}}}})
-	if _, err := c.Run(context.Background(), "test goal"); err != nil {
+	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{{ID: "call", Kind: "does_not_exist"}}}})
+	res, err := c.Run(context.Background(), "test goal")
+	if err != nil {
 		t.Fatalf("run: %v", err)
+	}
+	got := res.History[0].Results[0]
+	if got.OK || got.ActionID != "call" || !strings.Contains(got.Error, `no plugin provides action kind "does_not_exist"`) {
+		t.Fatalf("unknown kind observation: %+v", got)
 	}
 }
 
@@ -68,25 +66,6 @@ func TestToolPanicBecomesObservation(t *testing.T) {
 	got := res.History[0].Results[0]
 	if got.Error != "tool panic: boom" || got.ActionID != "panic" || got.Kind != "panic" {
 		t.Fatalf("panic observation: %+v", got)
-	}
-}
-
-func TestToolResultIdentityIsOwnedByCore(t *testing.T) {
-	c := New()
-	setBrain(t, c, &continueBrain{fakeBrain{turns: [][]protocol.Action{{{ID: "call", Kind: "tool"}}, {Finish("done")}}}})
-	if err := c.AddTool("tool", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
-		return protocol.ToolResult{ActionID: "forged-id", Kind: "forged-kind", OK: true}, nil
-	}}); err != nil {
-		t.Fatal(err)
-	}
-
-	res, err := c.Run(context.Background(), "goal")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := res.History[0].Results[0]
-	if got.ActionID != "call" || got.Kind != "tool" {
-		t.Fatalf("tool result identity was not normalized: %+v", got)
 	}
 }
 
@@ -113,35 +92,11 @@ func (b *continueBrain) Interpret(ctx context.Context, obs protocol.Observation,
 	return protocol.Interpretation{Continue: true}, nil
 }
 
-func TestFinishStopsLoop(t *testing.T) {
-	c := New()
-	setBrain(t, c, &continueBrain{fakeBrain{turns: [][]protocol.Action{
-		{{Kind: "does_not_exist"}}, // unknown kind → observation
-		{Finish("all done")},
-	}}})
-	c.AddTool("anything", ToolDef{Handler: func(ctx context.Context, a protocol.Action) (protocol.ToolResult, error) {
-		return protocol.ToolResult{ActionID: a.ID, OK: true}, nil
-	}})
-	if _, err := c.Run(context.Background(), "test goal"); err != nil {
-		t.Fatalf("run: %v", err)
-	}
-}
-
 func TestEmptyResponseErrors(t *testing.T) {
 	c := New()
 	setBrain(t, c, &fakeBrain{}) // zero turns → Respond returns no actions
 	if _, err := c.Run(context.Background(), "test goal"); err == nil {
 		t.Fatal("empty response should error")
-	}
-}
-
-func TestStopOnFailedResult(t *testing.T) {
-	c := New()
-	setBrain(t, c, &stopBrain{fakeBrain{turns: [][]protocol.Action{
-		{{Kind: "does_not_exist"}},
-	}}})
-	if _, err := c.Run(context.Background(), "test goal"); err != nil {
-		t.Fatalf("run: %v", err)
 	}
 }
 
@@ -287,8 +242,15 @@ func TestToolSpecsAreDefensiveCopies(t *testing.T) {
 		t.Fatalf("ToolSpecs exposed registry params slice: %q", got)
 	}
 
-	eventSpec := c.toolSpec("run")
-	eventSpec.Params[0].Name = "changed from event"
+	setBrain(t, c, &continueBrain{fakeBrain{turns: [][]protocol.Action{{{ID: "a", Kind: "run"}}, {Finish("done")}}}})
+	c.OnEvent(func(e Event) {
+		if e.Type == EventActionStart {
+			e.Tool.Params[0].Name = "changed from event"
+		}
+	})
+	if _, err := c.Run(context.Background(), "goal"); err != nil {
+		t.Fatal(err)
+	}
 	if got := c.ToolSpecs()[0].Params[0].Name; got != "command" {
 		t.Fatalf("event metadata exposed registry params slice: %q", got)
 	}

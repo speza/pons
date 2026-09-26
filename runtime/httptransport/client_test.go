@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -14,77 +13,34 @@ import (
 	ponsruntime "github.com/samperrin/pons/runtime"
 )
 
-func TestClientListsConversations(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/conversations" {
-			t.Errorf("request = %s %s", r.Method, r.URL.Path)
-			http.Error(w, "unexpected request", http.StatusBadRequest)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `[{"conversation_id":"one","workspace":"/workspace","created_at":"2026-09-21T00:00:00Z"}]`)
+// The client and handler share routes and wire shapes, so exercise the
+// client against the real handler rather than a hand-written server.
+func TestClientRoundTripsThroughHandler(t *testing.T) {
+	runtime := &fakeRuntime{
+		created:       ponsruntime.Conversation{ID: "conversation-1", Environment: "seatbelt"},
+		conversations: []ponsruntime.Conversation{{ID: "one", Workspace: "/workspace"}},
+	}
+	server := httptest.NewServer(HandlerWithOptions(runtime, HandlerOptions{
+		Environments: []string{"seatbelt"}, DefaultEnvironment: "seatbelt",
 	}))
 	defer server.Close()
+	client := Client{BaseURL: server.URL}
+	ctx := context.Background()
 
-	conversations, err := (Client{BaseURL: server.URL}).ListConversations(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	conversations, err := client.ListConversations(ctx)
+	if err != nil || len(conversations) != 1 || conversations[0].ID != "one" || conversations[0].Workspace != "/workspace" {
+		t.Fatalf("conversations = %+v, err = %v", conversations, err)
 	}
-	if len(conversations) != 1 || conversations[0].ID != "one" {
-		t.Fatalf("conversations = %+v", conversations)
-	}
-}
 
-func TestClientCreatesConversationWithSourceAndEnvironment(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/conversations" {
-			t.Errorf("request = %s %s", r.Method, r.URL.Path)
-			http.Error(w, "unexpected request", http.StatusBadRequest)
-			return
-		}
-		var body struct {
-			Environment string `json:"environment"`
-			Workspace   string `json:"workspace"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatal(err)
-		}
-		if body.Environment != "seatbelt" || body.Workspace != "/workspace" {
-			t.Errorf("conversation selection = %+v", body)
-		}
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(ponsruntime.Conversation{ID: "conversation-1", Environment: body.Environment})
-	}))
-	defer server.Close()
-
-	conversation, err := (Client{BaseURL: server.URL}).CreateConversation(context.Background(), ponsruntime.ConversationOptions{
-		Environment: "seatbelt", Workspace: "/workspace",
-	})
-	if err != nil {
-		t.Fatal(err)
+	selection := ponsruntime.ConversationOptions{Environment: "seatbelt", Workspace: "/workspace"}
+	conversation, err := client.CreateConversation(ctx, selection)
+	if err != nil || conversation.ID != "conversation-1" || runtime.createdOptions != selection {
+		t.Fatalf("conversation = %+v, options = %+v, err = %v", conversation, runtime.createdOptions, err)
 	}
-	if conversation.Environment != "seatbelt" {
-		t.Fatalf("conversation = %+v", conversation)
-	}
-}
 
-func TestClientReadsRuntimeOptions(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/options" {
-			t.Errorf("request = %s %s", r.Method, r.URL.Path)
-			http.Error(w, "unexpected request", http.StatusBadRequest)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(HandlerOptions{Environments: []string{"seatbelt"}, DefaultEnvironment: "seatbelt"})
-	}))
-	defer server.Close()
-
-	options, err := (Client{BaseURL: server.URL}).RuntimeOptions(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if options.DefaultEnvironment != "seatbelt" || len(options.Environments) != 1 {
-		t.Fatalf("options = %+v", options)
+	options, err := client.RuntimeOptions(ctx)
+	if err != nil || options.DefaultEnvironment != "seatbelt" || len(options.Environments) != 1 {
+		t.Fatalf("options = %+v, err = %v", options, err)
 	}
 }
 

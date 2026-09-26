@@ -131,15 +131,18 @@ func TestEvalReportsFailuresAsJSON(t *testing.T) {
 
 func TestEvalRejectsMisuse(t *testing.T) {
 	home := installEvalPlugin(t)
-	for name, args := range map[string][]string{
-		"no plugin":             {},
-		"unconfigured plugin":   {"missing.policy"},
-		"threshold on a policy": {"-threshold", "0.8", "test.policy"},
-		"unknown case":          {"-case", "nope", "test.policy"},
+	for name, tt := range map[string]struct {
+		args []string
+		want string
+	}{
+		"no plugin":             {nil, "exactly one plugin ID"},
+		"unconfigured plugin":   {[]string{"missing.policy"}, "not in the plugins config"},
+		"threshold on a policy": {[]string{"-threshold", "0.8", "test.policy"}, "-threshold applies only to classifier plugins"},
+		"unknown case":          {[]string{"-case", "nope", "test.policy"}, `case "nope" was not found`},
 	} {
 		var stdout, stderr bytes.Buffer
-		if err := runEval(context.Background(), args, &stdout, &stderr, home, hostconfig.NewRegistry()); err == nil {
-			t.Errorf("%s: accepted %v", name, args)
+		if err := runEval(context.Background(), tt.args, &stdout, &stderr, home, hostconfig.NewRegistry()); err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("%s: err = %v, want %q", name, err, tt.want)
 		}
 	}
 }

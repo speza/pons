@@ -2,13 +2,10 @@ package toolhost
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/samperrin/pons"
-	"github.com/samperrin/pons/plugins/external"
 	"github.com/samperrin/pons/protocol"
 )
 
@@ -55,16 +52,6 @@ func TestHostCatalogAndExecution(t *testing.T) {
 	}
 	if string(data) != "hello" {
 		t.Fatalf("file = %q", data)
-	}
-}
-
-func TestToolSchemaRejectsInvalidLegacyType(t *testing.T) {
-	raw, err := toolSchema(pons.ToolSpec{Params: []pons.ToolParam{{Name: "value", Type: "invalid"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := external.ValidateToolSchema(json.RawMessage(raw)); err == nil {
-		t.Fatal("invalid parameter type passed schema validation")
 	}
 }
 
