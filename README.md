@@ -7,8 +7,11 @@ observations flow up.
 That is the architecture here: the brain sends actions down, and hands return
 observations up.
 
-pons is a minimal, pluggable agent harness in Go. A dependency-free
-`protocol/` seam connects a reasoning **brain** to executing **hands**:
+pons is a self-hosted runtime for persistent agents in Go, built on a
+minimal, pluggable brain/hands harness. A durable runtime, sandboxed
+execution environments, and a web UI sit on top of a small core, where a
+dependency-free `protocol/` seam connects a reasoning **brain** to executing
+**hands**:
 
 ```
 brain  -- protocol.Action -->  core  -- execute -->  hands
