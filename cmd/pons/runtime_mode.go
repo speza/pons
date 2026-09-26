@@ -336,11 +336,11 @@ func (r *agentRunner) brainConfig(agent ponsruntime.AgentDefinition) (llm.Config
 		selected := config.Fallbacks[index]
 		primary := llm.Fallback{
 			ID: r.opts.ProviderSlot, Provider: config.Provider, Model: config.Model,
-			BaseURL: config.BaseURL, APIKey: config.APIKey,
+			BaseURL: config.BaseURL, APIKey: config.APIKey, API: config.API,
 		}
 		config.Fallbacks = slices.Concat([]llm.Fallback{primary}, config.Fallbacks[:index], config.Fallbacks[index+1:])
 		config.ID, config.Provider = selected.ID, selected.Provider
-		config.BaseURL, config.APIKey = selected.BaseURL, selected.APIKey
+		config.BaseURL, config.APIKey, config.API = selected.BaseURL, selected.APIKey, selected.API
 	}
 	config.Model = agent.Model
 	config.Persona = personaPrompt(agent)
@@ -580,6 +580,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	if err != nil {
 		return result, err
 	}
+	brainConfig.SessionID = request.ConversationID
 	provider, spec, err := r.executionEnvironment(request.Environment)
 	if err != nil {
 		return result, err

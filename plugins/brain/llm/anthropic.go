@@ -21,12 +21,13 @@ type anthropicClient struct {
 	maxTokens int
 }
 
-func newAnthropicClient(key, baseURL string, maxTokens int) *anthropicClient {
+func newAnthropicClient(key, baseURL string, maxTokens int, extra ...aopt.RequestOption) *anthropicClient {
 	opts := []aopt.RequestOption{
 		aopt.WithAPIKey(key),
 		aopt.WithMaxRetries(0),
 		aopt.WithHTTPClient(defaultHTTPClient()),
 	}
+	opts = append(opts, extra...)
 	if baseURL != "" {
 		opts = append(opts, aopt.WithBaseURL(baseURL))
 	}

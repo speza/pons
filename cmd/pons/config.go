@@ -22,6 +22,7 @@ type fallbackSettings struct {
 	Model    string `json:"model,omitempty"`
 	BaseURL  string `json:"base_url,omitempty"`
 	APIKey   string `json:"api_key,omitempty"`
+	API      string `json:"api,omitempty"`
 }
 
 // providerSettings is one named provider slot in a config file. Multiple
@@ -35,6 +36,7 @@ type providerSettings struct {
 	Model    string `json:"model,omitempty"`
 	BaseURL  string `json:"base_url,omitempty"`
 	APIKey   string `json:"api_key,omitempty"`
+	API      string `json:"api,omitempty"`
 }
 
 type e2bSettings struct {
