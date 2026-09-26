@@ -165,9 +165,12 @@ func TestOnTurnAndWraps(t *testing.T) {
 		})
 	})
 	var turns []protocol.TurnLog
-	c.OnTurn(func(obs protocol.Observation, turn protocol.TurnLog) {
-		turns = append(turns, turn)
-	})
+	if err := c.AddHooks(Hooks{OnAgentTurnEnd: func(_ context.Context, in AgentTurnEndInput) (AgentTurnEndOutput, error) {
+		turns = append(turns, in.Log)
+		return AgentTurnEndOutput{}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := c.Run(context.Background(), "test goal"); err != nil {
 		t.Fatalf("run: %v", err)
@@ -207,21 +210,6 @@ func TestCheckedAssistantResponseFailurePreventsToolExecution(t *testing.T) {
 func TestSetBrainRejectsNil(t *testing.T) {
 	if err := New().SetBrain(nil); err == nil {
 		t.Fatal("nil brain must be rejected")
-	}
-}
-
-func TestTurnErrorHookPropagates(t *testing.T) {
-	c := New()
-	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{Finish("done")}}})
-	c.OnTurnError(func(protocol.Observation, protocol.TurnLog) error {
-		return errors.New("disk full")
-	})
-	res, err := c.Run(context.Background(), "goal")
-	if err == nil || !strings.Contains(err.Error(), "disk full") {
-		t.Fatalf("hook error = %v", err)
-	}
-	if res.Turns != 1 || len(res.History) != 1 {
-		t.Fatalf("hook failure lost completed turn: %+v", res)
 	}
 }
 

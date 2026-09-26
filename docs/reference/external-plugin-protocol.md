@@ -4,19 +4,20 @@
 **Protocol:** `pons.plugin.runtime/1`
 **Related:** ADR-0004, ADR-0007
 
-This document is the normative specification for the external tool-provider
-runtime shipped in `plugins/external`. Runtime protocol 1 defines exactly one
-capability: `tool_provider/v1`.
+This document is the normative specification for the external plugin runtime
+shipped in `plugins/external`. Runtime protocol 1 supports `tool_provider/v1`
+in hands placement and `hook_provider/v1` in host placement.
 
 ## 1. Roles and topology
 
 A **host** is the pons process, or an embedding process using the external
-adapter. It launches one **plugin process** and adapts that process's
-advertised tools to `pons.ToolPort`.
+adapter. It launches one **plugin process** and adapts its advertised tools or
+hooks to the corresponding Core registration point.
 
-The plugin process is a hands-side tool provider. It receives no `Core`, brain,
-conversation history, or provider credentials unless the host explicitly
-supplies them through deployment configuration.
+A hands plugin receives no `Core`, brain, or conversation history. A host hook
+plugin receives the event for its subscribed hook, which may include recent
+source-labeled conversation context. Neither placement receives a `Core` handle
+or inherited provider credentials.
 
 ## 2. Installation manifest
 
@@ -30,7 +31,8 @@ splitting or expansion.
   "name": "acme.github",
   "entrypoint": "./pons-plugin-github",
   "args": [],
-  "runtime_protocol": 1
+  "runtime_protocol": 1,
+  "placement": "hands"
 }
 ```
 
@@ -41,10 +43,18 @@ Required fields:
 - `entrypoint`: executable or interpreter path;
 - `runtime_protocol`: requested runtime protocol major version.
 
+Optional `config_version` declares the version of the plugin-owned config
+contract (default `1.0.0`); the global plugin entry must name that version.
+
 `args` is optional and contains literal strings. Hosts reject unknown manifest
 fields. The host sets the child working directory to the manifest directory.
 The hands workspace is passed explicitly during initialization and is never
 inferred from the child working directory.
+Omitted `placement` means `hands`. Set it to `host` for hook providers. An
+installed plugin lives at `~/.pons/plugins/<name>/plugin.json` and is activated
+by an enabled global config entry with the same ID; its `config` object is
+delivered in `plugin/initialize`. Project config cannot activate it. The
+`-plugin` flag can select an explicit manifest path.
 
 An interpreted distribution can use an executable interpreter as the
 entrypoint:
@@ -111,7 +121,8 @@ Request:
     },
     "supported_capabilities": {
       "tool_provider": [1]
-    }
+    },
+    "config": {}
   }
 }
 ```
@@ -289,14 +300,59 @@ calls and is not reused.
 
 ## 8. Discovery and routing
 
-The host loads only manifests explicitly supplied by the application. It
-starts each child, validates its initialization catalog, and registers one
-proxy handler per tool with `Core.AddTool`. Action-kind conflicts fail
-composition; selection is never last-wins.
+The host loads only manifests explicitly supplied by the application or
+installed by ID under `~/.pons/plugins`. It starts each child, validates its
+initialization catalog, and registers tool handlers with `Core.AddTool` or
+hook callbacks with `Core.AddHooks`. Action-kind conflicts fail composition;
+selection is never last-wins.
 
 The host keeps plugin name, version, capability version, executable, and action
 kind available in tool metadata for presentation and audit. The core routes an
 action to the proxy, and the proxy routes it to the child provider.
+
+### 8.1 Host hook provider
+
+A host manifest sets `"placement":"host"`. Initialization advertises only
+`hook_provider: [1]`; the plugin returns a `hook_provider/v1` capability:
+
+```json
+{"hooks": ["on_tool_call_start", "on_tool_call_end"], "tools": ["bash", "shell"]}
+```
+
+`hooks` is nonempty and names any of `on_agent_start`, `on_agent_turn_start`,
+`on_assistant_response`, `on_tool_call_start`, `on_permission_request`,
+`on_tool_call_end`, `on_agent_turn_end`, and `on_agent_end`. The optional
+`tools` list limits the three tool hooks to those tool kinds; the host answers
+other calls itself with an empty output. Duplicate or unknown names and mixed
+hands/host capabilities are rejected. The host sends the manifest entry's
+`config` object as `config` in `plugin/initialize`.
+
+The host sends `hooks/call` with the `hook` name and the hook's `Input` as
+`event`; the plugin returns the hook's `Output` as `patch`. Both use the
+snake_case JSON of the Go types in `hooks.go` and `tool_call_start.go`. Every
+output accepts the common fields:
+
+```json
+{"stop": false, "stop_reason": "", "system_message": "", "additional_context": ""}
+```
+
+and at most these hook-specific fields:
+
+| Hook | Output fields |
+| --- | --- |
+| `on_tool_call_start` | `permission` (`allow`, `ask`, `deny`), `reason`, `assessment`, `updated_input` |
+| `on_permission_request` | `permission` (`allow`, `deny`) |
+| `on_tool_call_end` | `result` |
+| `on_agent_end` | `continue`, `reason` |
+
+Unknown fields make the output malformed. For example, a policy can return
+`{"patch":{"permission":"ask","reason":"shell_review"}}`, and an observer
+returns `{"patch":{}}`. A failed or malformed call is reported as a
+`hook_error` event and handled as in ADR-0014: a start hook asks, a permission
+hook denies, a tool-end hook withholds the result, and other hooks are
+skipped. Error-carrying inputs (`on_agent_turn_end`, `on_agent_end`) include
+an `error` string. Inputs never include run history, and tool output and error
+strings are truncated to 16 KiB. Host deadlines and frame/result limits apply.
 
 ## 9. Security requirements
 
@@ -308,8 +364,10 @@ action to the proxy, and the proxy routes it to the child provider.
   process termination in the host.
 - Keep credentials out of the child by default; use scoped credentials or a
   broker when necessary.
-- Put an untrusted child inside the same OS sandbox as the hands deployment;
-  do not mistake a subprocess for a permissions boundary.
+- Put an untrusted hands child inside the hands deployment's OS sandbox. Host
+  hooks are explicitly installed, trusted control-plane code that can approve
+  calls and change inputs and results; operators must trust or separately
+  isolate their executable.
 - Do not allow a plugin to elevate its placement.
 
 ## 10. Implementations and tests
@@ -327,6 +385,7 @@ and protocol write failures. Both SDKs keep application logs off stdout.
 
 ## 11. Capability scope
 
-Runtime protocol 1 defines no external brain, session-store, event-sink, or
-execution-policy capability. Such names are unsupported by this protocol and
-cannot be activated through the tool-provider adapter.
+Runtime protocol 1 defines no external brain or session-store capability.
+The host hook capability exposes the Core hooks with bounded inputs. Adding
+an optional output field is compatible; a new hook, a removed or retyped
+field, or a changed effect requires a new capability version.

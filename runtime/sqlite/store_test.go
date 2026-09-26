@@ -914,10 +914,14 @@ func TestOpenRebuildsIndexesAndRecoversUncertainTool(t *testing.T) {
 	if _, err := store.CommitAssistantTurn(ctx, claim.Run, []ponsruntime.MessagePart{
 		{Type: "tool_call", ToolCallID: "finished", ToolKind: "fake", Arguments: protocol.MustArgsJSON(map[string]any{})},
 		{Type: "tool_call", ToolCallID: "uncertain", ToolKind: "fake", Arguments: protocol.MustArgsJSON(map[string]any{})},
+		{Type: "tool_call", ToolCallID: "denied", ToolKind: "fake", Arguments: protocol.MustArgsJSON(map[string]any{})},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.ToolCompleted(ctx, claim.Run, protocol.ToolResult{ActionID: "finished", Kind: "fake", OK: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ToolDenied(ctx, claim.Run, protocol.ToolResult{ActionID: "denied", Kind: "fake", Error: "not allowed"}); err != nil {
 		t.Fatal(err)
 	}
 	second, _, err := acceptInput(store, ctx, conversation.ID, "second", []ponsruntime.TextPart{{Type: "text", Text: "second"}})
@@ -945,6 +949,7 @@ func TestOpenRebuildsIndexesAndRecoversUncertainTool(t *testing.T) {
 	assertStoredStatus(t, store, "submissions", second.InboundMessageID, ponsruntime.RunQueued)
 	assertStoredStatus(t, store, "runs", claim.Run.ID, ponsruntime.RunRunning)
 	assertToolStatus(t, store, claim.Run.ID, "finished", ponsruntime.ToolCompleted)
+	assertToolStatus(t, store, claim.Run.ID, "denied", ponsruntime.ToolDenied)
 	assertToolStatus(t, store, claim.Run.ID, "uncertain", ponsruntime.ToolRequested)
 	duplicate, duplicateEvents, err := acceptInput(store, ctx, conversation.ID, "first", []ponsruntime.TextPart{{Type: "text", Text: "first"}})
 	if err != nil || !duplicate.Duplicate || duplicate.InboundMessageID != first.InboundMessageID || len(duplicateEvents) != 0 {

@@ -327,6 +327,13 @@ func providerClient(slot Fallback, maxTokens int) (Client, string, error) {
 	}
 }
 
+// NewProviderClient resolves one configured provider for trusted host plugins.
+// It uses the same credentials and transport as the brain, without failover.
+func NewProviderClient(slot Fallback) (Client, error) {
+	client, _, err := providerClient(slot, 0)
+	return client, err
+}
+
 func (b *Brain) maxTokens() int {
 	if b.cfg.MaxTokens > 0 {
 		return b.cfg.MaxTokens
@@ -364,6 +371,19 @@ func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.Ass
 		b.turns = append(b.turns, Turn{Role: "user", Blocks: []Block{Text{Value: b.userPrompt(obs)}}})
 	}
 	b.seenMessage = obs.Message
+	if len(obs.Context) > 0 {
+		// Hook context is host guidance for this turn, delivered in the user
+		// turn the model reads next and kept distinct from the instruction.
+		blocks := make([]Block, 0, len(obs.Context))
+		for _, text := range obs.Context {
+			blocks = append(blocks, Text{Value: "<hook_context>\n" + text + "\n</hook_context>"})
+		}
+		if last := &b.turns[len(b.turns)-1]; last.Role == "user" {
+			last.Blocks = append(last.Blocks, blocks...)
+		} else {
+			b.turns = append(b.turns, Turn{Role: "user", Blocks: blocks})
+		}
+	}
 
 	if b.shouldCompact() {
 		if err := b.compact(ctx, obs.Turn); err != nil {
@@ -437,6 +457,62 @@ func (b *Brain) Respond(ctx context.Context, obs protocol.Observation) (pons.Ass
 		}
 	}
 	return pons.AssistantResponse{Parts: parts, Actions: actions}, nil
+}
+
+// ReconcileAssistantResponse updates the provider transcript after Core's
+// hooks settle the response and pending tool calls. Opaque reasoning blocks
+// remain in their original positions relative to the visible blocks.
+func (b *Brain) ReconcileAssistantResponse(response pons.AssistantResponse) error {
+	if len(b.turns) == 0 || b.turns[len(b.turns)-1].Role != "assistant" {
+		return errors.New("llm: no assistant turn to reconcile")
+	}
+
+	partBlock := func(part pons.AssistantPart) (Block, error) {
+		switch part.Type {
+		case pons.AssistantPartText:
+			return Text{Value: part.Text}, nil
+		case pons.AssistantPartToolCall:
+			if _, err := protocol.ObjectArgs(part.Action.Args); err != nil {
+				return nil, fmt.Errorf("llm: invalid reconciled tool arguments: %w", err)
+			}
+			input := decodeToolInput(part.Action.Args)
+			if input == nil {
+				input = map[string]any{}
+			}
+			return ToolUse{ID: part.Action.ID, Name: string(part.Action.Kind), Input: input}, nil
+		default:
+			return nil, fmt.Errorf("llm: unsupported assistant part %q", part.Type)
+		}
+	}
+
+	original := b.turns[len(b.turns)-1]
+	updated := make([]Block, 0, len(original.Blocks)+len(response.Parts))
+	next := 0
+	for _, block := range original.Blocks {
+		if raw, ok := block.(Raw); ok {
+			updated = append(updated, raw)
+			continue
+		}
+		if next >= len(response.Parts) {
+			continue
+		}
+		converted, err := partBlock(response.Parts[next])
+		if err != nil {
+			return err
+		}
+		updated = append(updated, converted)
+		next++
+	}
+	for next < len(response.Parts) {
+		converted, err := partBlock(response.Parts[next])
+		if err != nil {
+			return err
+		}
+		updated = append(updated, converted)
+		next++
+	}
+	b.turns[len(b.turns)-1].Blocks = updated
+	return nil
 }
 
 func (b *Brain) Interpret(ctx context.Context, obs protocol.Observation, tr protocol.ToolResult) (protocol.Interpretation, error) {

@@ -1,9 +1,54 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestPolicyProvidersIgnoreProjectOverrides(t *testing.T) {
+	home, workspace := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(home, ".pons", "config.json"), `{
+		"providers":[{"id":"policy-codex","provider":"codex","base_url":"https://trusted.example"}],
+		"plugins":[{"id":"classifier/codex","version":"1.0.0","enabled":true,"config":{"provider_id":"policy-codex"}}]
+	}`)
+	write(t, filepath.Join(workspace, ".pons.json"), `{
+		"providers":[{"id":"policy-codex","provider":"codex","base_url":"https://project.example"}]
+	}`)
+	merged, err := loadSettings(home, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Providers[0].BaseURL != "https://project.example" {
+		t.Fatal("test did not establish a project override")
+	}
+	global, err := loadSettings(home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers, err := trustedPluginProviders(global, map[string]bool{}, "anthropic", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := providers["policy-codex"].BaseURL; got != "https://trusted.example" {
+		t.Fatalf("policy provider endpoint = %q", got)
+	}
+}
+
+func TestPluginProvidersResolveNamedAndEffectivePrimary(t *testing.T) {
+	cfg := settings{Providers: []providerSettings{
+		{ID: "codex-personal", Provider: "codex", Model: "configured-model"},
+		{ID: "codex-work", Provider: "codex", Model: "work-model"},
+	}}
+	primary := toFallback(cfg.Providers[0])
+	primary.Model = "flag-model"
+	providers := pluginProviders(cfg, primary)
+	if providers["primary"].Model != "flag-model" ||
+		providers["codex-personal"].Model != "flag-model" ||
+		providers["codex-work"].Model != "work-model" {
+		t.Fatalf("resolved plugin providers: %+v", providers)
+	}
+}
 
 func TestProviderSlotsFromConfigList(t *testing.T) {
 	cfg := settings{
@@ -102,6 +147,7 @@ func TestProviderSlotsValidation(t *testing.T) {
 	}{
 		{"duplicate id", settings{Providers: []providerSettings{{ID: "a", Provider: "openai"}, {ID: "a", Provider: "codex"}}}, "duplicate"},
 		{"missing id", settings{Providers: []providerSettings{{Provider: "openai"}}}, "id is required"},
+		{"reserved primary id", settings{Providers: []providerSettings{{ID: "primary", Provider: "codex"}}}, "reserved"},
 		{"missing provider type", settings{Providers: []providerSettings{{ID: "a"}}}, "provider is required"},
 		{"no default with several", settings{Providers: []providerSettings{{ID: "a", Provider: "openai"}, {ID: "b", Provider: "codex"}}}, "default_provider_id"},
 		{"unknown default", settings{DefaultProviderID: new("z"), Providers: []providerSettings{{ID: "a", Provider: "openai"}}}, "does not match"},

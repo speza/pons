@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -52,10 +53,11 @@ func (l Limits) withDefaults() Limits {
 // HostConfig controls the child process and its placement.  The default
 // placement is hands; there is no generic "run anywhere" mode for v1.
 type HostConfig struct {
-	Placement   Placement
-	HostName    string
-	HostVersion string
-	Workspace   string
+	Placement    Placement
+	HostName     string
+	HostVersion  string
+	Workspace    string
+	PluginConfig json.RawMessage
 	// WorkingDirectory overrides the manifest directory for the child. It is
 	// used by environment providers whose generated launcher has no manifest
 	// file but must start inside an explicitly selected workspace.
@@ -188,6 +190,8 @@ type Host struct {
 	closeErr        error
 
 	tools     map[string]ToolDescription
+	hooks     map[string]bool
+	hookTools map[string]bool // empty means every tool
 	plugin    PluginInfo
 	toolSem   chan struct{}
 	stderrMu  sync.Mutex
@@ -217,8 +221,11 @@ func newHost(manifest Manifest, cfg HostConfig, connector Connector) (*Host, err
 	if cfg.Placement == "" {
 		cfg.Placement = PlacementHands
 	}
-	if cfg.Placement != PlacementHands {
-		return nil, fmt.Errorf("external: tool providers must be launched in hands placement, got %q", cfg.Placement)
+	if cfg.Placement != PlacementHands && cfg.Placement != PlacementHost {
+		return nil, fmt.Errorf("external: unsupported placement %q", cfg.Placement)
+	}
+	if manifest.Placement != "" && manifest.Placement != cfg.Placement {
+		return nil, fmt.Errorf("external: manifest placement %q does not match host placement %q", manifest.Placement, cfg.Placement)
 	}
 	if cfg.Limits.MaxConcurrency < 0 {
 		return nil, errors.New("external: host MaxConcurrency must be non-negative")
@@ -237,6 +244,8 @@ func newHost(manifest Manifest, cfg HostConfig, connector Connector) (*Host, err
 		readerDone:  make(chan struct{}),
 		stderrDone:  make(chan struct{}),
 		tools:       make(map[string]ToolDescription),
+		hooks:       make(map[string]bool),
+		hookTools:   make(map[string]bool),
 	}, nil
 }
 
@@ -297,13 +306,18 @@ func (h *Host) Start(ctx context.Context) error {
 		initCtx, cancel = context.WithTimeout(ctx, h.cfg.StartupTimeout)
 	}
 	defer cancel()
+	capabilities := map[string][]int{CapabilityToolProvider: {ToolProviderVersion}}
+	if h.cfg.Placement == PlacementHost {
+		capabilities = map[string][]int{CapabilityHookProvider: {HookProviderVersion}}
+	}
 	params := InitializeParams{
 		RuntimeProtocol: RuntimeProtocol,
 		Host: HostInfo{
 			Name: h.cfg.HostName, Version: h.cfg.HostVersion,
 			Placement: h.cfg.Placement, Workspace: h.cfg.Workspace,
 		},
-		SupportedCapabilities: map[string][]int{CapabilityToolProvider: {ToolProviderVersion}},
+		SupportedCapabilities: capabilities,
+		Config:                h.cfg.PluginConfig,
 	}
 	raw, err := h.call(initCtx, MethodInitialize, params)
 	if err != nil {
@@ -429,6 +443,34 @@ func (h *Host) acceptCapabilities(capabilities []Capability) error {
 			return fmt.Errorf("duplicate capability %s", key)
 		}
 		seenCaps[key] = true
+		if h.cfg.Placement == PlacementHost {
+			if cap.Type != CapabilityHookProvider || cap.Version != HookProviderVersion {
+				return fmt.Errorf("unsupported host capability %q/v%d", cap.Type, cap.Version)
+			}
+			var config HookProviderConfiguration
+			if err := json.Unmarshal(cap.Configuration, &config); err != nil {
+				return fmt.Errorf("hook_provider configuration: %w", err)
+			}
+			if len(config.Hooks) == 0 {
+				return errors.New("hook_provider must advertise at least one hook")
+			}
+			for _, name := range config.Hooks {
+				if !validHookName(name) || h.hooks[name] {
+					return fmt.Errorf("invalid or duplicate hook %q", name)
+				}
+				h.hooks[name] = true
+			}
+			if config.Tools != nil && len(config.Tools) == 0 {
+				return errors.New("hook_provider tools must be omitted or nonempty")
+			}
+			for _, tool := range config.Tools {
+				if tool == "" {
+					return errors.New("hook_provider tools must not contain empty names")
+				}
+				h.hookTools[tool] = true
+			}
+			continue
+		}
 		cfg, err := validateCapability(cap, h.cfg.Placement, h.cfg.Limits.MaxTools)
 		if err != nil {
 			return err
@@ -437,6 +479,9 @@ func (h *Host) acceptCapabilities(capabilities []Capability) error {
 			return errors.New("multiple tool_provider capabilities are not supported on one connection")
 		}
 		toolCfg = &cfg
+	}
+	if h.cfg.Placement == PlacementHost {
+		return nil
 	}
 	if toolCfg == nil {
 		return errors.New("plugin did not advertise tool_provider/v1")
@@ -475,6 +520,60 @@ func sortTools(tools []ToolDescription) {
 			tools[j], tools[j-1] = tools[j-1], tools[j]
 		}
 	}
+}
+
+func (h *Host) HookNames() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	names := make([]string, 0, len(h.hooks))
+	for name := range h.hooks {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// HookWantsTool reports whether the plugin's tool hooks apply to kind.
+func (h *Host) HookWantsTool(kind string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.hookTools) == 0 || h.hookTools[kind]
+}
+
+// CallHook invokes one declared host hook with bounded input and output.
+func (h *Host) CallHook(ctx context.Context, name string, event any, result any) error {
+	h.mu.Lock()
+	known := h.hooks[name]
+	h.mu.Unlock()
+	if !known {
+		return fmt.Errorf("external: plugin %q does not provide hook %q", h.manifest.Name, name)
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("external: encode hook event: %w", err)
+	}
+	if len(encoded) > h.cfg.Limits.MaxFrameBytes/2 {
+		return errors.New("external: hook event exceeds frame limit")
+	}
+	callCtx, cancel := context.WithTimeout(ctx, h.cfg.CallTimeout)
+	defer cancel()
+	raw, err := h.call(callCtx, MethodHook, HookCallParams{Hook: name, Event: encoded})
+	if err != nil {
+		return err
+	}
+	if len(raw) > h.cfg.Limits.MaxResultBytes {
+		return errors.New("external: hook result exceeds limit")
+	}
+	var returned HookCallResult
+	if err := json.Unmarshal(raw, &returned); err != nil || len(returned.Patch) == 0 {
+		return errors.New("external: malformed hook result")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(returned.Patch))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(result); err != nil {
+		return fmt.Errorf("external: malformed hook patch: %w", err)
+	}
+	return nil
 }
 
 // Execute adapts one hands action to tools/execute. Plugin/process failures

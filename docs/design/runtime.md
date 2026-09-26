@@ -246,9 +246,10 @@ not part of durable conversation or event history.
 ### Tool results
 
 Each result has the matching tool-call ID, success/error observation, and
-structured result payload where available. Tools execute concurrently, but
-results are committed and presented to the provider in the original planned
-call order.
+structured result payload where available. Allowed tools execute concurrently;
+denied calls receive a failed result without execution and have status
+`denied`. Results are committed and presented to the provider in the original
+planned call order.
 
 The runtime never retries a tool action. A normal tool error is returned to
 the brain, which may decide to issue another action.
@@ -260,7 +261,7 @@ The durable ordering is:
 ```text
 1. persist the UserMessage;
 2. persist the complete AssistantMessage and all tool calls;
-3. execute tools;
+3. resolve denied calls and execute allowed tools;
 4. persist one ToolResult per call;
 5. continue the conversation.
 ```

@@ -1,21 +1,29 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
 	"reflect"
 	"testing"
 )
 
 func TestObservationExecutionContextRoundTrip(t *testing.T) {
-	wire, err := json.Marshal(Observation{Workspace: "/remote/repo", Platform: "linux/arm64"})
+	wire, err := json.Marshal(Observation{
+		Turn: 2, Workspace: "/remote/repo", Platform: "linux/arm64",
+		History: []TurnLog{{Turn: 1}},
+	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !bytes.Contains(wire, []byte(`"turn":2`)) || bytes.Contains(wire, []byte(`"step"`)) {
+		t.Fatalf("turn wire shape: %s", wire)
 	}
 	var got Observation
 	if err := json.Unmarshal(wire, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Workspace != "/remote/repo" || got.Platform != "linux/arm64" {
+	if got.Turn != 2 || len(got.History) != 1 || got.History[0].Turn != 1 ||
+		got.Workspace != "/remote/repo" || got.Platform != "linux/arm64" {
 		t.Fatalf("execution context = %+v", got)
 	}
 }

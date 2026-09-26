@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"unicode/utf8"
+
+	"github.com/samperrin/pons/plugins/hostconfig"
 )
 
 // fallbackSettings is one fallback provider slot in a config file.
@@ -70,6 +72,7 @@ type settings struct {
 	BashMaxLines         *int                 `json:"bash_max_lines,omitempty"`
 	BashMaxBytes         *int                 `json:"bash_max_bytes,omitempty"`
 	PluginMaxResultBytes *int                 `json:"plugin_max_result_bytes,omitempty"`
+	Plugins              hostconfig.Settings  `json:"plugins,omitempty"`
 	Fallbacks            []fallbackSettings   `json:"fallbacks,omitempty"`
 	DefaultProviderID    *string              `json:"default_provider_id,omitempty"`
 	Providers            []providerSettings   `json:"providers,omitempty"`
@@ -87,6 +90,9 @@ func (s settings) orderedProviders() ([]providerSettings, error) {
 	for i, p := range s.Providers {
 		if p.ID == "" {
 			return nil, fmt.Errorf("providers[%d]: id is required", i)
+		}
+		if p.ID == "primary" || p.ID == "flag" {
+			return nil, fmt.Errorf("provider id %q is reserved", p.ID)
 		}
 		if p.Provider == "" {
 			return nil, fmt.Errorf("provider %q: provider is required", p.ID)
@@ -126,6 +132,9 @@ func (s settings) validate() error {
 	if s.DefaultProviderID != nil && len(s.Providers) == 0 {
 		return fmt.Errorf("config sets default_provider_id but no providers")
 	}
+	if err := hostconfig.Decode(s.Plugins); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -153,6 +162,11 @@ func loadSettings(home, workspace string) (settings, error) {
 		m, err := decodeSettingsMap(data, path)
 		if err != nil {
 			return settings{}, err
+		}
+		if workspace != "" && path == filepath.Join(workspace, ".pons.json") {
+			if _, ok := m["plugins"]; ok {
+				return settings{}, fmt.Errorf("config %q: plugins is allowed only in ~/.pons/config.json", path)
+			}
 		}
 		if hasE2BAPIKey(m["environment"]) {
 			info, err := os.Stat(path)

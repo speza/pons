@@ -39,6 +39,7 @@ environments are explicit plugins or injected infrastructure.
 | `core.go` | Turn loop, ports, and plugin registry |
 | `plugins/brain` | LLM and deterministic scripted brains |
 | `plugins/fs`, `edit`, `bash`, `shell` | Built-in hands-side tools |
+| `plugins/actionpolicy` | Host-side policy rules and classifier composition |
 | `plugins/external` | Persistent external tool providers and Go/TypeScript SDKs |
 | `runtime/` | Durable SQLite runtime and HTTP/SSE transport |
 | `environment/` | Provider/session contracts and durable environment state |
@@ -58,6 +59,131 @@ Tool calls within a turn run concurrently, but results are recorded in the
 planned order. A text response, `finish` action, or `MaxTurns` ends a run;
 `OnEvent` can stream lifecycle events to a UI or audit consumer. The LLM brain
 can compact old context without changing the canonical runtime history.
+
+Trusted plugins register lifecycle hooks through `Core.AddHooks(pons.Hooks{...})`:
+`OnAgentStart`, `OnAgentTurnStart`, `OnAssistantResponse`, `OnToolCallStart`,
+`OnPermissionRequest`, `OnToolCallEnd`, `OnAgentTurnEnd`, and `OnAgentEnd`. A
+turn is one brain response and its planned tool calls; a run can contain
+several turns. Every hook takes an `Input` and returns an `Output` embedding
+`HookOutput`, so any hook can stop the run (`Stop`), show the user a
+`SystemMessage`, or give the brain `AdditionalContext` on its next turn:
+
+```go
+core.AddHooks(pons.Hooks{
+	OnToolCallStart: func(ctx context.Context, in pons.ToolCallStartInput) (pons.ToolCallStartOutput, error) {
+		if in.Action.Kind != "bash" {
+			return pons.ToolCallStartOutput{}, nil // no objection
+		}
+		return pons.ToolCallStartOutput{Permission: pons.PermissionAsk, Reason: "shell_review"}, nil
+	},
+})
+```
+
+Some outputs add one decision: `OnToolCallStart` returns allow, ask, or deny
+and may replace the call's arguments with `UpdatedInput` (every start hook
+then rechecks the new call); `OnPermissionRequest` resolves an ask;
+`OnToolCallEnd` may replace the result the brain sees and also reports denied
+calls; `OnAgentEnd` may `Continue` a finished run. Hooks run in registration
+order. A hook error is reported as a `hook_error` event and never stops the
+run by itself; deciding hooks fail closed (a start hook error asks, a
+permission hook error denies, a tool-end hook error withholds the result).
+`OnAgentTurnEnd` and `OnAgentEnd` still run when the run fails or is stopped.
+
+### Action policy
+
+An application can install the built-in policy plugin with
+`core.Use(actionpolicy.Policy{...})`, register other trusted checks with
+`core.AddHooks(pons.Hooks{OnToolCallStart: check})`, and supply an exact-action approval callback
+with `core.SetApprovalHandler(...)`. The core decides every tool call in a turn
+before starting any handler: start hooks for different calls run concurrently,
+then asks are resolved one at a time in call order, first by
+`OnPermissionRequest` hooks and then by the approval handler. Deny outranks
+ask, which outranks allow, whatever order the hooks run in.
+A hard deny never reaches approval. An ask without an approval handler is
+denied. Denials appear as unsuccessful
+tool results, so the brain can try a different action. Repeated identical
+denials stop prompting after three attempts in a run. In the runtime, a denied
+call has status `denied` and a persisted failed result; it has no execution
+start/end event.
+
+For named plugin composition, register
+`actionpolicy.ClassifierPlugin{ID: "classifier/typesafe-jev", Classifier: classifier}` before
+`actionpolicy.Policy{ClassifierID: "classifier/typesafe-jev"}` in `Core.Use`. Both implement the
+same `pons.Plugin` interface; a plugin's `Setup` method declares its actual
+capabilities rather than a type field in its config.
+
+The policy plugin applies matching deny, ask, then allow rules. Unmatched
+actions can be assessed by one or more `actionpolicy.Classifier` instances;
+only a `safe` assessment with sufficient confidence is allowed automatically.
+`actionpolicy.NewTypeSafeClassifier` and `actionpolicy.NewOpenAIClassifier` are
+optional hosted adapters. The OpenAI adapter uses the same official Go SDK as
+the agent's OpenAI provider. For example, a host can install
+`actionpolicy.Policy{Classifiers: []actionpolicy.Classifier{typesafe, openai}}`:
+the first valid assessment wins, and the next classifier runs only if the
+previous one fails or returns an invalid assessment. The TypeSafe adapter
+defaults to the `jev-latest` model alias; `RemoteConfig.Model` selects another
+model available to the TypeSafe account. Jev returns a choice
+probability; the OpenAI adapter generates a confidence estimate. The OpenAI
+adapter defaults to `gpt-6-luna`; set `RemoteConfig.Model` to use another
+Responses API model that supports JSON Schema structured outputs. A valid
+`safe` assessment at or above the confidence threshold is allowed when its
+confidence is a returned probability. A model-generated estimate (OpenAI or
+Codex) still asks unless the policy sets `AllowGeneratedConfidence`
+(`allow_generated_confidence` in config).
+Classifier failures and uncertain assessments require approval. Built-in tools
+project paths or commands for policy matching; generic tools still expose
+their typed action arguments. Requests also carry the current instruction,
+workspace, platform, bounded recent messages and actions with source labels,
+and host-supplied sandbox and network context. Rules and classifiers are
+installed by trusted host code or the global CLI configuration. The hosted
+adapters require API keys and send the projected request and recent context to
+their provider. The CLI has no interactive approval handler yet: an `ask`
+decision is denied, and the agent can retry after a new user message.
+With `--debug`, the server logs each tool preflight and its decision. A valid
+classifier assessment includes its model, risk, confidence, and reason code;
+action arguments, conversation text, and credentials are omitted.
+
+Action policy is a host-side control-plane check. Shell safety still depends
+on the execution environment's isolation policy.
+
+### Plugin evals
+
+`pons eval <plugin-id>` scores a configured plugin's hooks against labeled
+cases, building the plugin from the global config exactly as a run would
+(including provider slots and the Pons login) and never executing a tool. A
+disabled entry can be evaluated before you enable it. Cases are data in the
+[plugin eval format](docs/reference/plugin-evals.md): a hook `input` and the
+`expect`ed fields of its output. An installed plugin's cases are read from
+`~/.pons/plugins/<id>/evals/` by default; built-in plugins take `-cases`.
+
+The [classifier cases](plugins/actionpolicy/evals/classifier_cases.json) cover
+routine reads and edits, multi-step work, ambiguous destinations, an exact
+approval follow-up, changed or revoked approval, secret access, destructive
+commands, and instructions planted in tool results. Run them against your
+configured policy, or against one classifier:
+
+```sh
+pons eval -cases plugins/actionpolicy/evals action_policy
+pons eval -cases plugins/actionpolicy/evals classifier/codex
+make eval-classifier EVAL_ARGS='classifier/typesafe-jev'
+```
+
+A classifier plugin is evaluated through a bare policy that accepts its
+confidence, so the run measures the classifier's own allow boundary;
+`-threshold` sets that boundary. Each case also carries a reference risk
+(`safe` or `review`): a low-confidence `safe` can pass by asking for approval
+while still counting as a raw risk mismatch. Use `-case <id>` for one case or
+`-json` for a report that can be saved and compared. The command exits nonzero
+when any case fails, including when a hook errors, and reports false allows
+separately; inspect those first. Text output prints each case and its latency
+as it completes, then wall, mean, p50, p95, minimum, and maximum decision
+latency. Live classifier calls send synthetic case data to the provider and
+are never part of `make check`.
+
+These hand-written cases are smoke tests, not an independent measure of live
+agent reliability; several were refined after inspecting Jev results. Evaluate
+held-out conversation traces and repeated runs before choosing a production
+confidence threshold.
 
 ## Quick start
 
@@ -253,8 +379,103 @@ Put stable server settings in `~/.pons/config.json`; use flags for a particular
 conversation or temporary override. Bundled mode also reads `.pons.json` in
 its current directory. A standalone server only reads the global file.
 Configuration supports provider/model settings, runtime limits, tool output
-limits, named provider slots, and failover. Use repeatable
+limits, named provider slots, failover, external hands plugins, and action
+policy classifiers. Use repeatable
 `-fallback provider[:model]` flags for a temporary failover chain.
+
+Configure registered plugins in the global file only:
+
+```json
+{
+  "plugins": [
+    {
+      "id": "classifier/typesafe-jev",
+      "version": "1.0.0",
+      "enabled": true,
+      "config": {
+        "model": "jev-latest",
+        "api_key_env": "TYPESAFE_API_KEY",
+        "timeout": "10s"
+      }
+    },
+    {
+      "id": "action_policy",
+      "version": "1.0.0",
+      "enabled": true,
+      "config": {
+        "classifier": "classifier/typesafe-jev",
+        "min_safe_confidence": 0.9,
+        "rules": [
+          {"action": "deny", "tools": ["github_delete_repo"]},
+          {"action": "ask", "tools": ["bash"], "reason_code": "shell_review"}
+        ]
+      }
+    },
+    {
+      "id": "external",
+      "version": "1.0.0",
+      "enabled": true,
+      "config": {
+        "manifests": ["/absolute/path/to/plugin-manifest.json"]
+      }
+    }
+  ]
+}
+```
+
+Each entry uses a built-in ID (`classifier/typesafe-jev`, `classifier/openai`,
+`classifier/codex`, `action_policy`, or `external`) or an installed external
+plugin ID. Install an external manifest at
+`~/.pons/plugins/<id>/plugin.json`, then add an enabled entry with that ID,
+the manifest's `config_version` (default `1.0.0`), and a `config` object. The
+manifest name must equal the entry ID. The `config` object is sent during
+initialization. Host-side manifests use `"placement": "host"` and can provide
+`hook_provider/v1`; hands manifests provide tools. `version` is the plugin's
+config/API contract version, not an independently installed binary version.
+Unsupported versions and duplicate IDs fail startup. Each plugin validates
+its own `config` and declares the capabilities it provides or
+needs. The loader preserves list order except where dependencies require a
+provider to come first, then calls `Core.Use`. A plugin's `Setup` method
+registers its tools, hooks, or named capabilities.
+`action_policy`'s `config.classifier` names one enabled classifier; unknown
+or disabled references fail startup. `config.rules` matches tool kinds
+(`"*"` matches all) with `deny`, `ask`, or `allow`, applied in that order
+before any classifier. A rules-only policy is allowed; calls no rule settles
+then ask. `allow_generated_confidence: true` lets a `safe` OpenAI or Codex
+assessment allow a call without approval. Set `enabled: false` to retain a
+plugin's settings without activating it. The `external` plugin accepts absolute
+manifest paths. An explicit `-plugin` flag replaces configured hands plugins;
+installed host hook plugins stay enabled. Only host hook plugins accept a
+`config` object; a non-empty config on a hands plugin fails startup. External
+host hooks implement the same hooks over JSON with the same effects, and may
+declare `tools` to receive only those tool kinds. Like Claude Code's hooks they
+are trusted code you install, but they still receive no Core handle or
+inherited credentials, and their inputs omit run history and cap tool output.
+See [the external policy example](examples/external-policy/README.md) for an
+installable hook provider.
+
+API-backed classifier keys come from the named environment variables, never
+from this section of the file; the default names are `TYPESAFE_API_KEY` and
+`OPENAI_API_KEY`. The subscription-backed `classifier/codex` instead uses an
+existing Codex provider slot and its Pons login. For a top-level
+`"provider": "codex"`, use `"provider_id": "primary"`; with named providers,
+use the matching `providers[].id`. Its `model` and `timeout` can be set
+independently of the brain. Classifier provider settings come from the global
+config and explicit CLI flags; project `.pons.json` cannot change its endpoint
+or credentials:
+
+```json
+{"id":"classifier/codex","version":"1.0.0","enabled":true,
+ "config":{"provider_id":"primary","model":"gpt-6-luna","timeout":"10s"}}
+```
+
+The default confidence threshold is 0.9. A `safe` assessment at or above it
+allows the call. OpenAI and Codex confidence is model-generated rather than a
+calibrated probability; `review`, low-confidence, and unavailable assessments
+still ask for approval. With no CLI approval handler, those asks are denied. A
+later user message is included in a fresh assessment when the agent retries
+the action. Changes take effect when the server restarts. Project `.pons.json`
+cannot set `plugins`.
 
 The [Git workspace guide](docs/design/git-workspaces.md) has the complete E2B and
 GitHub App config example. Keep credentials in the global file, not in a

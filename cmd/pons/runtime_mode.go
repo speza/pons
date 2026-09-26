@@ -23,6 +23,7 @@ import (
 	"github.com/samperrin/pons/environment/e2b"
 	"github.com/samperrin/pons/environment/gitworkspace"
 	"github.com/samperrin/pons/plugins/brain/llm"
+	"github.com/samperrin/pons/plugins/external"
 	"github.com/samperrin/pons/protocol"
 	ponsruntime "github.com/samperrin/pons/runtime"
 	"github.com/samperrin/pons/runtime/agentdir"
@@ -45,6 +46,7 @@ type serverOptions struct {
 	BashMaxLines            int
 	BashMaxBytes            int
 	PluginPaths             []string
+	HostSources             []hostPluginSource
 	PluginPath              string
 	PluginMaxResultBytes    int
 	Debug                   bool
@@ -646,6 +648,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 
 	core := pons.New()
 	core.Workspace, core.MaxTurns = request.Workspace, agent.MaxTurns
+	core.RecentActionContext = runtimeActionContext(request.Context, request.Text)
 	runLog := r.logger.With("conversation_id", request.ConversationID, "run_id", request.RunID,
 		"workspace_id", request.ConversationID, "agent_id", agent.ID, "agent_revision", agent.Revision())
 	runLog.Info("run started")
@@ -693,7 +696,12 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 			runLog.Debug("environment closed")
 		}
 	}()
-
+	externalHooks := make([]*external.HookPlugin, 0, len(r.opts.HostSources))
+	defer func() {
+		for _, plugin := range slices.Backward(externalHooks) {
+			err = errors.Join(err, plugin.Close())
+		}
+	}()
 	metadata := session.Metadata()
 	if len(metadata.ReadWrite) != len(spec.ReadWrite) {
 		return result, fmt.Errorf("execution environment %q did not grant the agent's memory", r.opts.Sandbox)
@@ -707,6 +715,10 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 
 	if err := brain.Seed(turns, request.Text, hands); err != nil {
 		return result, err
+	}
+	core.ActionEnvironment = pons.ActionEnvironment{
+		Provider: metadata.Provider,
+		Network:  string(metadata.Network),
 	}
 	prepared := brain.PreparedInput()
 	preparedContent, err := runtimeAgentContent(prepared.Blocks)
@@ -722,7 +734,23 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}); err != nil {
 		return result, err
 	}
-	if err := core.Use(environment.Proxy(session), brain); err != nil {
+	plugins := make([]pons.Plugin, 0, 2+len(r.opts.HostSources))
+	plugins = append(plugins, environment.Proxy(session))
+	for _, source := range r.opts.HostSources {
+		if source.Plugin != nil {
+			plugins = append(plugins, source.Plugin)
+			continue
+		}
+		launch := hookLaunch{Path: r.opts.PluginPath, MaxResultBytes: r.opts.PluginMaxResultBytes}
+		plugin, pluginErr := launch.start(source.Manifest, source.Config, request.Workspace)
+		if pluginErr != nil {
+			return result, pluginErr
+		}
+		externalHooks = append(externalHooks, plugin)
+		plugins = append(plugins, plugin)
+	}
+	plugins = append(plugins, brain)
+	if err := core.Use(plugins...); err != nil {
 		return result, err
 	}
 
@@ -730,6 +758,27 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		"network", metadata.Network, "workspace", request.Workspace, "tools", len(core.ToolSpecs()))
 	core.OnEventError(func(event pons.Event) error {
 		switch event.Type {
+		case pons.EventActionDecision:
+			decision := event.Decision
+			fields := []any{
+				"turn", event.Turn, "action_id", event.Action.ID, "tool", event.Action.Kind,
+				"permission", decision.Permission, "reason_code", decision.Reason,
+			}
+			if assessment := decision.Assessment; assessment != nil {
+				fields = append(fields,
+					"classifier", assessment.Classifier, "risk", assessment.Risk,
+					"confidence", assessment.Confidence,
+					"probability_confidence", assessment.ProbabilityConfidence,
+					"assessment_reason_code", assessment.ReasonCode,
+				)
+				runLog.Debug("classifier assessed tool call", fields...)
+			} else {
+				runLog.Debug("tool preflight decided", fields...)
+			}
+		case pons.EventHookError:
+			runLog.Warn("hook failed", "turn", event.Turn, "error", event.Text)
+		case pons.EventSystemMessage:
+			runLog.Info("hook message", "turn", event.Turn, "message", event.Text)
 		case pons.EventAssistantResponse:
 			runLog.Debug("assistant turn", "turn", event.Turn, "tool_calls", len(event.Actions))
 			parts := make([]ponsruntime.MessagePart, 0, len(event.Parts))
@@ -750,12 +799,14 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		case pons.EventActionEnd:
 			runLog.Debug("tool completed", "turn", event.Turn, "tool", event.Action.Kind,
 				"ok", event.Result.OK)
-			if err := request.Emit(ponsruntime.RunEvent{
+			return request.Emit(ponsruntime.RunEvent{
 				Type: ponsruntime.RunEventToolCompleted, ToolCallID: event.Action.ID, Result: event.Result,
-			}); err != nil {
-				return err
-			}
-			return nil
+			})
+		case pons.EventActionDenied:
+			runLog.Debug("tool denied", "turn", event.Turn, "tool", event.Action.Kind)
+			return request.Emit(ponsruntime.RunEvent{
+				Type: ponsruntime.RunEventToolDenied, ToolCallID: event.Action.ID, Result: event.Result,
+			})
 		}
 		entry := ponsruntime.Event{}
 		switch event.Type {
@@ -889,6 +940,45 @@ func runtimeAgentContent(blocks []llm.Block) ([]ponsruntime.AgentContent, error)
 		}
 	}
 	return content, nil
+}
+
+// runtimeActionContext keeps the most recent conversation evidence
+// with its original source. Tool results never become user instructions.
+func runtimeActionContext(turns []ponsruntime.ContextTurn, currentUserText string) []pons.ActionContextItem {
+	const maxTurns = 16
+	if len(turns) > maxTurns {
+		turns = turns[len(turns)-maxTurns:]
+	}
+	var context []pons.ActionContextItem
+	for _, turn := range turns {
+		for _, part := range turn.Content {
+			switch part.Type {
+			case "text":
+				var source pons.ActionContextSource
+				switch turn.Role {
+				case "user":
+					source = pons.ContextUser
+				case "assistant":
+					source = pons.ContextAssistant
+				default:
+					continue
+				}
+				context = append(context, pons.ActionContextItem{Source: source, Text: part.Text})
+			case "tool_call":
+				context = append(context, pons.ActionContextItem{
+					Source: pons.ContextAction, ActionID: part.ToolCallID,
+					Kind: protocol.ActionKind(part.ToolKind), Text: string(part.Arguments),
+				})
+			case "tool_result":
+				context = append(context, pons.ActionContextItem{
+					Source: pons.ContextToolResult, ActionID: part.ToolCallID,
+					Kind: protocol.ActionKind(part.ToolKind), Text: part.Text,
+				})
+			}
+		}
+	}
+	context = append(context, pons.ActionContextItem{Source: pons.ContextUser, Text: currentUserText})
+	return context
 }
 
 func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, message string, interactive, debug bool, options ponsruntime.ConversationOptions) error {

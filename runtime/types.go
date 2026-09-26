@@ -33,6 +33,7 @@ const (
 	RunEventAssistantTurn = "runner.assistant.turn"
 	RunEventToolCompleted = "runner.tool.completed"
 	RunEventAgentEvent    = "runner.agent.event"
+	RunEventToolDenied    = "runner.tool.denied"
 
 	EventAgentStarted         = "agent.started"
 	EventAgentFinished        = "agent.finished"
@@ -54,6 +55,7 @@ const (
 	ToolRequested   = "requested"
 	ToolCompleted   = "completed"
 	ToolFailed      = "failed"
+	ToolDenied      = "denied"
 	ToolInterrupted = "interrupted"
 )
 

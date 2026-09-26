@@ -169,7 +169,7 @@ type Interpretation struct {
 	StopReason string `json:"stop_reason,omitempty"`
 }
 
-// Observation is an immutable snapshot handed to the brain each turn.
+// Observation is an immutable snapshot handed to the brain each agent turn.
 // Message is the user's current instruction — plain text, no framing label;
 // the environment travels separately in the brain's rendering of it.
 type Observation struct {
@@ -178,7 +178,10 @@ type Observation struct {
 	Workspace string    `json:"workspace"`
 	Platform  string    `json:"platform,omitempty"` // execution GOOS/GOARCH; empty means host-local
 	History   []TurnLog `json:"history,omitempty"`
-	Now       time.Time `json:"now"`
+	// Context is host-supplied guidance for this turn only, such as a hook's
+	// additional context. Brains present it to the model as untrusted notes.
+	Context []string  `json:"context,omitempty"`
+	Now     time.Time `json:"now"`
 }
 
 // TurnLog is one completed round-trip (response + results). Actions contains the

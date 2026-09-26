@@ -68,6 +68,7 @@ func (p *Bash) Setup(c *pons.Core) error {
 			{Name: "command", Type: "string", Description: "The shell command to execute", Required: true},
 			{Name: "timeout", Type: "integer", Description: "Timeout in seconds (optional; no default timeout)"},
 		},
+		Resources: pons.StringArgResource("command", "command"),
 	})
 }
 

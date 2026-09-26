@@ -206,6 +206,15 @@ func (c *liveConversation) emitRunEvent(run Run, source RunEvent) error {
 			c.broadcastLocked(events...)
 		}
 		return err
+	case RunEventToolDenied:
+		if source.Result == nil {
+			return errors.New("runtime: tool denial is missing its result")
+		}
+		events, err := c.manager.store.ToolDenied(context.Background(), run, *source.Result)
+		if err == nil {
+			c.broadcastLocked(events...)
+		}
+		return err
 	default:
 		return fmt.Errorf("runtime: unsupported runner event %q", source.Type)
 	}

@@ -50,14 +50,18 @@ The plugin interface is:
 type Plugin interface { Setup(*Core) error }
 ```
 
-`Setup` registers tools, a brain, middleware, or lifecycle hooks. Registration
+`Setup` registers tools, a brain, middleware, lifecycle hooks, or named
+capabilities for other trusted plugins. Registration
 is additive and conflicts fail during composition:
 
 - `AddTool` rejects an empty, reserved, duplicate, or nil-handler action.
 - `SetBrain` rejects a nil or second brain.
 - `WrapTool` composes execution middleware explicitly.
-- `OnTurn` and `OnTurnError` attach observational and checked persistence
-  hooks.
+- `RegisterCapability` rejects empty names, nil values, and duplicate names;
+  `Capability` lets another trusted plugin resolve a registered value.
+- `AddHooks` composes typed agent, turn, and tool callbacks through one plugin
+  registration value. `OnToolCallStart` is the sole pre-execution decision
+  point; `OnAgentTurnEnd` replaces separate turn observers.
 
 The composing application chooses the plugin set and order. The core does not
 import or discover plugins.
@@ -95,10 +99,15 @@ contract is defined by ADR-0003.
   error.
 
 `OnEvent` exposes the loop stages (`agent_start`, `turn_start`, action start
-and end, turn end, finish, stopped, and exhausted). Ordinary turn observers
-cannot fail a run; checked persistence uses `OnTurnError`. Tool calls within a
-turn execute concurrently and are recorded in call order, as specified by
-ADR-0006.
+and end, turn end, finish, stopped, and exhausted); a checked event sink can
+fail the run before the next side effect. Tool calls within a turn execute
+concurrently and are recorded in call order, as specified by ADR-0006.
+
+Typed plugin hooks cover agent, agent-turn, permission, and tool-call phases.
+Every hook takes an Input and returns an Output with a shared envelope (stop,
+system message, additional context) plus at most one decision, as specified
+by ADR-0014. When `OnToolCallStart` updates a call's arguments, a stateful
+brain is reconciled so its transcript matches what ran.
 
 The shipped LLM brain makes one provider call per turn, discovers the schemas
 registered in `Core`, converts tool calls to `Action` values, and treats a

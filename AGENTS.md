@@ -50,7 +50,9 @@ to the default suite.
   relevant ADRs whenever a contract changes.
 - New capabilities belong in plugins and must be registered through `Core`;
   do not put tool-specific execution or policy in the brain/core loop.
-- External plugins are an untrusted hands boundary: preserve explicit loading,
+- External hands plugins are an untrusted boundary. External host hook
+  plugins are trusted code the operator installs, like Claude Code hooks, but
+  still run as separate processes. For both, preserve explicit loading,
   resource limits, cancellation, and credential isolation.
 
 ## Repository layout

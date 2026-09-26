@@ -23,6 +23,7 @@ import (
 
 	"github.com/samperrin/pons/environment/gitworkspace"
 	"github.com/samperrin/pons/plugins/brain/llm"
+	"github.com/samperrin/pons/plugins/hostconfig"
 	"github.com/samperrin/pons/protocol"
 	ponsruntime "github.com/samperrin/pons/runtime"
 )
@@ -39,6 +40,18 @@ func main() {
 	// children are shut down by their defers); a second signal kills.
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if mode == "bundled" && len(os.Args) > 1 && os.Args[1] == "eval" {
+		home, _ := os.UserHomeDir()
+		if err := runEval(rootCtx, os.Args[2:], os.Stdout, os.Stderr, home, hostconfig.NewRegistry()); err != nil {
+			if !errors.Is(err, flag.ErrHelp) {
+				logger.Printf("eval: %v", err)
+			}
+			stop()
+			os.Exit(1)
+		}
+		return
+	}
 
 	provider := flag.String("provider", "anthropic", "LLM provider: anthropic | openai | codex | openai-responses")
 	model := flag.String("model", "", "model id (default: provider default)")
@@ -144,10 +157,22 @@ func main() {
 		logger.Printf("%v", err)
 		os.Exit(1)
 	}
+	// Host policy plugins use only global settings and explicit CLI flags.
+	// A project .pons.json may configure the brain but cannot redirect a
+	// subscription-backed classifier or its credentials.
+	globalCfg := cfg
+	if settingsWorkspace != "" {
+		globalCfg, err = loadSettings(home, "")
+		if err != nil {
+			logger.Printf("%v", err)
+			os.Exit(1)
+		}
+	}
 
 	e2bAPIKey := ""
 	setFlags := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+	flagProvider, flagModel, flagBaseURL := *provider, *model, *baseURL
 	applyString := func(name string, dst *string, v *string) {
 		if !setFlags[name] && v != nil {
 			*dst = *v
@@ -234,6 +259,21 @@ func main() {
 		CompactChars: *compactChars,
 		Fallbacks:    fallbacks,
 	}
+	trustedProviders, err := trustedPluginProviders(globalCfg, setFlags, flagProvider, flagModel, flagBaseURL, fallbackFlags)
+	if err != nil {
+		logger.Printf("plugin providers: %v", err)
+		os.Exit(1)
+	}
+	configuredPlugins, err := hostconfig.Build(globalCfg.Plugins, os.Getenv, trustedProviders)
+	if err != nil {
+		logger.Printf("%v", err)
+		os.Exit(1)
+	}
+	handsPluginPaths, hostSources, err := resolvePluginPlan(configuredPlugins, pluginPaths, setFlags["plugin"])
+	if err != nil {
+		logger.Printf("plugin: %v", err)
+		os.Exit(1)
+	}
 
 	if mode == "serve" && (*message != "" || *interactive) {
 		logger.Printf("serve: --message and -i are client options")
@@ -274,7 +314,8 @@ func main() {
 		Address: *runtimeAddress, StateDir: statePath, WorkspaceRoot: root, ClientWorkspace: conversationOptions.Workspace,
 		MaxConcurrent: *runtimeConcurrency, MaxTurns: *maxTurns, Brain: brainConfig, ProviderSlot: primary.ID,
 		FSReadBytes: *fsReadBytes, BashTimeout: *bashTimeout, BashMaxLines: *bashMaxLines, BashMaxBytes: *bashMaxBytes,
-		PluginPaths: pluginPaths, PluginPath: *pluginPath, PluginMaxResultBytes: *pluginMaxResultBytes, Debug: *debug,
+		PluginPaths: handsPluginPaths, HostSources: hostSources,
+		PluginPath: *pluginPath, PluginMaxResultBytes: *pluginMaxResultBytes, Debug: *debug,
 		Sandbox: *sandbox, E2BTemplate: *e2bTemplate, E2BHandsPath: *e2bHandsPath,
 		GitRepository: *gitRepository, GitRevision: selectedGitRevision,
 		GitAllRepositories: *gitAllRepositories,

@@ -816,10 +816,13 @@ function MessagePartView({
     const call = toolCallsByKey.get(key);
     const result = call?.result ?? toolResultsByKey.get(key);
     const progress = toolProgress[key];
-    const status = result ? (result.ok ? "completed" : "failed") : call?.status ?? "requested";
+    // A recorded terminal status (such as denied) outranks one inferred from the result.
+    const recorded = call?.status && call.status !== "requested" ? call.status : null;
+    const status = recorded ?? (result ? (result.ok ? "completed" : "failed") : call?.status ?? "requested");
     const pending = status === "requested";
+    const failed = status === "failed" || status === "interrupted" || status === "denied";
     return (
-      <details className={`tool-card ${status === "failed" || status === "interrupted" ? "is-error" : ""} ${status === "completed" ? "is-ok" : ""}`}>
+      <details className={`tool-card ${failed ? "is-error" : ""} ${status === "completed" ? "is-ok" : ""}`}>
         <summary>
           <span className="tool-kind">{part.tool_kind || "tool"}</span>
           <span className="tool-status">

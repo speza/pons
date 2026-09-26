@@ -26,6 +26,7 @@ Start with the [project README](../README.md), then use this index.
 ## Reference
 
 - [External plugin protocol](reference/external-plugin-protocol.md)
+- [Plugin evals](reference/plugin-evals.md)
 
 ## Proposals
 

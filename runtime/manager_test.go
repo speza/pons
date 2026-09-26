@@ -817,6 +817,49 @@ func TestToolLifecycleUsesEntityUpserts(t *testing.T) {
 	}
 }
 
+func TestDeniedToolPersistsDistinctStatusAndResult(t *testing.T) {
+	m := testManager(t, RunnerFunc(func(_ context.Context, request RunRequest) (RunResult, error) {
+		action := protocol.Action{ID: "call-1", Kind: "fake", Args: protocol.MustArgsJSON(map[string]string{"value": "blocked"})}
+		if err := request.Emit(RunEvent{Type: RunEventAssistantTurn, Parts: []ponsruntime.MessagePart{{
+			Type: "tool_call", ToolCallID: action.ID, ToolKind: string(action.Kind), Arguments: action.Args,
+		}}}); err != nil {
+			return RunResult{}, err
+		}
+		result := protocol.ToolResult{ActionID: action.ID, Kind: "fake", OK: false, Error: "action denied"}
+		if err := request.Emit(RunEvent{Type: ponsruntime.RunEventToolDenied, Result: &result}); err != nil {
+			return RunResult{}, err
+		}
+		return RunResult{Answer: "done"}, nil
+	}))
+	conversation, err := m.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Submit(context.Background(), conversation.ID, "deny", []TextPart{{Type: "text", Text: "go"}}); err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForEvent(t, m, conversation.ID, EventRunCompleted, 1)
+	view, err := m.View(context.Background(), conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.ToolCalls) != 1 || view.ToolCalls[0].Status != ponsruntime.ToolDenied ||
+		view.ToolCalls[0].Result == nil || view.ToolCalls[0].Result.Error != "action denied" {
+		t.Fatalf("denied tool call: %+v", view.ToolCalls)
+	}
+	var resultFound bool
+	for _, message := range view.Messages {
+		for _, part := range message.Parts {
+			if part.Type == "tool_result" && part.Result != nil && part.Result.Error == "action denied" {
+				resultFound = true
+			}
+		}
+	}
+	if !resultFound {
+		t.Fatalf("denied tool result missing from history: %+v", view.Messages)
+	}
+}
+
 func TestFailedRunIsDurableAndNotRetried(t *testing.T) {
 	var executions atomic.Int32
 	m := testManager(t, RunnerFunc(func(_ context.Context, request RunRequest) (RunResult, error) {

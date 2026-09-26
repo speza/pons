@@ -9,11 +9,14 @@ import (
 const (
 	CapabilityToolProvider = "tool_provider"
 	ToolProviderVersion    = 1
+	CapabilityHookProvider = "hook_provider"
+	HookProviderVersion    = 1
 
 	MethodInitialize = "plugin/initialize"
 	MethodHealth     = "plugin/health"
 	MethodShutdown   = "plugin/shutdown"
 	MethodExecute    = "tools/execute"
+	MethodHook       = "hooks/call"
 	MethodCancel     = "$/cancelRequest"
 )
 
@@ -55,6 +58,7 @@ type InitializeParams struct {
 	RuntimeProtocol       int              `json:"runtime_protocol"`
 	Host                  HostInfo         `json:"host"`
 	SupportedCapabilities map[string][]int `json:"supported_capabilities"`
+	Config                json.RawMessage  `json:"config,omitempty"`
 }
 
 type HostInfo struct {
@@ -96,6 +100,24 @@ type ToolDescription struct {
 
 type ExecuteParams struct {
 	Action protocol.Action `json:"action"`
+}
+
+// HookProviderConfiguration names the hook callbacks implemented by a host
+// plugin. Each call receives one hook input and returns that hook's output.
+type HookProviderConfiguration struct {
+	Hooks []string `json:"hooks"`
+	// Tools limits on_tool_call_start, on_permission_request, and
+	// on_tool_call_end to these tool kinds; omitted means every tool.
+	Tools []string `json:"tools,omitempty"`
+}
+
+type HookCallParams struct {
+	Hook  string          `json:"hook"`
+	Event json.RawMessage `json:"event"`
+}
+
+type HookCallResult struct {
+	Patch json.RawMessage `json:"patch"`
 }
 
 type HealthResult struct {
