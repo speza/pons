@@ -128,7 +128,7 @@ func (p *Bash) run(ctx context.Context, a protocol.Action) (protocol.ToolResult,
 	err = cmd.Run()
 	stopCommand(cmd)
 
-	text, extras := formatOutput(out.String(), p.maxLines(), p.maxBytes(), out.droppedLines, out.droppedBytes)
+	text, extras := out.format(p.maxLines(), p.maxBytes())
 	res := protocol.ToolResult{ActionID: a.ID, OK: true, Kind: string(KindBash), Output: text, ExitCode: 0}
 	if extras != nil {
 		res.Payload, _ = json.Marshal(extras)
@@ -197,7 +197,9 @@ func AsExecResult(tr protocol.ToolResult) (ExecExtras, bool) {
 	return r, true
 }
 
-func formatOutput(s string, maxLines, maxBytes, droppedLines int, droppedBytes int64) (string, *ExecExtras) {
+func (o *outputTail) format(maxLines, maxBytes int) (string, *ExecExtras) {
+	s := o.String()
+	droppedLines, droppedBytes := o.droppedLines, o.droppedBytes
 	if droppedBytes > 0 {
 		aligned := alignTail(s)
 		droppedLines += strings.Count(s[:len(s)-len(aligned)], "\n")
@@ -225,19 +227,10 @@ func formatOutput(s string, maxLines, maxBytes, droppedLines int, droppedBytes i
 	}
 	if len(result) > maxBytes {
 		pre := result
-		cut := len(result) - maxBytes
-		if nl := strings.IndexByte(result[cut:], '\n'); nl >= 0 {
-			cut += nl + 1
-		} else {
-			// No line boundary in range: keep the cut inside a rune so the
-			// tail stays valid UTF-8.
-			for cut < len(result) && !utf8.RuneStart(result[cut]) {
-				cut++
-			}
-		}
+		result = alignTail(result[len(result)-maxBytes:])
+		cut := len(pre) - len(result)
 		droppedLines += strings.Count(pre[:cut], "\n")
 		droppedBytes += int64(cut)
-		result = result[cut:]
 		truncated = true
 	}
 	if !truncated {

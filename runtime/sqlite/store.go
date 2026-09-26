@@ -1310,7 +1310,6 @@ ORDER BY cursor`, conversationID, ponsruntime.EventInputAccepted,
 // In particular, preflight-rewritten calls must describe what actually ran.
 func committedContentWithProviderItems(committed, model []ponsruntime.AgentContent) []ponsruntime.AgentContent {
 	content := make([]ponsruntime.AgentContent, 0, len(committed)+len(model))
-	next := 0
 	for _, part := range model {
 		if part.Type == "provider_item" {
 			content = append(content, part)
@@ -1319,12 +1318,12 @@ func committedContentWithProviderItems(committed, model []ponsruntime.AgentConte
 		if part.Type == "text" && part.Text == "" {
 			continue
 		}
-		if next < len(committed) {
-			content = append(content, committed[next])
-			next++
+		if len(committed) > 0 {
+			content = append(content, committed[0])
+			committed = committed[1:]
 		}
 	}
-	return append(content, committed[next:]...)
+	return append(content, committed...)
 }
 
 func contextTurnFromMessage(message ponsruntime.Message) (ponsruntime.ContextTurn, error) {

@@ -530,13 +530,8 @@ func TestConcurrentSubmissionPreservesLiveClaimEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	defer func() {
-		select {
-		case <-store.release:
-		default:
-			close(store.release)
-		}
-	}()
+	release := sync.OnceFunc(func() { close(store.release) })
+	defer release()
 	conversation, err := manager.CreateConversation(t.Context(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -567,7 +562,7 @@ func TestConcurrentSubmissionPreservesLiveClaimEvents(t *testing.T) {
 		}
 	case <-time.After(100 * time.Millisecond):
 	}
-	close(store.release)
+	release()
 
 	want := []string{
 		ponsruntime.EventInputAccepted, ponsruntime.EventInputAdmitted,
