@@ -130,8 +130,13 @@ inputs without run history and with tool output capped at 16 KiB.
 
 For every non-`finish` action in a plan, the core decides every action before
 launching any approved tool handler. Start hooks for different actions run
-concurrently, so classifier latency does not add up across a turn; approvals
-are then requested one at a time in plan order. This gives interactive clients
+concurrently, so classifier latency does not add up across a turn. The
+runtime then records the assistant response with the calls that will run,
+before any approval waits on a person, and approvals are requested one at a
+time in plan order. A `Stop` from any start or permission hook denies every
+call of that turn that would otherwise run. Repeated denials are counted
+against the call the brain proposed, so a hook that rewrites arguments cannot
+evade the limit. This gives interactive clients
 deterministic prompts and ensures no sibling action executes while a user is
 deciding about an earlier action.
 

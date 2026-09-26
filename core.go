@@ -504,12 +504,12 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 				Action: a, Tool: c.toolSpec(a.Kind), RecentContext: recentContext,
 			}
 		}
-		calls, err := c.preflight(ctx, requests, denials, &fx)
+		calls, checked, err := c.decideCalls(ctx, requests, denials, &fx)
 		if err != nil {
 			return result, fmt.Errorf("tool call start (turn %d): %w", turn, err)
 		}
 		for i := range run {
-			run[i] = calls[i].action
+			run[i] = calls[i].input.Action
 		}
 		denied := func(i int) bool { return calls[i].decision.Permission == PermissionDeny }
 
@@ -532,6 +532,12 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 			}
 			if err := c.emit(Event{Type: EventAssistantResponse, Turn: turn, Actions: slices.Clone(run), Parts: parts}); err != nil {
 				return result, fmt.Errorf("event assistant_response: %w", err)
+			}
+		}
+		// The calls are recorded before any approval waits on a person.
+		if checked {
+			if err := c.resolveCalls(ctx, requests, calls, denials, &fx); err != nil {
+				return result, fmt.Errorf("tool call permission (turn %d): %w", turn, err)
 			}
 		}
 
@@ -611,18 +617,20 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 			result.Answer = answer
 			keepGoing := false
 			if !fx.stop {
+				// The closing hooks run here; they must not run again on the way out.
+				agentOpen = false
 				cont, reason, err := c.endAgent(ctx, AgentEndInput{Result: result, Reason: AgentEndFinished}, &fx)
 				if err != nil {
 					return result, err
 				}
-				if cont && !fx.stop {
-					keepGoing = true
+				// With no turn left to use, a continue request cannot be honored
+				// and the finished answer stands.
+				if cont && !fx.stop && turn < maxTurns {
+					agentOpen, keepGoing = true, true
 					result.Answer = ""
 					if reason != "" {
 						fx.context = append(fx.context, reason)
 					}
-				} else {
-					agentOpen = false // the closing hooks have run
 				}
 			}
 			if !keepGoing {

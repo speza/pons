@@ -206,3 +206,15 @@ func TestBuildPluginIncludesOnlyItsDependencies(t *testing.T) {
 		t.Fatal("built an unconfigured plugin")
 	}
 }
+
+func TestBuildPluginNamesAnInvalidProvider(t *testing.T) {
+	settings := Settings{
+		pluginEntryForTest("classifier/codex", false, `{}`), // provider_id is required when enabled
+		pluginEntryForTest("action_policy", false, `{"classifier":"classifier/codex"}`),
+	}
+	_, err := NewRegistry().BuildPlugin(settings, "action_policy", func(string) string { return "" }, nil)
+	if err == nil || !strings.Contains(err.Error(), "plugins.classifier/codex is invalid") ||
+		!strings.Contains(err.Error(), "provider_id") {
+		t.Fatalf("err = %v", err)
+	}
+}

@@ -741,11 +741,8 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 			plugins = append(plugins, source.Plugin)
 			continue
 		}
-		plugin, pluginErr := external.NewHooks(source.Manifest, external.HostConfig{
-			Workspace: request.Workspace, Path: r.opts.PluginPath, CallTimeout: 10 * time.Second,
-			PluginConfig: source.Config,
-			Limits:       external.Limits{MaxResultBytes: r.opts.PluginMaxResultBytes},
-		})
+		launch := hookLaunch{Path: r.opts.PluginPath, MaxResultBytes: r.opts.PluginMaxResultBytes}
+		plugin, pluginErr := launch.start(source.Manifest, source.Config, request.Workspace)
 		if pluginErr != nil {
 			return result, pluginErr
 		}

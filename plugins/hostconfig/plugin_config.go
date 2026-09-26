@@ -256,15 +256,47 @@ func (r *Registry) decodeEntry(entry Entry, enabled bool) (ConfiguredPlugin, err
 // when disabled, so a plugin can be evaluated before it is enabled; other
 // entries are ignored. An enabled provider is preferred over a disabled one.
 func (r *Registry) BuildPlugin(raw Settings, id string, getenv func(string) string, providers map[string]llm.Fallback) (Options, error) {
-	entries := make(map[string]Entry, len(raw))
-	for _, entry := range raw {
-		entries[entry.ID] = entry
-	}
-	if _, ok := entries[id]; !ok {
+	if !slices.ContainsFunc(raw, func(entry Entry) bool { return entry.ID == id }) {
 		return Options{}, fmt.Errorf("plugin %q is not in the plugins config", id)
 	}
+	// Decode every entry once as if enabled; failures matter only for
+	// entries the target turns out to need.
+	decoded := make(map[string]ConfiguredPlugin, len(raw))
+	failures := make(map[string]error)
+	for _, entry := range raw {
+		if plugin, err := r.decodeEntry(entry, true); err != nil {
+			failures[entry.ID] = err
+		} else {
+			decoded[entry.ID] = plugin
+		}
+	}
 
-	// Resolve the dependency closure, decoding each needed entry as enabled.
+	providerOf := func(capability string) (string, error) {
+		fallback := ""
+		for _, entry := range raw {
+			plugin, ok := decoded[entry.ID]
+			if !ok || !slices.Contains(plugin.Provides(), capability) {
+				continue
+			}
+			if entry.Enabled != nil && *entry.Enabled {
+				return entry.ID, nil
+			}
+			if fallback == "" {
+				fallback = entry.ID
+			}
+		}
+		if fallback != "" {
+			return fallback, nil
+		}
+		err := fmt.Errorf("no configured plugin provides %q", capability)
+		for _, entry := range raw {
+			if failure := failures[entry.ID]; failure != nil {
+				err = fmt.Errorf("%w (plugins.%s is invalid: %v)", err, entry.ID, failure)
+			}
+		}
+		return "", err
+	}
+
 	needed := make(map[string]bool)
 	var need func(string) error
 	need = func(entryID string) error {
@@ -272,12 +304,12 @@ func (r *Registry) BuildPlugin(raw Settings, id string, getenv func(string) stri
 			return nil
 		}
 		needed[entryID] = true
-		plugin, err := r.decodeEntry(entries[entryID], true)
-		if err != nil {
-			return err
+		plugin, ok := decoded[entryID]
+		if !ok {
+			return failures[entryID]
 		}
 		for _, capability := range plugin.Requires() {
-			provider, err := r.providerOf(raw, capability)
+			provider, err := providerOf(capability)
 			if err != nil {
 				return fmt.Errorf("config plugins.%s: %w", entryID, err)
 			}
@@ -305,26 +337,6 @@ func (r *Registry) BuildPlugin(raw Settings, id string, getenv func(string) stri
 		return Options{}, err
 	}
 	return buildPlugins(plugins, getenv, providers)
-}
-
-// providerOf finds the entry providing a capability, preferring an enabled one.
-func (r *Registry) providerOf(raw Settings, capability string) (string, error) {
-	var candidates []Entry
-	for _, entry := range raw {
-		plugin, err := r.decodeEntry(entry, true)
-		if err == nil && slices.Contains(plugin.Provides(), capability) {
-			candidates = append(candidates, entry)
-		}
-	}
-	for _, entry := range candidates {
-		if entry.Enabled != nil && *entry.Enabled {
-			return entry.ID, nil
-		}
-	}
-	if len(candidates) == 0 {
-		return "", fmt.Errorf("no configured plugin provides %q", capability)
-	}
-	return candidates[0].ID, nil
 }
 
 func buildPlugins(plugins []ConfiguredPlugin, getenv func(string) string, providers map[string]llm.Fallback) (Options, error) {

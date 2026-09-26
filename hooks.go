@@ -73,6 +73,27 @@ type ToolCallStartOutput struct {
 	UpdatedInput json.RawMessage   `json:"updated_input,omitempty"`
 }
 
+// ToolCallStartInput describes one exact pending tool call.
+type ToolCallStartInput struct {
+	Turn          int                 `json:"turn"`
+	Message       string              `json:"message"`
+	Workspace     string              `json:"workspace"`
+	Platform      string              `json:"platform,omitempty"`
+	Environment   ActionEnvironment   `json:"environment"`
+	Action        protocol.Action     `json:"action"`
+	Tool          *ToolSpec           `json:"tool,omitempty"`
+	Resources     []ToolResource      `json:"resources,omitempty"`
+	ResourceError bool                `json:"resource_error,omitempty"` // projection failed; hooks can still deny
+	RecentContext []ActionContextItem `json:"recent_context,omitempty"`
+}
+
+// ActionEnvironment is trusted host-supplied execution context. It is
+// descriptive input to policy, not proof that a sandbox enforces containment.
+type ActionEnvironment struct {
+	Provider string `json:"provider,omitempty"`
+	Network  string `json:"network,omitempty"`
+}
+
 // PermissionRequestInput is one exact call whose start hooks asked for
 // approval. Decision is the merged Ask.
 type PermissionRequestInput struct {

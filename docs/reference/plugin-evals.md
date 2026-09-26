@@ -7,7 +7,7 @@ entry point (`Core.CheckToolCall`). It never executes a tool, requests
 approval, or starts a brain.
 
 ```sh
-pons eval [-cases path]... [-case id] [-threshold n] [-json] <plugin-id>
+pons eval [-cases path]... [-case id] [-threshold n] [-plugin-path PATH] [-json] <plugin-id>
 ```
 
 - `<plugin-id>` names an entry in the global `plugins` config. The entry is
@@ -15,6 +15,9 @@ pons eval [-cases path]... [-case id] [-threshold n] [-json] <plugin-id>
   it requires.
 - `-cases` names a case file or a directory of `*.json` case files; it may be
   repeated. An installed plugin defaults to `~/.pons/plugins/<id>/evals/`.
+- External hook plugins start exactly as in a run: the same call timeout,
+  the global `plugin_max_result_bytes`, no inherited credentials, and the
+  `PATH` given by `-plugin-path`.
 - A classifier plugin makes no decision alone, so the runner wraps it in a
   bare action policy that accepts its confidence. `-threshold` sets that
   policy's minimum safe confidence.

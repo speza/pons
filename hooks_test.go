@@ -332,3 +332,35 @@ func TestClosingHooksSeeFailureAndCancellation(t *testing.T) {
 		t.Fatalf("closing hook contexts = %v", closingCtxErrs)
 	}
 }
+
+func TestContinueOnTheLastTurnKeepsTheAnswer(t *testing.T) {
+	c := New()
+	c.MaxTurns = 1
+	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{Finish("final answer")}}})
+	addHooks(t, c, Hooks{OnAgentEnd: func(context.Context, AgentEndInput) (AgentEndOutput, error) {
+		return AgentEndOutput{Continue: true, Reason: "check again"}, nil
+	}})
+	result, err := c.Run(context.Background(), "task")
+	if err != nil || result.Answer != "final answer" || result.Exhausted {
+		t.Fatalf("result = %+v, err = %v", result, err)
+	}
+}
+
+func TestAgentEndRunsOnceWhenItsReportFails(t *testing.T) {
+	c := New()
+	setBrain(t, c, &fakeBrain{turns: [][]protocol.Action{{Finish("done")}}})
+	calls := 0
+	addHooks(t, c, Hooks{OnAgentEnd: func(context.Context, AgentEndInput) (AgentEndOutput, error) {
+		calls++
+		return AgentEndOutput{SystemMessage: "bye"}, nil
+	}})
+	c.OnEventError(func(e Event) error {
+		if e.Type == EventSystemMessage {
+			return errors.New("sink down")
+		}
+		return nil
+	})
+	if _, err := c.Run(context.Background(), "task"); err == nil || calls != 1 {
+		t.Fatalf("err = %v, calls = %d", err, calls)
+	}
+}

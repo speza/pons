@@ -4,11 +4,32 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/samperrin/pons"
 	"github.com/samperrin/pons/plugins/external"
 	"github.com/samperrin/pons/plugins/hostconfig"
 )
+
+// hookCallTimeout bounds each external hook call.
+const hookCallTimeout = 10 * time.Second
+
+// hookLaunch starts external hook plugins. Runs and evals share it, so an
+// eval exercises a plugin exactly as a run does.
+type hookLaunch struct {
+	Path           string // PATH for the child; credentials are never inherited
+	MaxResultBytes int
+}
+
+func (l hookLaunch) start(manifest string, config json.RawMessage, workspace string) (*external.HookPlugin, error) {
+	return external.NewHooks(manifest, external.HostConfig{
+		Workspace:    workspace,
+		Path:         l.Path,
+		CallTimeout:  hookCallTimeout,
+		PluginConfig: config,
+		Limits:       external.Limits{MaxResultBytes: l.MaxResultBytes},
+	})
+}
 
 // hostPluginSource preserves config order until each run creates its own Core.
 // External hook processes are started per run; trusted Go plugins are reused.

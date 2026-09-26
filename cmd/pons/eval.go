@@ -35,6 +35,7 @@ func runEval(ctx context.Context, args []string, stdout, stderr io.Writer, home 
 	only := flags.String("case", "", "run only the case with this ID")
 	threshold := flags.Float64("threshold", 0.9, "classifier plugins only: minimum safe confidence for an allow")
 	jsonOutput := flags.Bool("json", false, "print a machine-readable JSON report")
+	pluginPath := flags.String("plugin-path", "", "PATH supplied to external hook plugins, as for runs")
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, "usage: pons eval [flags] <plugin-id>")
 		flags.PrintDefaults()
@@ -63,6 +64,10 @@ func runEval(ctx context.Context, args []string, stdout, stderr io.Writer, home 
 		return err
 	}
 
+	launch := hookLaunch{Path: *pluginPath}
+	if global.PluginMaxResultBytes != nil {
+		launch.MaxResultBytes = *global.PluginMaxResultBytes
+	}
 	core := pons.New()
 	var defaultCases string
 	for _, plugin := range options.Plugins {
@@ -79,7 +84,7 @@ func runEval(ctx context.Context, args []string, stdout, stderr io.Writer, home 
 		if manifest.Placement != external.PlacementHost {
 			return fmt.Errorf("plugin %q provides tools, not hooks; only hook plugins can be evaluated", plugin.ID)
 		}
-		hooks, err := external.NewHooks(plugin.Manifest, external.HostConfig{PluginConfig: plugin.Config})
+		hooks, err := launch.start(plugin.Manifest, plugin.Config, "")
 		if err != nil {
 			return err
 		}

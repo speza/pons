@@ -663,3 +663,117 @@ func TestCheckToolCallIsADryRun(t *testing.T) {
 		t.Fatalf("executed=%v events=%v", executed, events)
 	}
 }
+
+func TestApprovalSeesProjectionAfterCallsAreRecorded(t *testing.T) {
+	c := New()
+	setBrain(t, c, &continueBrain{fakeBrain{turns: [][]protocol.Action{
+		{{ID: "a", Kind: "run", Args: protocol.MustArgsJSON(map[string]string{"command": "git push"})}},
+		{Finish("done")},
+	}}})
+	if err := c.AddTool("run", ToolDef{
+		Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+			return protocol.ToolResult{OK: true}, nil
+		},
+		Resources: StringArgResource("command", "command"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var sequence []string
+	c.OnEvent(func(e Event) {
+		if e.Type == EventAssistantResponse {
+			sequence = append(sequence, "recorded")
+		}
+	})
+	addHooks(t, c, Hooks{
+		OnToolCallStart: func(context.Context, ToolCallStartInput) (ToolCallStartOutput, error) {
+			return ToolCallStartOutput{Permission: PermissionAsk}, nil
+		},
+		OnPermissionRequest: func(_ context.Context, in PermissionRequestInput) (PermissionRequestOutput, error) {
+			if len(in.Resources) != 1 || in.Resources[0].Value != "git push" {
+				t.Errorf("permission hook resources: %+v", in.Resources)
+			}
+			return PermissionRequestOutput{}, nil
+		},
+	})
+	if err := c.SetApprovalHandler(func(_ context.Context, in PermissionRequestInput) (Permission, error) {
+		sequence = append(sequence, "approval")
+		if len(in.Resources) != 1 || in.Resources[0].Value != "git push" {
+			t.Errorf("approval resources: %+v", in.Resources)
+		}
+		return PermissionAllow, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Run(context.Background(), "push"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(sequence, []string{"recorded", "approval"}) {
+		t.Fatalf("sequence = %v", sequence)
+	}
+}
+
+func TestPermissionHookStopDeniesTheWholeTurn(t *testing.T) {
+	c := New()
+	setBrain(t, c, &continueBrain{fakeBrain{turns: [][]protocol.Action{
+		{{ID: "a", Kind: "run"}, {ID: "b", Kind: "run"}, {ID: "c", Kind: "run"}},
+		{Finish("done")},
+	}}})
+	ran := 0
+	if err := c.AddTool("run", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+		ran++
+		return protocol.ToolResult{OK: true}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	addHooks(t, c, Hooks{
+		OnToolCallStart: func(_ context.Context, in ToolCallStartInput) (ToolCallStartOutput, error) {
+			if in.Action.ID == "b" {
+				return ToolCallStartOutput{Permission: PermissionAsk}, nil
+			}
+			return ToolCallStartOutput{}, nil
+		},
+		OnPermissionRequest: func(context.Context, PermissionRequestInput) (PermissionRequestOutput, error) {
+			return PermissionRequestOutput{Permission: PermissionAllow, Stop: true, StopReason: "operator stop"}, nil
+		},
+	})
+	result, err := c.Run(context.Background(), "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ran != 0 || result.Turns != 1 {
+		t.Fatalf("ran = %d, result = %+v", ran, result)
+	}
+	for _, tr := range result.History[0].Results {
+		if tr.OK || !strings.Contains(tr.Error, "run_stopped") {
+			t.Fatalf("result = %+v", tr)
+		}
+	}
+}
+
+func TestRepeatedDenialCountsTheProposedCall(t *testing.T) {
+	c := New()
+	c.MaxTurns = 6
+	setBrain(t, c, endlessBrain{})
+	if err := c.AddTool("ping", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+		t.Fatal("denied tool ran")
+		return protocol.ToolResult{}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	checks := 0
+	addHooks(t, c, Hooks{OnToolCallStart: func(_ context.Context, in ToolCallStartInput) (ToolCallStartOutput, error) {
+		checks++
+		if len(in.Action.Args) == 0 {
+			return ToolCallStartOutput{UpdatedInput: json.RawMessage(`{"normalized":true}`)}, nil
+		}
+		return ToolCallStartOutput{Permission: PermissionDeny, Reason: "blocked"}, nil
+	}})
+	result, err := c.Run(context.Background(), "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two hook passes per decided call; the breaker then skips the hooks.
+	if checks != 2*repeatedDenialLimit || !strings.Contains(result.History[repeatedDenialLimit].Results[0].Error, "repeated_denial") {
+		t.Fatalf("checks = %d, result = %+v", checks, result.History[repeatedDenialLimit].Results[0])
+	}
+}
