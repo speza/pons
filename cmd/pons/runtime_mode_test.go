@@ -724,6 +724,36 @@ func TestAgentRunnerSelectsRevisionProviderSlot(t *testing.T) {
 	}
 }
 
+func TestAgentRunnerRejectsChangedRevisionPlugins(t *testing.T) {
+	workspace := t.TempDir()
+	runner := &agentRunner{
+		logger: newServerLogger(io.Discard, false),
+		opts: serverOptions{
+			Sandbox: "seatbelt", Environment: &lifecycleEnvironment{},
+			WorkspaceRoot: filepath.Dir(workspace), StateDir: t.TempDir(),
+			ProviderSlot: "primary",
+			Brain:        llm.Config{Provider: "openai", APIKey: "test"},
+			PluginPaths:  []string{"/plugins/new.json"},
+		},
+	}
+	request := ponsruntime.RunRequest{
+		Workspace: workspace, Environment: "seatbelt", Text: "queued work",
+		Agent: ponsruntime.AgentDefinition{
+			ID: "default", ProviderSlot: "primary", PluginPaths: []string{"/plugins/old.json"},
+		},
+	}
+	_, err := runner.Run(context.Background(), request)
+	if err == nil || !strings.Contains(err.Error(), "hands plugin configuration changed") {
+		t.Fatalf("run under changed plugins = %v", err)
+	}
+	// Restoring the recorded list makes the revision eligible to provision.
+	runner.opts.PluginPaths = []string{"/plugins/old.json"}
+	_, err = runner.Run(context.Background(), request)
+	if err == nil || !strings.Contains(err.Error(), "start execution environment: unexpected environment start") {
+		t.Fatalf("run after restoring plugins = %v", err)
+	}
+}
+
 func TestPersonaPrompt(t *testing.T) {
 	for _, test := range []struct {
 		name, persona, want string

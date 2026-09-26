@@ -1255,14 +1255,13 @@ ORDER BY cursor`, conversationID, ponsruntime.EventInputAccepted,
 			if event.ID <= after || !admitted[event.InboundMessageID] || !message.Complete {
 				continue
 			}
-			if message.Role == "assistant" && len(pendingModel[event.RunID]) > 0 {
-				tail = append(tail, pendingModel[event.RunID][0])
-				pendingModel[event.RunID] = pendingModel[event.RunID][1:]
-				continue
-			}
 			turn, err := contextTurnFromMessage(message)
 			if err != nil {
 				return nil, err
+			}
+			if message.Role == "assistant" && len(pendingModel[event.RunID]) > 0 {
+				turn.Content = committedContentWithProviderItems(turn.Content, pendingModel[event.RunID][0].Content)
+				pendingModel[event.RunID] = pendingModel[event.RunID][1:]
 			}
 			if message.Role == "tool" && len(tail) > 0 && len(tail[len(tail)-1].Content) > 0 &&
 				tail[len(tail)-1].Content[0].Type == "tool_result" {
@@ -1304,6 +1303,27 @@ ORDER BY cursor`, conversationID, ponsruntime.EventInputAccepted,
 		}
 	}
 	return tail, rows.Err()
+}
+
+// committedContentWithProviderItems retains opaque provider blocks at their
+// model-output positions, while the committed response owns semantic content.
+// In particular, preflight-rewritten calls must describe what actually ran.
+func committedContentWithProviderItems(committed, model []ponsruntime.AgentContent) []ponsruntime.AgentContent {
+	content := make([]ponsruntime.AgentContent, 0, len(committed)+len(model))
+	for _, part := range model {
+		if part.Type == "provider_item" {
+			content = append(content, part)
+			continue
+		}
+		if part.Type == "text" && part.Text == "" {
+			continue
+		}
+		if len(committed) > 0 {
+			content = append(content, committed[0])
+			committed = committed[1:]
+		}
+	}
+	return append(content, committed...)
 }
 
 func contextTurnFromMessage(message ponsruntime.Message) (ponsruntime.ContextTurn, error) {

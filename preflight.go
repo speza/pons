@@ -215,8 +215,11 @@ func (c *Core) resolveCalls(ctx context.Context, requests []ToolCallStartInput, 
 // decideToolCall runs every start hook on one call and merges their answers.
 // When a hook updates the arguments, every hook runs again on the new call.
 func (c *Core) decideToolCall(ctx context.Context, req ToolCallStartInput) callDecision {
+	var call callDecision
 	for range maxInputUpdates {
-		call := callDecision{decision: PermissionDecision{Permission: PermissionAllow}}
+		// Permission applies to the exact arguments being checked. Lifecycle
+		// effects and diagnostics still hold when a later hook rewrites them.
+		call.decision = PermissionDecision{Permission: PermissionAllow}
 		// A registered projection owns the resources; otherwise any the
 		// caller supplied (as CheckToolCall callers may) are kept.
 		if project := c.resources[req.Action.Kind]; project != nil {
@@ -271,5 +274,7 @@ func (c *Core) decideToolCall(ctx context.Context, req ToolCallStartInput) callD
 		call.decision = sanitizeDecision(call.decision)
 		return call
 	}
-	return callDecision{input: req, decision: PermissionDecision{Permission: PermissionDeny, Reason: "tool_call_update_limit"}}
+	call.input = req
+	call.decision = PermissionDecision{Permission: PermissionDeny, Reason: "tool_call_update_limit"}
+	return call
 }

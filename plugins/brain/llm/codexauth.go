@@ -8,7 +8,7 @@
 //
 // A legacy single-credential file (the pre-multi-provider shape, matching
 // the Codex CLI file) is read as the entry "codex" and upgraded in place
-// on the next save. Concurrent refreshes across pons processes serialize
+// on the next save. Concurrent credential writes across pons processes serialize
 // on an advisory lock of the store file.
 package llm
 
@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/semaphore"
 )
 
 // LegacyAuthID is the store entry for a legacy single-credential auth.json.
@@ -91,6 +93,11 @@ func DefaultCodexAuthPath() (string, error) {
 // codexAuth holds one ChatGPT-subscription credential resolved from the
 // store. Refreshed tokens are written back under their auth id.
 type codexAuth struct {
+	// The gate acts as a cancellable mutex, held through token refresh and
+	// persistence. sync.Mutex.Lock cannot honor context cancellation, so a
+	// canceled caller would remain blocked behind another request's stalled
+	// refresh HTTP call. Semaphore acquisition lets that waiter exit promptly.
+	gate       *semaphore.Weighted
 	http       *http.Client
 	storePath  string
 	id         string
@@ -118,6 +125,7 @@ func loadCodexAuth(storePath, requestedID string) (*codexAuth, error) {
 		return nil, fmt.Errorf("codex auth: %s: %w", storePath, err)
 	}
 	return &codexAuth{
+		gate:       semaphore.NewWeighted(1),
 		http:       defaultHTTPClient(),
 		storePath:  storePath,
 		id:         id,
@@ -129,8 +137,8 @@ func loadCodexAuth(storePath, requestedID string) (*codexAuth, error) {
 	}, nil
 }
 
-// save persists this credential back to the store (0600) after a refresh,
-// preserving every other entry.
+// save persists this credential, preserving every other entry. Login calls
+// it before sharing the credential; refresh calls it while holding the gate.
 func (a *codexAuth) save() error {
 	expires := int64(0)
 	if !a.ExpiresAt.IsZero() {
@@ -195,6 +203,10 @@ func saveAuthEntry(storePath, id string, cred ponsAuthFile) error {
 // current returns credentials that are valid right now, refreshing
 // in-memory when the access token has expired (1-minute safety margin).
 func (a *codexAuth) current(ctx context.Context) (access, accountID string, err error) {
+	if err := a.gate.Acquire(ctx, 1); err != nil {
+		return "", "", err
+	}
+	defer a.gate.Release(1)
 	if a.Access != "" && (a.ExpiresAt.IsZero() || time.Now().Before(a.ExpiresAt.Add(-time.Minute))) {
 		return a.Access, a.AccountID, nil
 	}
@@ -202,13 +214,26 @@ func (a *codexAuth) current(ctx context.Context) (access, accountID string, err 
 		return "", "", fmt.Errorf("codex auth: token expired and no refresh token available (run pons -provider codex --login)")
 	}
 
-	if err := a.refresh(ctx); err != nil {
+	if err := a.refreshLocked(ctx); err != nil {
 		return "", "", err
 	}
 	return a.Access, a.AccountID, nil
 }
 
-func (a *codexAuth) refresh(ctx context.Context) error {
+// refresh retries a rejected access token once. Another request may already
+// have refreshed it while this request's 401 was in flight.
+func (a *codexAuth) refresh(ctx context.Context, rejectedAccess string) error {
+	if err := a.gate.Acquire(ctx, 1); err != nil {
+		return err
+	}
+	defer a.gate.Release(1)
+	if a.Access != rejectedAccess {
+		return nil
+	}
+	return a.refreshLocked(ctx)
+}
+
+func (a *codexAuth) refreshLocked(ctx context.Context) error {
 	body, _ := json.Marshal(map[string]string{
 		"client_id":     oauthClientID,
 		"grant_type":    "refresh_token",

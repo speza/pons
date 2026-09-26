@@ -2,9 +2,12 @@ package pons
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/samperrin/pons/protocol"
@@ -219,30 +222,51 @@ func TestStopBeforeBrainCall(t *testing.T) {
 }
 
 func TestStopDuringPreflightDeniesTheTurn(t *testing.T) {
-	c := New()
-	setBrain(t, c, &continueBrain{fakeBrain{turns: [][]protocol.Action{
-		{{ID: "a", Kind: "ping"}, {ID: "b", Kind: "ping"}},
-		{Finish("done")},
-	}}})
-	called := false
-	addPing(t, c, &called)
-	addHooks(t, c, Hooks{OnToolCallStart: func(_ context.Context, in ToolCallStartInput) (ToolCallStartOutput, error) {
-		if in.Action.ID == "b" {
-			return ToolCallStartOutput{Stop: true, StopReason: "operator stop"}, nil
-		}
-		return ToolCallStartOutput{}, nil
-	}})
-	result, err := c.Run(context.Background(), "task")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if called || result.Turns != 1 || result.Answer != "" {
-		t.Fatalf("called = %v, result = %+v", called, result)
-	}
-	for _, tr := range result.History[0].Results {
-		if tr.OK || !strings.Contains(tr.Error, "run_stopped") {
-			t.Fatalf("result = %+v", tr)
-		}
+	for _, rewrite := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rewrite=%v", rewrite), func(t *testing.T) {
+			c := New()
+			setBrain(t, c, &continueBrain{fakeBrain{turns: [][]protocol.Action{
+				{{ID: "a", Kind: "ping"}, {ID: "b", Kind: "ping"}},
+				{Finish("done")},
+			}}})
+			var called atomic.Bool
+			if err := c.AddTool("ping", ToolDef{Handler: func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+				called.Store(true)
+				return protocol.ToolResult{OK: true, Output: "pong"}, nil
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			addHooks(t, c, Hooks{OnToolCallStart: func(_ context.Context, in ToolCallStartInput) (ToolCallStartOutput, error) {
+				if in.Action.ID == "b" && len(in.Action.Args) == 0 {
+					return ToolCallStartOutput{Stop: true, StopReason: "operator stop", SystemMessage: "stopping"}, nil
+				}
+				return ToolCallStartOutput{}, nil
+			}})
+			if rewrite {
+				addHooks(t, c, Hooks{OnToolCallStart: func(_ context.Context, in ToolCallStartInput) (ToolCallStartOutput, error) {
+					if in.Action.ID == "b" && len(in.Action.Args) == 0 {
+						return ToolCallStartOutput{UpdatedInput: json.RawMessage(`{"normalized":true}`)}, nil
+					}
+					return ToolCallStartOutput{}, nil
+				}})
+			}
+			messages := eventTexts(c, EventSystemMessage)
+			result, err := c.Run(context.Background(), "task")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if called.Load() || result.Turns != 1 || result.Answer != "" {
+				t.Fatalf("called = %v, result = %+v", called.Load(), result)
+			}
+			if !reflect.DeepEqual(*messages, []string{"stopping"}) {
+				t.Fatalf("system messages = %v", *messages)
+			}
+			for _, tr := range result.History[0].Results {
+				if tr.OK || !strings.Contains(tr.Error, "run_stopped") {
+					t.Fatalf("result = %+v", tr)
+				}
+			}
+		})
 	}
 }
 

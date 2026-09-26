@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -272,6 +275,171 @@ data: {"type":"response.completed","response":{"id":"resp_1","object":"response"
 	use, ok := turn.Blocks[1].(ToolUse)
 	if !ok || use.ID != "call_1" || use.Name != "bash" || use.Input["command"] != "ls" {
 		t.Fatalf("tool_use block: %+v", turn.Blocks[1])
+	}
+}
+
+func TestResponsesRejectsUnfinishedStreams(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		terminal string
+		wantErr  string
+	}{
+		{
+			name: "incomplete",
+			terminal: `event: response.incomplete
+data: {"type":"response.incomplete","response":{"id":"r","object":"response","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}
+
+`,
+			wantErr: "incomplete",
+		},
+		{name: "missing completion", wantErr: "without a completed response"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("content-type", "text/event-stream")
+				io.WriteString(w, `event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"type":"function_call","id":"fc","call_id":"call","name":"bash","arguments":"{\"command\":\"echo partial\"}"}}
+
+`+tc.terminal)
+			}))
+			defer srv.Close()
+			client := &responsesClient{model: "test", apiKey: "test", baseURL: srv.URL}
+			turn, err := client.Complete(context.Background(), "test", nil, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || len(turn.Blocks) != 0 {
+				t.Fatalf("unfinished stream returned turn=%+v err=%v", turn, err)
+			}
+		})
+	}
+}
+
+func TestCodexRefreshWaitCanBeCanceled(t *testing.T) {
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	release := sync.OnceFunc(func() { close(releaseRefresh) })
+	refreshSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(refreshStarted)
+		<-releaseRefresh
+		io.WriteString(w, `{"access_token":"new-token","refresh_token":"new-refresh","expires_in":3600}`)
+	}))
+	defer refreshSrv.Close()
+	defer release()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		io.WriteString(w, `event: response.completed
+data: {"type":"response.completed","response":{"id":"r","object":"response","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}}
+
+`)
+	}))
+	defer srv.Close()
+	path := storeWith(t, `{"codex":{"access":"old-token","refresh":"old-refresh","expires":1}}`)
+	auth, err := loadCodexAuth(path, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth.refreshURL = refreshSrv.URL
+	client := &responsesClient{model: "test", auth: auth, baseURL: srv.URL}
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := client.Complete(t.Context(), "test", nil, nil)
+		firstDone <- err
+	}()
+	select {
+	case <-refreshStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first request did not begin refreshing")
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := client.Complete(ctx, "test", nil, nil)
+		secondDone <- err
+	}()
+	cancel()
+	select {
+	case err := <-secondDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("canceled refresh waiter returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Error("canceled caller waited for another request's refresh")
+	}
+	release()
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("canceling the waiter affected the refreshing request: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("refreshing request did not complete")
+	}
+}
+
+func TestCodexConcurrentCallsShareRefresh(t *testing.T) {
+	for _, expired := range []bool{false, true} {
+		t.Run(fmt.Sprintf("expired=%v", expired), func(t *testing.T) {
+			const callers = 8
+			var refreshes, oldRequests atomic.Int32
+			allRejected := make(chan struct{})
+			refreshSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				refreshes.Add(1)
+				io.WriteString(w, `{"access_token":"new-token","refresh_token":"new-refresh","expires_in":3600}`)
+			}))
+			defer refreshSrv.Close()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("authorization") == "Bearer old-token" {
+					if oldRequests.Add(1) == callers {
+						close(allRejected)
+					}
+					select {
+					case <-allRejected:
+					case <-r.Context().Done():
+						return
+					}
+					w.WriteHeader(http.StatusUnauthorized)
+					io.WriteString(w, `{"error":{"message":"expired"}}`)
+					return
+				}
+				if got := r.Header.Get("authorization"); got != "Bearer new-token" {
+					t.Errorf("unexpected authorization: %q", got)
+				}
+				w.Header().Set("content-type", "text/event-stream")
+				io.WriteString(w, `event: response.completed
+data: {"type":"response.completed","response":{"id":"r","object":"response","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}}
+
+`)
+			}))
+			defer srv.Close()
+			expiresAt := time.Now().Add(time.Hour)
+			if expired {
+				expiresAt = time.Now().Add(-time.Hour)
+			}
+			path := storeWith(t, fmt.Sprintf(`{"codex":{"access":"old-token","refresh":"old-refresh","expires":%d}}`, expiresAt.UnixMilli()))
+			auth, err := loadCodexAuth(path, "codex")
+			if err != nil {
+				t.Fatal(err)
+			}
+			auth.refreshURL = refreshSrv.URL
+			client := &responsesClient{model: "test", auth: auth, baseURL: srv.URL}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			var done sync.WaitGroup
+			for range callers {
+				done.Go(func() {
+					turn, err := client.Complete(ctx, "test", nil, nil)
+					if err != nil || len(turn.Blocks) != 1 || turn.Blocks[0] != (Text{Value: "done"}) {
+						t.Errorf("refresh and retry: turn=%+v err=%v", turn, err)
+					}
+				})
+			}
+			done.Wait()
+			if got := refreshes.Load(); got != 1 {
+				t.Fatalf("concurrent calls refreshed %d times, want 1", got)
+			}
+			if expired && oldRequests.Load() != 0 {
+				t.Fatal("an expired access token was sent to the provider")
+			}
+		})
 	}
 }
 

@@ -444,7 +444,7 @@ func TestWorkspaceExclusionIsEnforcedByRunnableClaim(t *testing.T) {
 	release <- struct{}{}
 }
 
-func TestSubscribeDuringClaimBroadcastDoesNotDuplicateDurableEvents(t *testing.T) {
+func TestSubscribeDuringClaimReturnsOrderedDurableEvents(t *testing.T) {
 	base, err := runtimesqlite.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -475,11 +475,21 @@ func TestSubscribeDuringClaimBroadcastDoesNotDuplicateDurableEvents(t *testing.T
 	case <-time.After(3 * time.Second):
 		t.Fatal("claim did not commit")
 	}
-	stream, err := manager.Subscribe(t.Context(), conversation.ID, 0)
-	if err != nil {
-		t.Fatal(err)
+	type subscription struct {
+		stream <-chan Event
+		err    error
 	}
+	subscribed := make(chan subscription, 1)
+	go func() {
+		stream, err := manager.Subscribe(t.Context(), conversation.ID, 0)
+		subscribed <- subscription{stream: stream, err: err}
+	}()
 	close(store.release)
+	result := <-subscribed
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	stream := result.stream
 	var cursors []uint64
 	deadline := time.After(3 * time.Second)
 	for {
@@ -498,6 +508,78 @@ func TestSubscribeDuringClaimBroadcastDoesNotDuplicateDurableEvents(t *testing.T
 			}
 		case <-deadline:
 			t.Fatalf("timed out waiting for final event; cursors = %v", cursors)
+		}
+	}
+}
+
+func TestConcurrentSubmissionPreservesLiveClaimEvents(t *testing.T) {
+	base, err := runtimesqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	store := &delayedClaimStore{Store: base, claimed: make(chan struct{}), release: make(chan struct{})}
+	manager, err := New(Config{
+		Agent: testAgent, AgentRevisions: testRevisions, Store: store,
+		Runner: RunnerFunc(func(ctx context.Context, _ RunRequest) (RunResult, error) {
+			<-ctx.Done()
+			return RunResult{}, ctx.Err()
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	release := sync.OnceFunc(func() { close(store.release) })
+	defer release()
+	conversation, err := manager.CreateConversation(t.Context(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := manager.Subscribe(t.Context(), conversation.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Submit(t.Context(), conversation.ID, "first", []TextPart{{Type: "text", Text: "first"}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-store.claimed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("claim did not commit")
+	}
+	submitted := make(chan error, 1)
+	go func() {
+		_, err := manager.Submit(t.Context(), conversation.ID, "second", []TextPart{{Type: "text", Text: "second"}})
+		submitted <- err
+	}()
+	// Allow admission to race the already-committed claim. Implementations
+	// may publish its missing events or wait until claim publication finishes.
+	select {
+	case err := <-submitted:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+
+	want := []string{
+		ponsruntime.EventInputAccepted, ponsruntime.EventInputAdmitted,
+		ponsruntime.EventRunStarted, ponsruntime.EventInputAccepted,
+	}
+	var received []Event
+	deadline := time.After(3 * time.Second)
+	for len(received) < len(want) {
+		select {
+		case event := <-stream:
+			received = append(received, event)
+			index := len(received) - 1
+			if event.ID != uint64(index+1) || event.Type != want[index] {
+				t.Fatalf("event %d = cursor %d %s, want cursor %d %s", index, event.ID, event.Type, index+1, want[index])
+			}
+		case <-deadline:
+			t.Fatalf("live events = %+v, want %v", received, want)
 		}
 	}
 }

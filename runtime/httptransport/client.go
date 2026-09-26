@@ -235,34 +235,43 @@ func (c Client) openEvents(ctx context.Context, conversationID string, after uin
 }
 
 func scanSSE(reader io.Reader, emit func(ponsruntime.Event) error) error {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 4096), 1<<20)
-	var data string
-	for scanner.Scan() {
-		line := scanner.Text()
+	// A runtime event can exceed the ingress body size after its envelope is
+	// added, and tool-output limits are operator-configured. Like snapshots,
+	// events from the trusted local server have no smaller transport-only cap.
+	buffered := bufio.NewReader(reader)
+	var data strings.Builder
+	for {
+		line, err := buffered.ReadString('\n')
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				return err
+			}
+			if line == "" {
+				return nil
+			}
+		}
+		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
 		if line == "" {
-			if data != "" {
+			if data.Len() > 0 {
 				var event ponsruntime.Event
-				if err := json.Unmarshal([]byte(data), &event); err != nil {
+				if err := json.Unmarshal([]byte(data.String()), &event); err != nil {
 					return fmt.Errorf("runtime HTTP client: decode event: %w", err)
 				}
 				if err := emit(event); err != nil {
 					return err
 				}
 			}
-			data = ""
+			data.Reset()
 			continue
 		}
 		if value, ok := strings.CutPrefix(line, "data:"); ok {
 			value = strings.TrimPrefix(value, " ")
-			if data == "" {
-				data = value
-			} else {
-				data += "\n" + value
+			if data.Len() > 0 {
+				data.WriteByte('\n')
 			}
+			data.WriteString(value)
 		}
 	}
-	return scanner.Err()
 }
 
 type SendResult struct {
