@@ -184,9 +184,10 @@ func TestActionPolicyRulesAndGeneratedConfidence(t *testing.T) {
 
 func TestBuildPluginIncludesOnlyItsDependencies(t *testing.T) {
 	settings := Settings{
-		pluginEntryForTest("classifier/typesafe-jev", true, `{"api_key_env":"JEV_KEY"}`),
+		pluginEntryForTest("classifier/typesafe-jev", false, `{"api_key_env":"JEV_KEY"}`),
 		pluginEntryForTest("classifier/openai", true, `{}`),
 		pluginEntryForTest("action_policy", false, `{"classifier":"classifier/typesafe-jev"}`),
+		pluginEntryForTest("external", false, `{}`), // incomplete, but unrelated
 	}
 	getenv := func(name string) string {
 		if name == "JEV_KEY" {

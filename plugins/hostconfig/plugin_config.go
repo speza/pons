@@ -154,21 +154,10 @@ func (r *Registry) decodePluginConfigs(raw Settings) ([]ConfiguredPlugin, error)
 		if _, exists := plugins[id]; exists {
 			return nil, fmt.Errorf("config plugins.%s: duplicate plugin ID", id)
 		}
-		registration, ok := r.entries[id]
-		if !ok {
-			var err error
-			registration, err = installedRegistration(id)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if entry.Version != registration.version {
-			return nil, fmt.Errorf("config plugins.%s: unsupported version %q (supported: %s)", id, entry.Version, registration.version)
-		}
 		if entry.Enabled == nil {
 			return nil, fmt.Errorf("config plugins.%s.enabled is required", id)
 		}
-		plugin, err := registration.decode(id, *entry.Enabled, entry.Config)
+		plugin, err := r.decodeEntry(entry, *entry.Enabled)
 		if err != nil {
 			return nil, err
 		}
@@ -247,45 +236,95 @@ func (r *Registry) Build(raw Settings, getenv func(string) string, providers map
 	return buildPlugins(plugins, getenv, providers)
 }
 
+func (r *Registry) decodeEntry(entry Entry, enabled bool) (ConfiguredPlugin, error) {
+	registration, ok := r.entries[entry.ID]
+	if !ok {
+		var err error
+		registration, err = installedRegistration(entry.ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if entry.Version != registration.version {
+		return nil, fmt.Errorf("config plugins.%s: unsupported version %q (supported: %s)", entry.ID, entry.Version, registration.version)
+	}
+	return registration.decode(entry.ID, enabled, entry.Config)
+}
+
 // BuildPlugin builds one configured plugin and the plugins providing the
-// capabilities it requires, in dependency order. The entry is built even when
-// disabled, so a plugin can be evaluated before it is enabled.
+// capabilities it requires, in dependency order. These entries are built even
+// when disabled, so a plugin can be evaluated before it is enabled; other
+// entries are ignored. An enabled provider is preferred over a disabled one.
 func (r *Registry) BuildPlugin(raw Settings, id string, getenv func(string) string, providers map[string]llm.Fallback) (Options, error) {
-	settings := slices.Clone(raw)
-	index := slices.IndexFunc(settings, func(entry Entry) bool { return entry.ID == id })
-	if index < 0 {
+	entries := make(map[string]Entry, len(raw))
+	for _, entry := range raw {
+		entries[entry.ID] = entry
+	}
+	if _, ok := entries[id]; !ok {
 		return Options{}, fmt.Errorf("plugin %q is not in the plugins config", id)
 	}
-	enabled := true
-	settings[index].Enabled = &enabled
 
-	plugins, err := r.decodePluginConfigs(settings)
+	// Resolve the dependency closure, decoding each needed entry as enabled.
+	needed := make(map[string]bool)
+	var need func(string) error
+	need = func(entryID string) error {
+		if needed[entryID] {
+			return nil
+		}
+		needed[entryID] = true
+		plugin, err := r.decodeEntry(entries[entryID], true)
+		if err != nil {
+			return err
+		}
+		for _, capability := range plugin.Requires() {
+			provider, err := r.providerOf(raw, capability)
+			if err != nil {
+				return fmt.Errorf("config plugins.%s: %w", entryID, err)
+			}
+			if err := need(provider); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := need(id); err != nil {
+		return Options{}, err
+	}
+
+	// Decode and order only that closure through the normal path.
+	enabled := true
+	var subset Settings
+	for _, entry := range raw {
+		if needed[entry.ID] {
+			entry.Enabled = &enabled
+			subset = append(subset, entry)
+		}
+	}
+	plugins, err := r.decodePluginConfigs(subset)
 	if err != nil {
 		return Options{}, err
 	}
-	providedBy := make(map[string]ConfiguredPlugin)
-	for _, plugin := range plugins {
-		for _, capability := range plugin.Provides() {
-			providedBy[capability] = plugin
+	return buildPlugins(plugins, getenv, providers)
+}
+
+// providerOf finds the entry providing a capability, preferring an enabled one.
+func (r *Registry) providerOf(raw Settings, capability string) (string, error) {
+	var candidates []Entry
+	for _, entry := range raw {
+		plugin, err := r.decodeEntry(entry, true)
+		if err == nil && slices.Contains(plugin.Provides(), capability) {
+			candidates = append(candidates, entry)
 		}
 	}
-	needed := make(map[string]bool)
-	var need func(ConfiguredPlugin)
-	need = func(plugin ConfiguredPlugin) {
-		if needed[plugin.ID()] {
-			return
-		}
-		needed[plugin.ID()] = true
-		for _, capability := range plugin.Requires() {
-			need(providedBy[capability]) // decoding guarantees a provider
+	for _, entry := range candidates {
+		if entry.Enabled != nil && *entry.Enabled {
+			return entry.ID, nil
 		}
 	}
-	for _, plugin := range plugins {
-		if plugin.ID() == id {
-			need(plugin)
-		}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no configured plugin provides %q", capability)
 	}
-	return buildPlugins(slices.DeleteFunc(plugins, func(plugin ConfiguredPlugin) bool { return !needed[plugin.ID()] }), getenv, providers)
+	return candidates[0].ID, nil
 }
 
 func buildPlugins(plugins []ConfiguredPlugin, getenv func(string) string, providers map[string]llm.Fallback) (Options, error) {
