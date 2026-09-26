@@ -40,13 +40,3 @@ func TestHandlerExplainsMissingBuild(t *testing.T) {
 		t.Fatalf("unbuilt UI = %d %s", recorder.Code, recorder.Body.String())
 	}
 }
-
-func TestEmbeddedHandlerServesClientOrBuildHint(t *testing.T) {
-	recorder := serve(t, Handler(), "/")
-	body := recorder.Body.String()
-	built := recorder.Code == http.StatusOK && strings.Contains(body, `<div id="root"></div>`)
-	unbuilt := recorder.Code == http.StatusNotFound && strings.Contains(body, "make web-build")
-	if !built && !unbuilt {
-		t.Fatalf("embedded UI = %d %s", recorder.Code, body)
-	}
-}

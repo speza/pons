@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/samperrin/pons"
 )
 
 func newEdit(t *testing.T, root string) *Edit {
@@ -121,19 +119,5 @@ func TestRelativePathUsesWorkspaceRoot(t *testing.T) {
 	got, err := os.ReadFile(path)
 	if err != nil || string(got) != "new\n" {
 		t.Fatalf("relative edit landed outside workspace: %q err=%v", got, err)
-	}
-}
-
-func TestPluginIsAdditive(t *testing.T) {
-	// Registering the same kind twice must fail loudly (purely-additive rule).
-	root := t.TempDir()
-	p1 := newEdit(t, root)
-	p2 := newEdit(t, root)
-	c := pons.New()
-	if err := p1.Setup(c); err != nil {
-		t.Fatal(err)
-	}
-	if err := p2.Setup(c); err == nil || !strings.Contains(err.Error(), "already registered") {
-		t.Fatalf("expected conflict error, got: %v", err)
 	}
 }

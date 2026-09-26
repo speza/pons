@@ -22,9 +22,6 @@ type Entry struct {
 // Settings is the versioned plugin list accepted by the host configuration.
 type Settings []Entry
 
-type pluginEntry = Entry
-type pluginSettings = Settings
-
 func (settings *Settings) UnmarshalJSON(data []byte) error {
 	if trimmed := bytes.TrimSpace(data); len(trimmed) == 0 || trimmed[0] != '[' {
 		return fmt.Errorf("config plugins must be a list")
@@ -356,8 +353,4 @@ func buildPlugins(plugins []ConfiguredPlugin, getenv func(string) string, provid
 // Build resolves enabled plugins against the trusted host's providers and environment.
 func Build(raw Settings, getenv func(string) string, providers map[string]llm.Fallback) (Options, error) {
 	return NewRegistry().Build(raw, getenv, providers)
-}
-
-func buildPluginOptions(raw Settings, getenv func(string) string, providers map[string]llm.Fallback) (Options, error) {
-	return Build(raw, getenv, providers)
 }

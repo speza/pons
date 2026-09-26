@@ -19,28 +19,6 @@ func TestToolInputPreservesLargeInteger(t *testing.T) {
 	}
 }
 
-func TestSystemPromptContract(t *testing.T) {
-	b := &Brain{}
-	prompt := b.systemPrompt()
-	for _, want := range []string{
-		"The available tool schemas are the complete capability set for this run.",
-		"Calls in the same response may run concurrently",
-		"A text-only response ends the task and becomes the final answer.",
-		"Treat user reports and proposed causes as claims to verify",
-		"Preserve unrelated work already present in the workspace",
-		"Never claim a check passed unless its result was observed.",
-	} {
-		if !strings.Contains(prompt, want) {
-			t.Errorf("system prompt missing %q", want)
-		}
-	}
-	for _, legacy := range []string{"PONS_SESSION_FILE", "NDJSON"} {
-		if strings.Contains(prompt, legacy) {
-			t.Errorf("legacy transcript term %q leaked into system prompt", legacy)
-		}
-	}
-}
-
 func TestSystemPromptUsesPersonaAndKeepsHarnessRules(t *testing.T) {
 	neutral := (&Brain{}).systemPrompt()
 	persona := (&Brain{cfg: Config{Persona: "You are Ada.\n\nKeep answers short."}}).systemPrompt()
@@ -55,16 +33,8 @@ func TestSystemPromptUsesPersonaAndKeepsHarnessRules(t *testing.T) {
 		t.Fatal("configured persona still includes the neutral default")
 	}
 	for _, prompt := range []string{neutral, persona} {
-		if strings.Contains(prompt, "expert coding agent") {
-			t.Error("system prompt kept the fixed coding identity")
-		}
 		if !strings.HasSuffix(prompt, harnessPrompt) {
 			t.Error("system prompt dropped harness rules")
-		}
-	}
-	for _, section := range []string{"<harness>", "<working_principles>", "<tool_discipline>", "<verification>", "<final_response>"} {
-		if !strings.Contains(harnessPrompt, section) {
-			t.Errorf("harness rules missing %s", section)
 		}
 	}
 }

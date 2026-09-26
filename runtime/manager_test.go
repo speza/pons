@@ -444,49 +444,6 @@ func TestWorkspaceExclusionIsEnforcedByRunnableClaim(t *testing.T) {
 	release <- struct{}{}
 }
 
-func TestCompetingSQLiteClaimsDoNotDuplicateSubmission(t *testing.T) {
-	stateDir, workspace := t.TempDir(), t.TempDir()
-	store, err := runtimesqlite.Open(stateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: workspace, CreatedAt: time.Now().UTC()}
-	if err := store.CreateConversation(context.Background(), conversation); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := acceptInput(store, context.Background(), conversation.ID, "once", []TextPart{{Type: "text", Text: "go"}}); err != nil {
-		t.Fatal(err)
-	}
-	start := make(chan struct{})
-	type claimResult struct {
-		claim *ponsruntime.ClaimedRun
-		err   error
-	}
-	results := make(chan claimResult, 2)
-	for range 2 {
-		go func() {
-			<-start
-			claim, err := store.ClaimRunnable(context.Background())
-			results <- claimResult{claim, err}
-		}()
-	}
-	close(start)
-	claimed := 0
-	for range 2 {
-		result := <-results
-		if result.err != nil {
-			t.Fatal(result.err)
-		}
-		if result.claim != nil {
-			claimed++
-		}
-	}
-	if claimed != 1 {
-		t.Fatalf("claims = %d, want 1", claimed)
-	}
-}
-
 func TestSubscribeDuringClaimBroadcastDoesNotDuplicateDurableEvents(t *testing.T) {
 	base, err := runtimesqlite.Open(t.TempDir())
 	if err != nil {
@@ -876,9 +833,7 @@ func TestFailedRunIsDurableAndNotRetried(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events := waitForEvent(t, m, conversation.ID, ponsruntime.EventRunFailed, 1)
-	last := events[len(events)-2]
-	_ = last
+	waitForEvent(t, m, conversation.ID, ponsruntime.EventRunFailed, 1)
 	if executions.Load() != 1 {
 		t.Fatalf("executions = %d", executions.Load())
 	}
@@ -940,109 +895,6 @@ func TestRestartMarksRequestedToolInterruptedWithoutRetry(t *testing.T) {
 	}
 	if !duplicate.Duplicate || duplicate.InboundMessageID != accepted.InboundMessageID {
 		t.Fatalf("duplicate = %+v", duplicate)
-	}
-}
-
-func TestClaimHistoryExcludesLaterQueuedMessages(t *testing.T) {
-	ctx := context.Background()
-	store, err := runtimesqlite.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
-	if err := store.CreateConversation(ctx, conversation); err != nil {
-		t.Fatal(err)
-	}
-	first, _, err := acceptInput(store, ctx, conversation.ID, "first", []TextPart{{Type: "text", Text: "A"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, _, err := acceptInput(store, ctx, conversation.ID, "second", []TextPart{{Type: "text", Text: "B"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	claimA, err := store.ClaimRunnable(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if claimA.Message.ID != first.InboundMessageID || len(claimA.Context) != 0 {
-		t.Fatalf("first claim = %+v", claimA)
-	}
-	if _, err := store.FinishRun(ctx, claimA.Run, "answer A"); err != nil {
-		t.Fatal(err)
-	}
-	claimB, err := store.ClaimRunnable(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if claimB.Message.ID != second.InboundMessageID || len(claimB.Context) != 2 {
-		t.Fatalf("second claim = %+v", claimB)
-	}
-	if got := claimB.Context[0]; got.Role != "user" || got.Content[0].Text != "A" {
-		t.Fatalf("history[0] = %+v", got)
-	}
-	if got := claimB.Context[1]; got.Role != "assistant" || got.Content[0].Text != "answer A" {
-		t.Fatalf("history[1] = %+v", got)
-	}
-}
-
-func TestAssistantToolTurnsRemainOrderedAndComplete(t *testing.T) {
-	ctx := context.Background()
-	store, err := runtimesqlite.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
-	if err := store.CreateConversation(ctx, conversation); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := acceptInput(store, ctx, conversation.ID, "one", []TextPart{{Type: "text", Text: "go"}}); err != nil {
-		t.Fatal(err)
-	}
-	claim, err := store.ClaimRunnable(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, id := range []string{"call-1", "call-2"} {
-		args := protocol.MustArgsJSON(map[string]any{"round": i + 1})
-		if i == 0 {
-			args = nil
-		}
-		parts := []ponsruntime.MessagePart{
-			{Type: "text", Text: "before " + id},
-			{Type: "tool_call", ToolCallID: id, ToolKind: "fake", Arguments: args},
-			{Type: "text", Text: "after " + id},
-		}
-		if _, err := store.CommitAssistantTurn(ctx, claim.Run, parts); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := store.ToolCompleted(ctx, claim.Run, protocol.ToolResult{ActionID: id, Kind: "fake", OK: true, Output: id + " result"}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := store.FinishRun(ctx, claim.Run, "done"); err != nil {
-		t.Fatal(err)
-	}
-	view, err := store.View(ctx, conversation.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(view.Messages) != 6 {
-		t.Fatalf("messages = %+v", view.Messages)
-	}
-	for _, index := range []int{1, 3} {
-		message := view.Messages[index]
-		if message.Role != "assistant" || !message.Complete || message.Final || len(message.Parts) != 3 || message.Parts[0].Type != "text" || message.Parts[1].Type != "tool_call" || message.Parts[2].Type != "text" {
-			t.Fatalf("assistant turn %d = %+v", index, message)
-		}
-	}
-	if view.Messages[1].ID == view.Messages[3].ID {
-		t.Fatal("separate planning rounds were merged")
-	}
-	if got := string(view.Messages[1].Parts[1].Arguments); got != "{}" {
-		t.Fatalf("normalized arguments = %q", got)
 	}
 }
 

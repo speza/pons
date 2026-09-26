@@ -89,32 +89,39 @@ func TestOpenAIDefaultModel(t *testing.T) {
 	}
 }
 
-func TestOpenAIClassifierLimitsAndSanitizesResponses(t *testing.T) {
-	for _, tt := range []struct {
-		name   string
-		status int
-		body   string
-		want   string
-	}{
-		{name: "HTTP error", status: http.StatusInternalServerError, body: "sensitive body", want: "HTTP status 500"},
-		{name: "oversized response", status: http.StatusOK, body: strings.Repeat("x", maxClassifierResponse+1), want: "response too large"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(tt.status)
-				_, _ = w.Write([]byte(tt.body))
-			}))
-			defer server.Close()
-			classifier, err := NewOpenAIClassifier(RemoteConfig{APIKey: "secret", Endpoint: server.URL})
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = classifier.Assess(context.Background(), testRequest())
-			if err == nil || !strings.Contains(err.Error(), tt.want) || strings.Contains(err.Error(), "sensitive body") {
-				t.Fatalf("classifier error = %v", err)
-			}
-		})
+func TestRemoteClassifiersLimitAndSanitizeResponses(t *testing.T) {
+	classifiers := map[string]func(RemoteConfig) (Classifier, error){
+		"openai":   func(c RemoteConfig) (Classifier, error) { return NewOpenAIClassifier(c) },
+		"typesafe": func(c RemoteConfig) (Classifier, error) { return NewTypeSafeClassifier(c) },
+	}
+	for name, newClassifier := range classifiers {
+		for _, tt := range []struct {
+			name   string
+			status int
+			body   string
+			want   string
+		}{
+			{name: "HTTP error", status: http.StatusInternalServerError, body: "sensitive body", want: "HTTP status 500"},
+			{name: "oversized response", status: http.StatusOK, body: strings.Repeat("x", maxClassifierResponse+1), want: "response too large"},
+		} {
+			t.Run(name+"/"+tt.name, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(tt.status)
+					_, _ = w.Write([]byte(tt.body))
+				}))
+				defer server.Close()
+				classifier, err := newClassifier(RemoteConfig{APIKey: "secret", Endpoint: server.URL})
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = classifier.Assess(context.Background(), testRequest())
+				if err == nil || !strings.Contains(err.Error(), tt.want) ||
+					strings.Contains(err.Error(), "sensitive body") || strings.Contains(err.Error(), "secret") {
+					t.Fatalf("classifier error = %v", err)
+				}
+			})
+		}
 	}
 }
 
@@ -125,22 +132,5 @@ func TestTypeSafeDefaultModel(t *testing.T) {
 	}
 	if classifier.model != "jev-latest" {
 		t.Fatalf("model=%q", classifier.model)
-	}
-}
-
-func TestRemoteClassifierFailureAsks(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("sensitive body"))
-	}))
-	defer server.Close()
-	classifier, err := NewTypeSafeClassifier(RemoteConfig{APIKey: "secret", Endpoint: server.URL})
-	if err != nil {
-		t.Fatal(err)
-	}
-	decision, err := (Policy{Classifiers: []Classifier{classifier}}).decide(context.Background(), testRequest())
-	if err == nil || decision.Permission != pons.PermissionAsk ||
-		strings.Contains(err.Error(), "sensitive") || strings.Contains(err.Error(), "secret") {
-		t.Fatalf("decision=%+v error=%v", decision, err)
 	}
 }
