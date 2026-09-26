@@ -282,7 +282,9 @@ func seatbeltProfile(workspace, scratch, handsCommand string, readOnly, readWrit
 		"(version 1)",
 		"(deny default)",
 		"(allow process-fork process-exec)",
-		"(allow signal (target self))",
+		// Tool calls own child process groups. Allow cancellation inside this
+		// sandbox without granting signals to unrelated host processes.
+		"(allow signal (target same-sandbox))",
 		"(allow sysctl-read)",
 		// tool_provider/v1 uses inherited anonymous pipes. Limit the pathless
 		// data permission to non-regular files; regular files still require an

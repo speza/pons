@@ -6,6 +6,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.72.0
 	github.com/ncruces/go-sqlite3 v0.34.0
 	github.com/openai/openai-go v1.12.0
+	golang.org/x/sys v0.43.0
 )
 
 require (
@@ -22,5 +23,4 @@ require (
 	github.com/tidwall/sjson v1.2.5 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.43.0 // indirect
 )

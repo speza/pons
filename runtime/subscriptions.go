@@ -30,6 +30,8 @@ func newLiveConversation(manager *Manager, conversation Conversation) *liveConve
 
 // View returns a coherent UI snapshot and its durable cursor.
 func (m *Manager) View(ctx context.Context, conversationID string) (ConversationView, error) {
+	m.claimPublication.RLock()
+	defer m.claimPublication.RUnlock()
 	c, err := m.conversation(ctx, conversationID)
 	if err != nil {
 		return ConversationView{}, err
@@ -47,10 +49,11 @@ func (m *Manager) View(ctx context.Context, conversationID string) (Conversation
 	return view, nil
 }
 
-// Subscribe loads catch-up events and registers the live subscriber under one
-// local lock. Per-subscriber cursors suppress a claim event already observed
-// in catch-up before its process-local broadcast arrives.
+// Subscribe waits for claim publication, then loads catch-up events and
+// registers the live subscriber under the conversation lock.
 func (m *Manager) Subscribe(ctx context.Context, conversationID string, after uint64) (<-chan Event, error) {
+	m.claimPublication.RLock()
+	defer m.claimPublication.RUnlock()
 	c, err := m.conversation(ctx, conversationID)
 	if err != nil {
 		return nil, err
@@ -88,9 +91,8 @@ func (m *Manager) Subscribe(ctx context.Context, conversationID string, after ui
 }
 
 func (c *liveConversation) broadcastLocked(events ...Event) {
-	// The caller holds c.mu so catch-up registration and live delivery share one
-	// local order. Durable cursor checks remove the overlap where a subscriber
-	// reads a committed event before its process-local broadcast arrives.
+	// The caller holds c.mu so catch-up registration and live delivery share
+	// one local order. Each subscriber receives a durable cursor at most once.
 	for _, event := range events {
 		for id, subscriber := range c.subscribers {
 			if event.ID != 0 && event.ID <= subscriber.lastCursor {
@@ -110,6 +112,8 @@ func (c *liveConversation) broadcastLocked(events ...Event) {
 }
 
 func (m *Manager) Events(ctx context.Context, conversationID string, after uint64) ([]Event, error) {
+	m.claimPublication.RLock()
+	defer m.claimPublication.RUnlock()
 	c, err := m.conversation(ctx, conversationID)
 	if err != nil {
 		return nil, err

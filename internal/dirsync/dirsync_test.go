@@ -111,3 +111,76 @@ func TestApplyKeepsDeletedFileChangedSinceBase(t *testing.T) {
 		t.Fatalf("tree after apply = %q", after)
 	}
 }
+
+func TestApplyReplacesFileWithDirectory(t *testing.T) {
+	checkApplyReplacement(t,
+		Tree{"topic": []byte("old")},
+		Tree{"topic/notes/new.md": []byte("new")},
+	)
+}
+
+func checkApplyReplacement(t *testing.T, before, after Tree) {
+	t.Helper()
+	host := t.TempDir()
+	for name, data := range before {
+		writeTestFile(t, filepath.Join(host, name), string(data))
+	}
+	if _, err := Apply(host, before.Digests(), after); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(after) {
+		t.Fatalf("tree = %q, want %q", got, after)
+	}
+	for name, want := range after {
+		if !bytes.Equal(got[name], want) {
+			t.Fatalf("%s = %q, want %q", name, got[name], want)
+		}
+	}
+}
+
+func TestApplyPathReplacementPreservesConcurrentFiles(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		before     Tree
+		concurrent string
+		after      Tree
+	}{
+		{
+			name:       "changed file blocks new directory",
+			before:     Tree{"topic": []byte("old")},
+			concurrent: "topic",
+			after:      Tree{"topic/new.md": []byte("new")},
+		},
+		{
+			name:       "changed child blocks replacement file",
+			before:     Tree{"topic/old.md": []byte("old")},
+			concurrent: "topic/old.md",
+			after:      Tree{"topic": []byte("new")},
+		},
+		{
+			name:       "new child blocks replacement file",
+			before:     Tree{"topic/old.md": []byte("old")},
+			concurrent: "topic/new.md",
+			after:      Tree{"topic": []byte("new")},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			host := t.TempDir()
+			for name, data := range test.before {
+				writeTestFile(t, filepath.Join(host, name), string(data))
+			}
+			writeTestFile(t, filepath.Join(host, test.concurrent), "concurrent edit")
+			if _, err := Apply(host, test.before.Digests(), test.after); err == nil {
+				t.Fatal("path replacement unexpectedly succeeded")
+			}
+			got, err := os.ReadFile(filepath.Join(host, test.concurrent))
+			if err != nil || string(got) != "concurrent edit" {
+				t.Fatalf("concurrent file = %q, %v", got, err)
+			}
+		})
+	}
+}

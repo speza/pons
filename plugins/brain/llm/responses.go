@@ -39,17 +39,24 @@ type responsesClient struct {
 func (c *responsesClient) Complete(ctx context.Context, system string, turns []Turn, tools []pons.ToolSpec) (Turn, error) {
 	// Subscription tokens expire hourly: refresh before the call if expired,
 	// and once more on a 401 before giving up.
+	token, accountID := c.apiKey, ""
 	if c.auth != nil {
-		if _, _, err := c.auth.current(ctx); err != nil {
+		var err error
+		token, accountID, err = c.auth.current(ctx)
+		if err != nil {
 			return Turn{}, err
 		}
 	}
-	turn, err := c.tryComplete(ctx, system, turns, tools)
+	turn, err := c.tryComplete(ctx, token, accountID, system, turns, tools)
 	if err != nil && c.auth != nil && isUnauthorized(err) {
-		if rerr := c.auth.refresh(ctx); rerr != nil {
+		if rerr := c.auth.refresh(ctx, token); rerr != nil {
 			return Turn{}, fmt.Errorf("codex: HTTP 401 and token refresh failed (%v) — run pons -provider codex --login", rerr)
 		}
-		return c.tryComplete(ctx, system, turns, tools)
+		token, accountID, err = c.auth.current(ctx)
+		if err != nil {
+			return Turn{}, err
+		}
+		return c.tryComplete(ctx, token, accountID, system, turns, tools)
 	}
 	return turn, err
 }
@@ -59,17 +66,16 @@ func isUnauthorized(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.StatusCode == 401
 }
 
-func (c *responsesClient) tryComplete(ctx context.Context, system string, turns []Turn, tools []pons.ToolSpec) (Turn, error) {
+func (c *responsesClient) tryComplete(
+	ctx context.Context,
+	token, accountID, system string,
+	turns []Turn,
+	tools []pons.ToolSpec,
+) (Turn, error) {
 	opts := []option.RequestOption{
 		option.WithMaxRetries(0),
 		option.WithHTTPClient(defaultHTTPClient()),
 		option.WithBaseURL(c.baseURL),
-	}
-	token := c.apiKey
-	accountID := ""
-	if c.auth != nil {
-		token = c.auth.Access // current() validated/refreshed before the call
-		accountID = c.auth.AccountID
 	}
 	opts = append(opts, option.WithAPIKey(token))
 	if accountID != "" {
@@ -125,6 +131,7 @@ func (c *responsesClient) tryComplete(ctx context.Context, system string, turns 
 	client := openai.NewClient(opts...)
 
 	stream := client.Responses.NewStreaming(ctx, params)
+	defer stream.Close()
 	var items []responses.ResponseOutputItemUnion
 	var completed *responses.ResponseCompletedEvent
 	for stream.Next() {
@@ -142,6 +149,9 @@ func (c *responsesClient) tryComplete(ctx context.Context, system string, turns 
 			if len(done.Response.Output) > 0 {
 				items = done.Response.Output
 			}
+		case "response.incomplete":
+			done := ev.AsResponseIncomplete()
+			return Turn{}, fmt.Errorf("codex: response incomplete (%s) — raise Config.MaxTokens or the model needs a smaller step", done.Response.IncompleteDetails.Reason)
 		case "response.failed":
 			f := ev.AsResponseFailed()
 			msg := "stream failed"
@@ -162,7 +172,10 @@ func (c *responsesClient) tryComplete(ctx context.Context, system string, turns 
 	}
 
 	// Truncated response = the model planned more work than arrived.
-	if completed != nil && completed.Response.Status == "incomplete" {
+	if completed == nil {
+		return Turn{}, fmt.Errorf("codex: stream ended without a completed response")
+	}
+	if completed.Response.Status == "incomplete" {
 		return Turn{}, fmt.Errorf("codex: response incomplete (%s) — raise Config.MaxTokens or the model needs a smaller step", completed.Response.IncompleteDetails.Reason)
 	}
 	if items == nil {

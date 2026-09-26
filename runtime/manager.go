@@ -46,6 +46,10 @@ type Manager struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	wake     chan struct{}
+	// claimPublication prevents admission and client reads from overtaking
+	// a durable claim before its run is registered and its events are sent.
+	// Acquire it before mu or a liveConversation mutex; runners do not need it.
+	claimPublication sync.RWMutex
 	// mu protects convs, runs, active, and closed. It is never held across
 	// store calls or while acquiring a liveConversation mutex.
 	mu    sync.Mutex
@@ -193,6 +197,8 @@ func (m *Manager) SubmitInput(ctx context.Context, conversationID string, input 
 	if err := ValidateInputSubmission(input); err != nil {
 		return AcceptedMessage{}, err
 	}
+	m.claimPublication.RLock()
+	defer m.claimPublication.RUnlock()
 
 	c, err := m.conversation(ctx, conversationID)
 	if err != nil {

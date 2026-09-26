@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -98,6 +99,12 @@ func TestExternalPluginHelper(t *testing.T) {
 func TestExternalRawPluginHelper(t *testing.T) {
 	if os.Getenv("PONS_EXTERNAL_RAW") != "1" {
 		return
+	}
+	if marker := os.Getenv("PONS_EXTERNAL_DESCENDANT_PATH"); marker != "" {
+		child := exec.Command("/bin/sh", "-c", `while [ ! -f "$1" ]; do /bin/sleep 0.01; done; printf escaped > "$2"`, "sh", marker+".release", marker)
+		if err := child.Start(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	encoder := json.NewEncoder(os.Stdout)
 	scanner := bufio.NewScanner(os.Stdin)

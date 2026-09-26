@@ -570,6 +570,9 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	if err := agent.Validate(); err != nil {
 		return result, err
 	}
+	if !slices.Equal(agent.PluginPaths, r.opts.PluginPaths) {
+		return result, errors.New("agent revision's hands plugin configuration changed; restore its plugin list or submit new work")
+	}
 	if request.GitRepository == "" {
 		if _, err := validateConversationWorkspace(request.Workspace, r.opts.WorkspaceRoot, r.opts.StateDir); err != nil {
 			return result, fmt.Errorf("run host workspace: %w", err)

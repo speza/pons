@@ -1,8 +1,11 @@
 // Package bash adds the bash action: run a shell command in the workspace,
 // pi-style (packages/coding-agent/src/core/tools/bash.ts): optional per-call
 // timeout in seconds (none by default), combined stdout/stderr, output
-// truncated to the LAST N lines / bytes, full output saved to a temp file
-// when truncated.
+// truncated to the LAST N lines / bytes, with at most an 8 MiB tail saved to a
+// temp file when truncated.
+// On Unix, each call owns its command's process group; its remaining members
+// stop on successful completion, cancellation, or timeout. Processes that
+// deliberately leave that group require enforcement by the environment.
 //
 // Trust model: this plugin is unrestricted by design — policy comes from
 // composition. Compose it only when the hands run inside an OS/container
@@ -63,7 +66,7 @@ func New(cfg Config) *Bash { return &Bash{cfg: cfg} }
 func (p *Bash) Setup(c *pons.Core) error {
 	return c.AddTool(KindBash, pons.ToolDef{
 		Handler:     p.run,
-		Description: "Execute a shell command. Returns combined stdout/stderr and the exit code. Output is truncated to the last lines; non-zero exit codes are observations, not failures.",
+		Description: "Execute a shell command. Each call stops remaining background processes in its process group when it ends. Returns combined stdout/stderr and the exit code. Output is truncated to the last lines; non-zero exit codes are observations, not failures.",
 		Params: []pons.ToolParam{
 			{Name: "command", Type: "string", Description: "The shell command to execute", Required: true},
 			{Name: "timeout", Type: "integer", Description: "Timeout in seconds (optional; no default timeout)"},
@@ -113,12 +116,19 @@ func (p *Bash) run(ctx context.Context, a protocol.Action) (protocol.ToolResult,
 	}
 
 	cmd := exec.CommandContext(cctx, "sh", "-c", command)
+	configureCommand(cmd)
+	// Descendants can inherit stdout after the shell exits. Bound draining
+	// even when one deliberately leaves the command's process group.
+	cmd.WaitDelay = 100 * time.Millisecond
 	if p.cfg.Root != "" {
 		cmd.Dir = p.cfg.Root
 	}
-	out, err := cmd.CombinedOutput()
+	out := outputTail{limit: max(maxFullFileBytes, p.maxBytes())}
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err = cmd.Run()
+	stopCommand(cmd)
 
-	text, extras := truncateOutput(string(out), p.maxLines(), p.maxBytes())
+	text, extras := formatOutput(out.String(), p.maxLines(), p.maxBytes(), out.droppedLines, out.droppedBytes)
 	res := protocol.ToolResult{ActionID: a.ID, OK: true, Kind: string(KindBash), Output: text, ExitCode: 0}
 	if extras != nil {
 		res.Payload, _ = json.Marshal(extras)
@@ -167,10 +177,8 @@ func (p *Bash) maxBytes() int {
 	return 50 * 1024
 }
 
-// truncateOutput keeps the LAST maxLines lines and last maxBytes bytes of
-// output. The model-facing note stays in Output; machine-readable facts land
-// in the typed Payload (truncation and full-output path). ExecExtras are the
-// structured facts of a command run; consumers decode via AsExecResult.
+// ExecExtras describes output truncation and the bounded spill file in the
+// tool result's Payload. Consumers decode it through AsExecResult.
 type ExecExtras struct {
 	Truncated    bool   `json:"truncated,omitempty"`
 	DroppedLines int    `json:"dropped_lines,omitempty"`
@@ -189,23 +197,32 @@ func AsExecResult(tr protocol.ToolResult) (ExecExtras, bool) {
 	return r, true
 }
 
-func truncateOutput(s string, maxLines, maxBytes int) (string, *ExecExtras) {
-	result, droppedLines, truncated := s, 0, false
-
-	lines := strings.Split(s, "\n")
-	trailingNewline := s != "" && strings.HasSuffix(s, "\n")
-	if trailingNewline {
-		lines = lines[:len(lines)-1]
+func formatOutput(s string, maxLines, maxBytes, droppedLines int, droppedBytes int64) (string, *ExecExtras) {
+	if droppedBytes > 0 {
+		aligned := alignTail(s)
+		droppedLines += strings.Count(s[:len(s)-len(aligned)], "\n")
+		droppedBytes += int64(len(s) - len(aligned))
+		s = aligned
 	}
-	if len(lines) > maxLines {
-		droppedLines = len(lines) - maxLines
-		result = strings.Join(lines[droppedLines:], "\n")
-		if trailingNewline {
-			result += "\n"
+	result, truncated := s, droppedBytes > 0
+
+	lineCount := strings.Count(s, "\n")
+	if s != "" && !strings.HasSuffix(s, "\n") {
+		lineCount++
+	}
+	if lineCount > maxLines {
+		droppedLines += lineCount - maxLines
+		cut := len(s)
+		if strings.HasSuffix(s, "\n") {
+			cut--
 		}
+		for range maxLines {
+			cut = strings.LastIndexByte(s[:cut], '\n')
+		}
+		result = s[cut+1:]
+		droppedBytes += int64(len(s) - len(result))
 		truncated = true
 	}
-	bytesDropped := 0
 	if len(result) > maxBytes {
 		pre := result
 		cut := len(result) - maxBytes
@@ -219,7 +236,7 @@ func truncateOutput(s string, maxLines, maxBytes int) (string, *ExecExtras) {
 			}
 		}
 		droppedLines += strings.Count(pre[:cut], "\n")
-		bytesDropped = len(pre) - len(pre[cut:])
+		droppedBytes += int64(cut)
 		result = result[cut:]
 		truncated = true
 	}
@@ -231,10 +248,10 @@ func truncateOutput(s string, maxLines, maxBytes int) (string, *ExecExtras) {
 	switch {
 	case droppedLines > 0:
 		note = fmt.Sprintf("%d earlier lines truncated", droppedLines)
-	case bytesDropped > 0:
+	case droppedBytes > 0:
 		// Single huge line with no newline in range: lines dropped is
 		// zero but bytes were still cut.
-		note = fmt.Sprintf("%d earlier bytes truncated", bytesDropped)
+		note = fmt.Sprintf("%d earlier bytes truncated", droppedBytes)
 	default:
 		note = "output truncated"
 	}
@@ -251,14 +268,7 @@ func saveFull(s string) (string, error) {
 	// Bound the spill so one truncated call cannot fill /tmp; larger
 	// outputs keep the tail, matching what the model sees.
 	if len(s) > maxFullFileBytes {
-		s = s[len(s)-maxFullFileBytes:]
-		if nl := strings.IndexByte(s, '\n'); nl >= 0 {
-			s = s[nl+1:]
-		} else {
-			for len(s) > 0 && !utf8.RuneStart(s[0]) {
-				s = s[1:]
-			}
-		}
+		s = alignTail(s[len(s)-maxFullFileBytes:])
 	}
 	f, err := os.CreateTemp("", "pons-bash-*.log")
 	if err != nil {
@@ -273,4 +283,14 @@ func saveFull(s string) (string, error) {
 		return "", err
 	}
 	return f.Name(), nil
+}
+
+func alignTail(s string) string {
+	if nl := strings.IndexByte(s, '\n'); nl >= 0 {
+		return s[nl+1:]
+	}
+	for len(s) > 0 && !utf8.RuneStart(s[0]) {
+		s = s[1:]
+	}
+	return s
 }

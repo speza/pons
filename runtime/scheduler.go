@@ -28,8 +28,10 @@ func (m *Manager) schedule() {
 // claim therefore always has a bounded run goroutine ready to own it locally.
 func (m *Manager) dispatch() {
 	for m.reserveSlot() {
+		m.claimPublication.Lock()
 		claim, err := m.store.ClaimRunnable(m.ctx)
 		if err != nil {
+			m.claimPublication.Unlock()
 			m.releaseSlot(false)
 			if !errors.Is(err, context.Canceled) {
 				m.report(fmt.Errorf("runtime: claim runnable work: %w", err))
@@ -37,6 +39,7 @@ func (m *Manager) dispatch() {
 			return
 		}
 		if claim == nil {
+			m.claimPublication.Unlock()
 			m.releaseSlot(false)
 			return
 		}
@@ -52,6 +55,7 @@ func (m *Manager) dispatch() {
 		live.mu.Lock()
 		live.broadcastLocked(claim.Events...)
 		live.mu.Unlock()
+		m.claimPublication.Unlock()
 
 		m.wg.Add(1)
 		go live.work(ctx, cancel, claim)
