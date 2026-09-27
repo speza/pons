@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/samperrin/pons/plugins/brain/llm"
 )
 
 func TestPolicyProvidersIgnoreProjectOverrides(t *testing.T) {
@@ -26,7 +28,7 @@ func TestPolicyProvidersIgnoreProjectOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	providers, err := trustedPluginProviders(global, map[string]bool{}, "anthropic", "", "", nil)
+	providers, err := trustedPluginProviders(global, map[string]bool{}, llm.Fallback{Provider: "anthropic"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +61,7 @@ func TestProviderSlotsFromConfigList(t *testing.T) {
 			{ID: "anthropic", Provider: "anthropic", Model: "claude-x"},
 		},
 	}
-	slots, err := providerSlots(cfg, map[string]bool{}, "anthropic", "", "", nil)
+	slots, err := providerSlots(cfg, map[string]bool{}, llm.Fallback{Provider: "anthropic"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +87,7 @@ func TestProviderSlotsFlagOverridesDefault(t *testing.T) {
 	}
 	// Explicit -provider is ad-hoc: flags-only primary, all declared
 	// providers back it up.
-	slots, err := providerSlots(cfg, map[string]bool{"provider": true}, "openai", "", "", nil)
+	slots, err := providerSlots(cfg, map[string]bool{"provider": true}, llm.Fallback{Provider: "openai"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,17 +99,20 @@ func TestProviderSlotsFlagOverridesDefault(t *testing.T) {
 	}
 }
 
-func TestProviderSlotsModelFlagOverridesEntry(t *testing.T) {
+func TestProviderSlotsFlagsOverrideEntry(t *testing.T) {
 	cfg := settings{
 		DefaultProviderID: new("a"),
-		Providers:         []providerSettings{{ID: "a", Provider: "anthropic", Model: "entry-model"}},
+		Providers: []providerSettings{
+			{ID: "a", Provider: "opencode-go", Model: "entry-model", API: llm.APIOpenAICompletions},
+		},
 	}
-	slots, err := providerSlots(cfg, map[string]bool{"model": true}, "anthropic", "flag-model", "", nil)
+	flags := llm.Fallback{Provider: "anthropic", Model: "flag-model", API: llm.APIAnthropicMessages}
+	slots, err := providerSlots(cfg, map[string]bool{"model": true, "api": true}, flags, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if slots[0].Model != "flag-model" {
-		t.Fatalf("--model should override the entry: %+v", slots[0])
+	if slots[0].Provider != "opencode-go" || slots[0].Model != "flag-model" || slots[0].API != llm.APIAnthropicMessages {
+		t.Fatalf("--model and --api should override the entry: %+v", slots[0])
 	}
 }
 
@@ -119,7 +124,7 @@ func TestProviderSlotsFallbackFlagReplaces(t *testing.T) {
 			{ID: "b", Provider: "openai"},
 		},
 	}
-	slots, err := providerSlots(cfg, map[string]bool{}, "anthropic", "", "", []string{"codex"})
+	slots, err := providerSlots(cfg, map[string]bool{}, llm.Fallback{Provider: "anthropic"}, []string{"codex"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +135,7 @@ func TestProviderSlotsFallbackFlagReplaces(t *testing.T) {
 
 func TestProviderSlotsLegacyFlat(t *testing.T) {
 	cfg := settings{Provider: new("openai")}
-	slots, err := providerSlots(cfg, map[string]bool{}, "openai", "gpt-x", "", nil)
+	slots, err := providerSlots(cfg, map[string]bool{}, llm.Fallback{Provider: "openai", Model: "gpt-x"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +166,7 @@ func TestProviderSlotsValidation(t *testing.T) {
 			if tc.name == "empty fallback spec" {
 				flagFallbacks = []string{":model"}
 			}
-			if _, err := providerSlots(tc.cfg, map[string]bool{}, "anthropic", "", "", flagFallbacks); err == nil || !strings.Contains(err.Error(), tc.want) {
+			if _, err := providerSlots(tc.cfg, map[string]bool{}, llm.Fallback{Provider: "anthropic"}, flagFallbacks); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("want %q, got %v", tc.want, err)
 			}
 		})

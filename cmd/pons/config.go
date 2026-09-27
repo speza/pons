@@ -64,6 +64,7 @@ type settings struct {
 	Provider             *string              `json:"provider,omitempty"`
 	Model                *string              `json:"model,omitempty"`
 	BaseURL              *string              `json:"base_url,omitempty"`
+	API                  *string              `json:"api,omitempty"`
 	StateDir             *string              `json:"state_dir,omitempty"`
 	WorkspaceRoot        *string              `json:"workspace_root,omitempty"`
 	Environment          *environmentSettings `json:"environment,omitempty"`
@@ -128,8 +129,8 @@ func (s settings) orderedProviders() ([]providerSettings, error) {
 // validate rejects ambiguous configs: the flat provider keys and the
 // providers list are exclusive, and default_provider_id needs the list.
 func (s settings) validate() error {
-	if len(s.Providers) > 0 && (s.Provider != nil || s.Model != nil || s.BaseURL != nil) {
-		return fmt.Errorf("config cannot set both \"providers\" and the flat provider/model/base_url keys")
+	if len(s.Providers) > 0 && (s.Provider != nil || s.Model != nil || s.BaseURL != nil || s.API != nil) {
+		return fmt.Errorf("config cannot set both \"providers\" and the flat provider/model/base_url/api keys")
 	}
 	if s.DefaultProviderID != nil && len(s.Providers) == 0 {
 		return fmt.Errorf("config sets default_provider_id but no providers")

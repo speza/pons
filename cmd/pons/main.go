@@ -53,9 +53,10 @@ func main() {
 		return
 	}
 
-	provider := flag.String("provider", "anthropic", "LLM provider: anthropic | openai | codex | openai-responses | opencode-go")
+	provider := flag.String("provider", "anthropic", "LLM provider: anthropic | openai | codex | opencode-go | openrouter")
 	model := flag.String("model", "", "model id (default: provider default)")
 	baseURL := flag.String("base-url", "", "override provider endpoint (for OpenAI-compatible servers)")
+	api := flag.String("api", "", "wire format: anthropic-messages | openai-completions | openai-responses (default: chosen by provider and model)")
 	workspace := flag.String("workspace", "", "host workspace selected for a new local, Seatbelt, or E2B archive conversation (default: current directory)")
 	workspaceRoot := flag.String("workspace-root", "", "server-approved root for client-selected host workspaces (default: home directory)")
 	stateDir := flag.String("state-dir", "", "runtime state directory (default: ~/.pons/runtime/server/)")
@@ -172,7 +173,7 @@ func main() {
 	e2bAPIKey := ""
 	setFlags := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
-	flagProvider, flagModel, flagBaseURL := *provider, *model, *baseURL
+	flagSlot := llm.Fallback{Provider: *provider, Model: *model, BaseURL: *baseURL, API: *api}
 	applyString := func(name string, dst *string, v *string) {
 		if !setFlags[name] && v != nil {
 			*dst = *v
@@ -186,6 +187,7 @@ func main() {
 	applyString("provider", provider, cfg.Provider)
 	applyString("model", model, cfg.Model)
 	applyString("base-url", baseURL, cfg.BaseURL)
+	applyString("api", api, cfg.API)
 	applyString("state-dir", stateDir, cfg.StateDir)
 	applyString("workspace-root", workspaceRoot, cfg.WorkspaceRoot)
 	if cfg.Environment != nil {
@@ -225,7 +227,12 @@ func main() {
 
 	// Provider failover chain: config providers + flags → ordered slots
 	// (primary first, then failover entries).
-	slots, serr := providerSlots(cfg, setFlags, *provider, *model, *baseURL, fallbackFlags)
+	slots, serr := providerSlots(
+		cfg,
+		setFlags,
+		llm.Fallback{Provider: *provider, Model: *model, BaseURL: *baseURL, API: *api},
+		fallbackFlags,
+	)
 	if serr != nil {
 		logger.Printf("%v", serr)
 		os.Exit(1)
@@ -260,7 +267,7 @@ func main() {
 		CompactChars: *compactChars,
 		Fallbacks:    fallbacks,
 	}
-	trustedProviders, err := trustedPluginProviders(globalCfg, setFlags, flagProvider, flagModel, flagBaseURL, fallbackFlags)
+	trustedProviders, err := trustedPluginProviders(globalCfg, setFlags, flagSlot, fallbackFlags)
 	if err != nil {
 		logger.Printf("plugin providers: %v", err)
 		os.Exit(1)

@@ -22,7 +22,8 @@ provider can serve the same conversation.
 ### 1. The provider chain is a list of named slots
 
 A config file may declare `providers` (a list of
-`{id, provider, model, base_url, api_key}` entries) and
+`{id, provider, model, base_url, api_key, api}` entries; `api` is
+described in ADR-0024) and
 `default_provider_id`. The default entry is the primary slot; the
 remaining entries back it up in listed order. Entries of the same provider
 type are allowed. The flat `provider`/`model`/`base_url` keys and the

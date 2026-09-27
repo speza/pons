@@ -216,14 +216,22 @@ go run ./cmd/pons -login
 go run ./cmd/pons -message "inspect this project"
 ```
 
-The supported provider names are `anthropic`, `openai`, `codex`,
-`openai-responses`, and `opencode-go`. Codex uses a ChatGPT subscription.
-`opencode-go` uses an [OpenCode Go](https://opencode.ai/docs/go/)
-subscription key from `OPENCODE_API_KEY`; set `model` to any Go model ID
-(for example `glm-5.3` or `qwen3.8-max`, default `kimi-k3`) and pons picks
-the matching wire format by model family. If it guesses wrong for a new
-model, set `"api": "chat" | "messages" | "responses"` on that entry in the
-`providers` or `fallbacks` list. For a temporary provider override, use flags:
+Providers are presets over three wire APIs (`anthropic-messages`,
+`openai-completions`, `openai-responses`):
+
+| Provider | Key | Notes |
+| --- | --- | --- |
+| `anthropic` | `ANTHROPIC_API_KEY` | |
+| `openai` | `OPENAI_API_KEY` | Also any OpenAI-compatible server via `base_url` |
+| `codex` | `-login` | ChatGPT subscription |
+| `opencode-go` | `OPENCODE_API_KEY` | [OpenCode Go](https://opencode.ai/docs/go/) subscription; the API is picked per model family |
+| `openrouter` | `OPENROUTER_API_KEY` | Default model `openrouter/auto` |
+
+`api` (or `-api`) overrides the wire format for a slot, for example
+`"provider": "openai", "api": "openai-responses"`, or an OpenCode Go model
+the family guess gets wrong. `base_url` is the API root as the provider
+documents it, usually ending in `/v1`. For a temporary provider override,
+use flags:
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-…

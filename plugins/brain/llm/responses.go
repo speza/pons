@@ -4,8 +4,8 @@
 //   - the ChatGPT-subscription backend (provider "codex"): base URL
 //     https://chatgpt.com/backend-api/codex, Bearer token + ChatGPT-Account-ID
 //     codex auth-file auth, refreshed in memory when expired/401
-//   - api.openai.com/v1/responses with a plain API key (provider
-//     "openai-responses")
+//   - any Responses endpoint with a plain API key (api
+//     "openai-responses", e.g. OpenAI or OpenCode Go)
 package llm
 
 import (
