@@ -30,8 +30,8 @@ nothing about hosts or credentials.
 ### 2. Providers are presets
 
 A provider is a preset: default base URL, key environment variable,
-default model, default API, and optionally extra headers. Presets today are `anthropic`, `openai`, `codex`,
-`opencode-go`, and `openrouter`. Any OpenAI- or Anthropic-compatible
+default model, default API, and optionally extra headers. Presets today
+are `anthropic`, `openai`, `codex`, `opencode-go`, and `openrouter`. Any OpenAI- or Anthropic-compatible
 server is `openai` or `anthropic` with a `base_url`. `openai-responses` is
 no longer a provider; it is `openai` with `api: openai-responses`.
 
@@ -46,8 +46,8 @@ catalog use the preset's default.
 ### 4. Any slot may override the API
 
 Provider entries, fallbacks, the flat config, and the `-api` flag accept
-`api`. An empty value uses the catalog, then the preset default. `codex` accepts only `openai-responses`, since its login is for
-that endpoint.
+`api`. An empty value uses the catalog, then the preset default. `codex`
+accepts only `openai-responses`, since its login is for that endpoint.
 
 ### 5. pons owns credentials
 
