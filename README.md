@@ -567,8 +567,11 @@ make test-integration  # compiled server with hands under Seatbelt (macOS)
 ```
 
 Install the local lint tool once if needed with `make install-tools`.
-`make smoke-runtime` is a separate live-provider and Seatbelt check; it is not
-part of the default suite.
+`make smoke-runtime` is a separate live-provider and Seatbelt check;
+`make smoke-providers` checks that a provider's models each call a tool and
+answer (default: OpenCode Go, one model per wire API; pass others with
+`SMOKE_ARGS='openrouter openrouter/auto'`). Neither is part of the default
+suite.
 
 Architecture decisions and protocol details live in [`docs/`](docs/),
 including the [runtime design](docs/design/runtime.md) and the

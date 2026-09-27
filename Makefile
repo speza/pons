@@ -7,7 +7,7 @@ GOLANGCI_LINT_VERSION ?= v2.13.2
 LINT_GOTOOLCHAIN ?= go1.27.1
 E2B_CLI_VERSION ?= 2.20.0
 
-.PHONY: catalog fmt fmt-check test test-race require-darwin test-integration test-integration-race test-integration-e2b vet lint check eval-classifier install-tools smoke-runtime smoke-e2b cleanup-e2b cleanup-e2b-all build-e2b-hands e2b-template web-install web-check web-build
+.PHONY: catalog fmt fmt-check test test-race require-darwin test-integration test-integration-race test-integration-e2b vet lint check eval-classifier install-tools smoke-runtime smoke-providers smoke-e2b cleanup-e2b cleanup-e2b-all build-e2b-hands e2b-template web-install web-check web-build
 
 fmt:
 	@if [ -n "$(GO_FILES)" ]; then gofmt -w $(GO_FILES); fi
@@ -66,6 +66,11 @@ eval-classifier:
 
 smoke-runtime:
 	./scripts/smoke-runtime.sh
+
+# Live check of a provider across models, e.g.
+# make smoke-providers SMOKE_ARGS='openrouter openrouter/auto'
+smoke-providers:
+	./scripts/smoke-providers.sh $(SMOKE_ARGS)
 
 smoke-e2b:
 	./scripts/smoke-e2b.sh
