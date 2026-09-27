@@ -15,6 +15,7 @@ import (
 	"github.com/samperrin/pons"
 	"github.com/samperrin/pons/internal/hookeval"
 	"github.com/samperrin/pons/plugins/actionpolicy"
+	"github.com/samperrin/pons/plugins/brain/llm"
 	"github.com/samperrin/pons/plugins/external"
 	"github.com/samperrin/pons/plugins/hostconfig"
 )
@@ -55,7 +56,7 @@ func runEval(ctx context.Context, args []string, stdout, stderr io.Writer, home 
 	if err != nil {
 		return err
 	}
-	providers, err := trustedPluginProviders(global, map[string]bool{}, "anthropic", "", "", nil)
+	providers, err := trustedPluginProviders(global, map[string]bool{}, llm.Fallback{Provider: "anthropic"}, nil)
 	if err != nil {
 		return fmt.Errorf("plugin providers: %w", err)
 	}

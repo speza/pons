@@ -4,8 +4,8 @@
 //   - the ChatGPT-subscription backend (provider "codex"): base URL
 //     https://chatgpt.com/backend-api/codex, Bearer token + ChatGPT-Account-ID
 //     codex auth-file auth, refreshed in memory when expired/401
-//   - api.openai.com/v1/responses with a plain API key (provider
-//     "openai-responses")
+//   - any Responses endpoint with a plain API key (api
+//     "openai-responses", e.g. OpenAI or OpenCode Go)
 package llm
 
 import (
@@ -34,6 +34,7 @@ type responsesClient struct {
 	auth      *codexAuth // subscription mode (nil in API-key mode)
 	apiKey    string     // API-key mode
 	baseURL   string
+	extra     []option.RequestOption
 }
 
 func (c *responsesClient) Complete(ctx context.Context, system string, turns []Turn, tools []pons.ToolSpec) (Turn, error) {
@@ -81,6 +82,7 @@ func (c *responsesClient) tryComplete(
 	if accountID != "" {
 		opts = append(opts, option.WithHeader("chatgpt-account-id", accountID))
 	}
+	opts = append(opts, c.extra...)
 	params := responses.ResponseNewParams{
 		Model:             shared.ResponsesModel(c.model),
 		Instructions:      param.NewOpt(system),

@@ -24,11 +24,12 @@ type openaiClient struct {
 	maxTokens int
 }
 
-func newOpenAIClient(key, baseURL string, maxTokens int) *openaiClient {
+func newOpenAIClient(key, baseURL string, maxTokens int, extra ...oopt.RequestOption) *openaiClient {
 	opts := []oopt.RequestOption{
 		oopt.WithMaxRetries(0),
 		oopt.WithHTTPClient(defaultHTTPClient()),
 	}
+	opts = append(opts, extra...)
 	if key != "" {
 		opts = append(opts, oopt.WithAPIKey(key))
 	}

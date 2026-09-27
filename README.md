@@ -216,9 +216,22 @@ go run ./cmd/pons -login
 go run ./cmd/pons -message "inspect this project"
 ```
 
-The supported provider names are `anthropic`, `openai`, `codex`, and
-`openai-responses`. Codex uses a ChatGPT subscription. For a temporary
-provider override, use flags:
+Providers are presets over three wire APIs (`anthropic-messages`,
+`openai-completions`, `openai-responses`):
+
+| Provider | Key | Notes |
+| --- | --- | --- |
+| `anthropic` | `ANTHROPIC_API_KEY` | |
+| `openai` | `OPENAI_API_KEY` | Also any OpenAI-compatible server via `base_url` |
+| `codex` | `-login` | ChatGPT subscription |
+| `opencode-go` | `OPENCODE_API_KEY` | [OpenCode Go](https://opencode.ai/docs/go/) subscription; the API is picked per model from a models.dev catalog (`make catalog`) |
+| `openrouter` | `OPENROUTER_API_KEY` | Default model `openrouter/auto` |
+
+`api` (or `-api`) overrides the wire format for a slot, for example
+`"provider": "openai", "api": "openai-responses"`, or an OpenCode Go model
+newer than the catalog. `base_url` is the API root as the provider
+documents it, usually ending in `/v1`. For a temporary provider override,
+use flags:
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-…
@@ -565,8 +578,11 @@ make test-integration  # compiled server with hands under Seatbelt (macOS)
 ```
 
 Install the local lint tool once if needed with `make install-tools`.
-`make smoke-runtime` is a separate live-provider and Seatbelt check; it is not
-part of the default suite.
+`make smoke-runtime` is a separate live-provider and Seatbelt check;
+`make smoke-providers` checks that a provider's models each call a tool and
+answer (default: OpenCode Go, one model per wire API; pass others with
+`SMOKE_ARGS='openrouter openrouter/auto'`). Neither is part of the default
+suite.
 
 Architecture decisions and protocol details live in [`docs/`](docs/),
 including the [runtime design](docs/design/runtime.md) and the

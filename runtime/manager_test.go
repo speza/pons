@@ -81,6 +81,25 @@ func (s claimErrorStore) ClaimRunnable(context.Context) (*ponsruntime.ClaimedRun
 	return nil, s.err
 }
 
+// interruptedClaimStore holds the first real claim until shutdown, then
+// fails the way the SQLite driver does: with its own error, not
+// context.Canceled.
+type interruptedClaimStore struct {
+	ponsruntime.Store
+	claiming chan struct{}
+	once     sync.Once
+}
+
+func (s *interruptedClaimStore) ClaimRunnable(ctx context.Context) (*ponsruntime.ClaimedRun, error) {
+	claim, err := s.Store.ClaimRunnable(ctx)
+	if err != nil || claim == nil {
+		return claim, err
+	}
+	s.once.Do(func() { close(s.claiming) })
+	<-ctx.Done()
+	return nil, errors.New("sqlite3: interrupted")
+}
+
 type observingStore struct {
 	ponsruntime.Store
 	conversationReads atomic.Int32
@@ -637,6 +656,47 @@ func TestConversationSerializesMessagesAndDeduplicates(t *testing.T) {
 		if events[i].ID <= events[i-1].ID {
 			t.Fatalf("non-monotonic cursors: %+v", events)
 		}
+	}
+}
+
+func TestShutdownInterruptingAClaimIsNotReported(t *testing.T) {
+	base, err := runtimesqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	store := &interruptedClaimStore{Store: base, claiming: make(chan struct{})}
+	reported := make(chan error, 1)
+	manager, err := New(Config{
+		Agent:          testAgent,
+		AgentRevisions: testRevisions,
+		Store:          store,
+		Runner:         RunnerFunc(func(context.Context, RunRequest) (RunResult, error) { return RunResult{}, nil }),
+		OnError:        func(err error) { reported <- err },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := manager.CreateConversation(context.Background(), ponsruntime.ConversationOptions{Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Submit(context.Background(), conversation.ID, "key", []TextPart{{Type: "text", Text: "go"}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-store.claiming:
+	case <-time.After(3 * time.Second):
+		t.Fatal("scheduler never claimed")
+	}
+
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-reported:
+		t.Fatalf("shutdown reported a background failure: %v", err)
+	default:
 	}
 }
 

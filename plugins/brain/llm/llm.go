@@ -9,8 +9,9 @@
 //   - A text-only response (no tool calls) is the finish signal.
 //
 // The conversation is modeled with a sealed Block interface — invalid
-// content states are unrepresentable. Provider adapters (anthropic, openai)
-// translate that model to their wire formats; the brain↔hands protocol
+// content states are unrepresentable. API adapters (anthropic, openai,
+// responses) translate that model to their wire formats, and provider
+// presets (presets.go) pick an adapter per model; the brain↔hands protocol
 // carries action arguments as typed JSON bytes and leaves decoding to tools.
 package llm
 
@@ -21,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"runtime"
 	"slices"
 	"strings"
@@ -81,10 +81,11 @@ type Client interface {
 // slot's credentials live under; the rest configures one provider.
 type Fallback struct {
 	ID       string // stable name (e.g. "codex-personal"); optional
-	Provider string // "anthropic", "openai", "codex", "openai-responses"
+	Provider string // a preset name: "anthropic", "openai", "codex", "opencode-go", "openrouter"
 	Model    string
 	BaseURL  string
 	APIKey   string // falls back to the provider's env key
+	API      string // wire format override (APIAnthropicMessages, …); empty uses the preset's choice
 }
 
 // failoverClient tries provider slots in order. The conversation model
@@ -121,11 +122,15 @@ func (f *failoverClient) Complete(ctx context.Context, system string, turns []Tu
 
 // Config tunes the brain.
 type Config struct {
-	ID        string // primary slot's stable name, as in Fallback.ID; empty = "primary"
-	Provider  string // "anthropic", "openai", "codex" (ChatGPT subscription), "openai-responses"
-	Model     string // provider-specific; defaults per provider
-	APIKey    string // falls back to ANTHROPIC_API_KEY / OPENAI_API_KEY
-	BaseURL   string // override the provider endpoint
+	ID       string // primary slot's stable name, as in Fallback.ID; empty = "primary"
+	Provider string // a preset name, as in Fallback.Provider
+	Model    string // provider-specific; defaults per provider
+	APIKey   string // falls back to the preset's key env var
+	BaseURL  string // override the provider endpoint
+	API      string // wire format override, as in Fallback.API
+	// SessionID is a stable conversation ID that providers may use for
+	// routing and prompt caching (opencode-go requires one).
+	SessionID string
 	MaxTokens int    // default 4096
 	Persona   string // the agent's identity; empty uses a neutral default
 	// Memory, when set, adds the harness rules for keeping memory and loads
@@ -201,6 +206,7 @@ func New(cfg Config) (*Brain, error) {
 		Model:    cfg.Model,
 		BaseURL:  cfg.BaseURL,
 		APIKey:   cfg.APIKey,
+		API:      cfg.API,
 	})
 	slots = append(slots, cfg.Fallbacks...)
 
@@ -208,7 +214,7 @@ func New(cfg Config) (*Brain, error) {
 	names := make([]string, 0, len(slots))
 	var model string
 	for i, slot := range slots {
-		c, m, err := providerClient(slot, b.maxTokens())
+		c, m, err := providerClient(slot, b.maxTokens(), cfg.SessionID)
 		if err != nil {
 			if i == 0 {
 				return nil, err
@@ -230,107 +236,10 @@ func New(cfg Config) (*Brain, error) {
 	return b, nil
 }
 
-// providerClient builds one provider slot: key resolution from env, the
-// provider's default model and endpoint, and the Client constructor.
-// codex slots resolve credentials from the pons auth store; entries are
-// keyed by slot id.
-func providerClient(slot Fallback, maxTokens int) (Client, string, error) {
-	provider := slot.Provider
-	if provider == "" {
-		provider = "anthropic"
-	}
-	switch provider {
-	case "anthropic":
-		key := slot.APIKey
-		if key == "" {
-			key = os.Getenv("ANTHROPIC_API_KEY")
-		}
-		if key == "" {
-			return nil, "", errors.New("llm: no API key — set ANTHROPIC_API_KEY (or Config.APIKey)")
-		}
-		model := slot.Model
-		if model == "" {
-			model = "claude-sonnet-4-5"
-		}
-		baseURL := slot.BaseURL
-		if baseURL == "" {
-			baseURL = "https://api.anthropic.com"
-		}
-		ac := newAnthropicClient(key, baseURL, maxTokens)
-		ac.model = model
-		return ac, model, nil
-	case "codex":
-		// ChatGPT-subscription auth from pons's auth store (~/.pons/auth.json,
-		// created by --login -as <id>; refreshed tokens are written back to it).
-		authPath, derr := DefaultCodexAuthPath()
-		if derr != nil {
-			return nil, "", derr
-		}
-		// Auth resolution: the slot's own id names the store entry —
-		// login with -as <id> to match. Synthetic slot ids (unnamed
-		// primary, ad-hoc flag) resolve to the default "codex" entry,
-		// which is what a bare --login writes.
-		authID := slot.ID
-		switch slot.ID {
-		case "", "primary", "flag":
-			authID = LegacyAuthID
-		}
-		auth, err := loadCodexAuth(authPath, authID)
-		if err != nil {
-			return nil, "", err
-		}
-		model := slot.Model
-		if model == "" {
-			model = "gpt-5.6-terra"
-		}
-		baseURL := slot.BaseURL
-		if baseURL == "" {
-			baseURL = codexBaseURL
-		}
-		return &responsesClient{auth: auth, baseURL: baseURL, model: model, maxTokens: maxTokens}, model, nil
-	case "openai-responses":
-		// Responses API with a plain API key.
-		key := slot.APIKey
-		if key == "" {
-			key = os.Getenv("OPENAI_API_KEY")
-		}
-		if key == "" {
-			return nil, "", errors.New("llm: no API key — set OPENAI_API_KEY (or Config.APIKey)")
-		}
-		model := slot.Model
-		if model == "" {
-			model = "gpt-5.6-terra"
-		}
-		baseURL := slot.BaseURL
-		if baseURL == "" {
-			baseURL = "https://api.openai.com/v1"
-		}
-		return &responsesClient{apiKey: key, baseURL: baseURL, model: model, maxTokens: maxTokens}, model, nil
-	case "openai":
-		key := slot.APIKey
-		if key == "" {
-			key = os.Getenv("OPENAI_API_KEY") // empty is fine for local servers
-		}
-		model := slot.Model
-		if model == "" {
-			model = "gpt-4o-mini"
-		}
-		baseURL := slot.BaseURL
-		if baseURL == "" {
-			baseURL = "https://api.openai.com/v1"
-		}
-		oc := newOpenAIClient(key, baseURL, maxTokens)
-		oc.model = model
-		return oc, model, nil
-	default:
-		return nil, "", fmt.Errorf("llm: unknown provider %q (want \"anthropic\", \"openai\", \"codex\", or \"openai-responses\")", provider)
-	}
-}
-
 // NewProviderClient resolves one configured provider for trusted host plugins.
 // It uses the same credentials and transport as the brain, without failover.
 func NewProviderClient(slot Fallback) (Client, error) {
-	client, _, err := providerClient(slot, 0)
+	client, _, err := providerClient(slot, 0, "")
 	return client, err
 }
 

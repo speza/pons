@@ -14,12 +14,14 @@ import (
 //
 //   - With a config providers list and no -provider flag: the
 //     defaultProviderId entry is primary and the remaining entries back it
-//     up in listed order. --model/--base-url flags still override the
+//     up in listed order. --model/--base-url/--api flags still override the
 //     primary entry's own fields.
 //   - With -provider set (or no providers list): the flags define the
 //     primary; the config providers all back it up.
 //   - -fallback flags replace the backup list in both cases.
-func providerSlots(cfg settings, flagSet map[string]bool, flagProvider, flagModel, flagBaseURL string, flagFallbacks []string) ([]llm.Fallback, error) {
+//
+// flags carries the -provider, -model, -base-url, and -api values.
+func providerSlots(cfg settings, flagSet map[string]bool, flags llm.Fallback, flagFallbacks []string) ([]llm.Fallback, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -35,7 +37,8 @@ func providerSlots(cfg settings, flagSet map[string]bool, flagProvider, flagMode
 			// Explicit -provider is ad-hoc: it defines the primary from the
 			// flags alone (fresh credentials from env), and the declared
 			// providers back it up.
-			primary = llm.Fallback{ID: "flag", Provider: flagProvider, Model: flagModel, BaseURL: flagBaseURL}
+			primary = flags
+			primary.ID = "flag"
 			for _, p := range ordered {
 				backups = append(backups, toFallback(p))
 			}
@@ -43,21 +46,25 @@ func providerSlots(cfg settings, flagSet map[string]bool, flagProvider, flagMode
 			p := ordered[0]
 			primary = toFallback(p)
 			if flagSet["model"] {
-				primary.Model = flagModel
+				primary.Model = flags.Model
 			}
 			if flagSet["base-url"] {
-				primary.BaseURL = flagBaseURL
+				primary.BaseURL = flags.BaseURL
+			}
+			if flagSet["api"] {
+				primary.API = flags.API
 			}
 			for _, q := range ordered[1:] {
 				backups = append(backups, toFallback(q))
 			}
 		}
 	} else {
-		primary = llm.Fallback{ID: "primary", Provider: flagProvider, Model: flagModel, BaseURL: flagBaseURL}
+		primary = flags
+		primary.ID = "primary"
 		for _, f := range cfg.Fallbacks {
 			backups = append(backups, llm.Fallback{
 				ID: f.Provider, Provider: f.Provider, Model: f.Model, BaseURL: f.BaseURL,
-				APIKey: f.APIKey,
+				APIKey: f.APIKey, API: f.API,
 			})
 		}
 	}
@@ -81,7 +88,7 @@ func providerSlots(cfg settings, flagSet map[string]bool, flagProvider, flagMode
 func toFallback(p providerSettings) llm.Fallback {
 	return llm.Fallback{
 		ID: p.ID, Provider: p.Provider, Model: p.Model, BaseURL: p.BaseURL,
-		APIKey: p.APIKey,
+		APIKey: p.APIKey, API: p.API,
 	}
 }
 
@@ -104,19 +111,22 @@ func pluginProviders(cfg settings, primary llm.Fallback) map[string]llm.Fallback
 func trustedPluginProviders(
 	global settings,
 	setFlags map[string]bool,
-	provider, model, baseURL string,
+	flags llm.Fallback,
 	fallbacks []string,
 ) (map[string]llm.Fallback, error) {
 	if !setFlags["provider"] && global.Provider != nil {
-		provider = *global.Provider
+		flags.Provider = *global.Provider
 	}
 	if !setFlags["model"] && global.Model != nil {
-		model = *global.Model
+		flags.Model = *global.Model
 	}
 	if !setFlags["base-url"] && global.BaseURL != nil {
-		baseURL = *global.BaseURL
+		flags.BaseURL = *global.BaseURL
 	}
-	slots, err := providerSlots(global, setFlags, provider, model, baseURL, fallbacks)
+	if !setFlags["api"] && global.API != nil {
+		flags.API = *global.API
+	}
+	slots, err := providerSlots(global, setFlags, flags, fallbacks)
 	if err != nil {
 		return nil, err
 	}
