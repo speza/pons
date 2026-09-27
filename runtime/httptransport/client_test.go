@@ -6,12 +6,65 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/samperrin/pons/protocol"
 	ponsruntime "github.com/samperrin/pons/runtime"
 )
+
+func TestClientStreamsLargeAcceptedInputAndToolResult(t *testing.T) {
+	for _, kind := range []string{"accepted input", "tool result"} {
+		t.Run(kind, func(t *testing.T) {
+			runtime := &fakeRuntime{
+				accepted: ponsruntime.AcceptedMessage{ConversationID: "conversation", InboundMessageID: "input"},
+			}
+			server := httptest.NewServer(Handler(runtime))
+			defer server.Close()
+			client := Client{BaseURL: server.URL}
+			event := ponsruntime.Event{ID: 1, ConversationID: "conversation", InboundMessageID: "input"}
+			if kind == "accepted input" {
+				// The HTTP body fits its 1 MiB ingress limit; the persisted
+				// event adds source, identity, and revision metadata.
+				parts := []ponsruntime.TextPart{{Type: "text", Text: strings.Repeat("x", (1<<20)-100)}}
+				if _, err := client.Submit(t.Context(), "conversation", "key", parts); err != nil {
+					t.Fatal(err)
+				}
+				event.Type = ponsruntime.EventInputAccepted
+				event.Input = &ponsruntime.UserInput{
+					IdempotencyKey: "key", Parts: runtime.submitted,
+					Source:        ponsruntime.InputSource{Kind: "human", Adapter: "http"},
+					TargetAgentID: "default", AgentRevision: strings.Repeat("a", 64),
+				}
+			} else {
+				event.Type = ponsruntime.EventToolOutcomeRecorded
+				event.ToolOutcome = &ponsruntime.ToolOutcome{
+					ID: "result", ToolCallID: "call", ToolKind: "read_file", Status: ponsruntime.ToolCompleted,
+					Result: &protocol.ToolResult{ActionID: "call", Kind: "read_file", OK: true, Output: strings.Repeat("x", 2<<20)},
+				}
+			}
+			runtime.events = []ponsruntime.Event{event}
+			stream, errs, closeStream, err := client.Events(t.Context(), "conversation", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer closeStream()
+			var received []ponsruntime.Event
+			for event := range stream {
+				received = append(received, event)
+			}
+			for err := range errs {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(received, runtime.events) {
+				t.Fatalf("received %d events; expected complete %s", len(received), kind)
+			}
+		})
+	}
+}
 
 // The client and handler share routes and wire shapes, so exercise the
 // client against the real handler rather than a hand-written server.

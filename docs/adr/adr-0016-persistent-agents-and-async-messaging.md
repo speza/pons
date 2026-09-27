@@ -79,6 +79,13 @@ work uses the current one. A revision whose snapshot is missing or does not
 match its fingerprint fails closed rather than running under changed
 authority or falling back to another agent.
 
+The current server prepares one hands launch configuration at startup. It
+rejects a queued revision whose recorded hands plugin list differs from that
+configuration before provisioning a sandbox. Restoring the recorded list or
+submitting new work resolves this mismatch. Plugin paths are recorded, not
+snapshots of the plugin files; credentials and host policy remain current
+administrative configuration.
+
 A definition references provider and credential slots by name and never
 contains secrets. Models cannot create or edit definitions. Additional agents,
 for example one per household member, use the same definitions and are

@@ -437,6 +437,67 @@ func TestClaimReplaysCompactionAndCommittedModelOutput(t *testing.T) {
 	}
 }
 
+func TestClaimReplaysCommittedToolCallsWithProviderItems(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := t.Context()
+	conversation := ponsruntime.Conversation{
+		ID: "rewritten-call", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC(),
+	}
+	if err := store.CreateConversation(ctx, conversation); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := acceptInput(store, ctx, conversation.ID, "first", []ponsruntime.TextPart{{Type: "text", Text: "first"}}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.ClaimRunnable(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opaque := json.RawMessage(`{"type":"reasoning","encrypted_content":"opaque"}`)
+	if err := store.AppendAgentEvent(ctx, first.Run, ponsruntime.Event{
+		Type: ponsruntime.EventModelCompleted,
+		ModelOutput: &ponsruntime.ModelOutput{Turn: 1, Content: []ponsruntime.AgentContent{
+			{Type: "text"},
+			{Type: "provider_item", Item: opaque},
+			{Type: "text", Text: "Inspecting the file."},
+			{Type: "tool_call", ToolCallID: "proposed-id", ToolKind: "read_file", Arguments: json.RawMessage(`{"path":"original"}`)},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CommitAssistantTurn(ctx, first.Run, []ponsruntime.MessagePart{
+		{Type: "text", Text: "Inspecting the file."},
+		{Type: "tool_call", ToolCallID: "committed-id", ToolKind: "read_file", Arguments: json.RawMessage(`{"path":"rewritten"}`)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ToolCompleted(ctx, first.Run, protocol.ToolResult{ActionID: "committed-id", Kind: "read_file", OK: true, Output: "file contents"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinishRun(ctx, first.Run, "done"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := acceptInput(store, ctx, conversation.ID, "second", []ponsruntime.TextPart{{Type: "text", Text: "continue"}}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.ClaimRunnable(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ponsruntime.ContextTurn{Role: "assistant", Content: []ponsruntime.AgentContent{
+		{Type: "provider_item", Item: opaque},
+		{Type: "text", Text: "Inspecting the file."},
+		{Type: "tool_call", ToolCallID: "committed-id", ToolKind: "read_file", Arguments: json.RawMessage(`{"path":"rewritten"}`)},
+	}}
+	if len(second.Context) != 4 || !reflect.DeepEqual(second.Context[1], want) {
+		t.Fatalf("replayed context = %+v, want committed assistant turn %+v", second.Context, want)
+	}
+}
+
 func TestClaimProjectsContextFromStartOfLog(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {

@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/samperrin/pons/environment"
 	"github.com/samperrin/pons/internal/toolhost"
@@ -94,6 +97,38 @@ func TestSeatbeltIntegration(t *testing.T) {
 	data, err := os.ReadFile(workspace + "/sandbox.txt")
 	if err != nil || string(data) != "inside" {
 		t.Fatalf("workspace file = %q, err = %v", data, err)
+	}
+
+	// Cancellation must work from inside Seatbelt, including descendants in
+	// bash's per-call process group rather than only the hands process itself.
+	started := time.Now()
+	timedOut, err := session.Execute(t.Context(), protocol.Action{
+		ID: "timeout", Kind: "bash",
+		Args: protocol.MustArgsJSON(map[string]any{"command": "sleep 3 & wait", "timeout": 1}),
+	})
+	if err != nil || timedOut.OK || !strings.Contains(timedOut.Error, "timed out") {
+		t.Fatalf("sandboxed timeout = %+v, err = %v", timedOut, err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("Seatbelt prevented child process cancellation: %s", elapsed)
+	}
+	hostProcess := exec.Command("/bin/sleep", "30")
+	if err := hostProcess.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = hostProcess.Process.Kill()
+		_ = hostProcess.Wait()
+	})
+	outsideSignal, err := session.Execute(t.Context(), protocol.Action{
+		ID: "outside-signal", Kind: "bash",
+		Args: protocol.MustArgsJSON(map[string]any{
+			"command": "kill -0 " + strconv.Itoa(hostProcess.Process.Pid),
+			"timeout": 5,
+		}),
+	})
+	if err != nil || outsideSignal.ExitCode == 0 || !strings.Contains(outsideSignal.Output, "Operation not permitted") {
+		t.Fatalf("sandbox could signal an unrelated host process: %+v, err = %v", outsideSignal, err)
 	}
 
 	outside, err := session.Execute(context.Background(), protocol.Action{

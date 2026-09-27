@@ -94,7 +94,8 @@ func Archive(tree Tree) ([]byte, error) {
 // changed are written and files removed are deleted. Files the run did not
 // touch are left as they are now, even if they changed since base, and a
 // removed file is kept when it changed since base, so a concurrent edit is
-// never lost to a delete. It returns the changed paths.
+// never lost to a delete. Directory-to-file replacement requires Unix. It
+// returns the changed paths.
 func Apply(dir string, base Digests, result Tree) ([]string, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
@@ -102,20 +103,15 @@ func Apply(dir string, base Digests, result Tree) ([]string, error) {
 	}
 	defer root.Close()
 
-	var changed []string
-	for _, name := range slices.Sorted(maps.Keys(result)) {
-		data := result[name]
-		if previous, ok := base[name]; ok && previous == sha256.Sum256(data) {
-			continue
-		}
+	for name := range result {
 		if !safeName(name) {
-			return changed, fmt.Errorf("dirsync: unsafe path %q", name)
+			return nil, fmt.Errorf("dirsync: unsafe path %q", name)
 		}
-		if err := writeFile(root, name, data); err != nil {
-			return changed, err
-		}
-		changed = append(changed, name)
 	}
+
+	var changed []string
+	// Retire unchanged source files before installing replacements: a deleted
+	// file may be an ancestor of a new path, or a child of a replacement file.
 	for _, name := range slices.Sorted(maps.Keys(base)) {
 		if _, ok := result[name]; ok || !safeName(name) {
 			continue
@@ -135,7 +131,47 @@ func Apply(dir string, base Digests, result Tree) ([]string, error) {
 		}
 		changed = append(changed, name)
 	}
+	for _, name := range slices.Sorted(maps.Keys(result)) {
+		data := result[name]
+		if previous, ok := base[name]; ok && previous == sha256.Sum256(data) {
+			continue
+		}
+		if info, err := root.Lstat(name); err == nil && info.IsDir() {
+			if err := removeEmptyDirectories(root, name); err != nil {
+				return changed, fmt.Errorf("dirsync: replace directory %s: %w", name, err)
+			}
+		}
+		if err := writeFile(root, name, data); err != nil {
+			return changed, err
+		}
+		changed = append(changed, name)
+	}
+	slices.Sort(changed)
 	return changed, nil
+}
+
+// Only empty directories may give way to a replacement file. Regular files
+// changed or added by another run, and links skipped by Read, must survive.
+func removeEmptyDirectories(root *os.Root, name string) error {
+	var directories []string
+	if err := fs.WalkDir(root.FS(), name, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			return fmt.Errorf("path %s still contains %s", name, path)
+		}
+		directories = append(directories, path)
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, directory := range slices.Backward(directories) {
+		if err := removeDirectory(root, directory); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // writeFile replaces one file through the root, so neither the path nor a

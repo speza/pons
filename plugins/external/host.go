@@ -411,7 +411,13 @@ func (h *Host) connect(ctx context.Context) (Connection, error) {
 
 	return Connection{
 		Stdin: stdin, Stdout: stdout, Stderr: stderr,
-		Wait: cmd.Wait,
+		Wait: func() error {
+			err := cmd.Wait()
+			// A clean parent exit does not establish that its helpers exited.
+			// Finish the local process group before reporting the endpoint done.
+			killProcess(cmd)
+			return err
+		},
 		Kill: func() error {
 			killProcess(cmd)
 			return nil

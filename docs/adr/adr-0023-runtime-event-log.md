@@ -80,6 +80,10 @@ message is excluded from replay. Prepared input events replace the plain
 admitted message in projected context. Without a checkpoint, the same
 projection starts at the beginning of the log. The store gives the runner one
 ordered context value, with checkpoint context followed by projected events.
+Committed assistant output owns the replayed semantic parts, including tool
+identity and arguments after preflight hooks. Private model output contributes
+opaque provider items at their original positions; its earlier proposal never
+replaces the committed calls that actually executed.
 Committed assistant output and accepted input cover runners that do not emit
 private model or prepared-input events.
 

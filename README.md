@@ -337,6 +337,12 @@ Built-in tools never run in the server process. Each run starts the
 `pons-hands` tool host in a sandbox, and the sandbox alone decides what the
 tools can reach. There is no unsandboxed mode.
 
+Each `bash` call owns its Unix process group and stops that group when the
+command finishes, times out, or is cancelled. Background services in that group
+stop with the call.
+Command output is captured in a bounded tail; truncated output can be read
+from a spill file containing at most the last 8 MiB.
+
 On macOS the default is Seatbelt, which runs `pons-hands` in a fresh
 environment for each run with only the workspace, a scratch directory, and the
 agent's memory writable, and no network unless `-sandbox-network` is set. It
@@ -532,7 +538,8 @@ The sandbox enforces that, so the agent cannot change `agent.json`,
 `PERSONA.md`, or `revisions/`. Seatbelt grants `memory/` in place. E2B copies
 it into the sandbox at `/home/user/.pons/memory` when a run starts and writes
 back the files the run changed when it ends; links in the sandbox copy are not
-synced back.
+synced back. Replacing a memory directory with a file requires a Unix server
+host; other platforms reject that replacement.
 
 An agent without a name says so when asked, rather than using the model's own
 name. While `PERSONA.md` is empty, the agent introduces itself as new and asks
@@ -550,7 +557,11 @@ credentials. The server writes it once to `revisions/<revision>.json` in the
 agent directory. Every submission and run records the revision it was
 accepted under, so work queued before an edit still runs under the old
 revision. Work whose revision snapshot is missing or altered fails rather
-than running under the current one.
+than running under the current one. If the server's hands plugin list has
+changed, queued work also fails before starting its sandbox; restore the
+recorded plugin list or submit new work under the current configuration.
+Revisions record plugin paths, not copies of plugin files. Credentials and
+host-side policy use the current server configuration.
 
 Codex credentials are stored with restrictive permissions in
 `~/.pons/auth.json`. A Codex slot in the `providers` list uses the credential

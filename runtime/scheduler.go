@@ -28,19 +28,17 @@ func (m *Manager) schedule() {
 // claim therefore always has a bounded run goroutine ready to own it locally.
 func (m *Manager) dispatch() {
 	for m.reserveSlot() {
+		m.claimPublication.Lock()
 		claim, err := m.store.ClaimRunnable(m.ctx)
-		if err != nil {
+		if err != nil || claim == nil {
+			m.claimPublication.Unlock()
 			m.releaseSlot(false)
 			// Shutdown interrupts an in-flight claim, and drivers report
 			// that in their own words (SQLite: "interrupted"), not always
 			// as context.Canceled.
-			if m.ctx.Err() == nil {
+			if err != nil && m.ctx.Err() == nil {
 				m.report(fmt.Errorf("runtime: claim runnable work: %w", err))
 			}
-			return
-		}
-		if claim == nil {
-			m.releaseSlot(false)
 			return
 		}
 
@@ -55,6 +53,7 @@ func (m *Manager) dispatch() {
 		live.mu.Lock()
 		live.broadcastLocked(claim.Events...)
 		live.mu.Unlock()
+		m.claimPublication.Unlock()
 
 		m.wg.Add(1)
 		go live.work(ctx, cancel, claim)

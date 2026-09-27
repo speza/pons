@@ -123,9 +123,9 @@ func (f *failoverClient) Complete(ctx context.Context, system string, turns []Tu
 // Config tunes the brain.
 type Config struct {
 	ID       string // primary slot's stable name, as in Fallback.ID; empty = "primary"
-	Provider string // "anthropic", "openai", "codex" (ChatGPT subscription), "openai-responses", "opencode-go"
+	Provider string // a preset name, as in Fallback.Provider
 	Model    string // provider-specific; defaults per provider
-	APIKey   string // falls back to ANTHROPIC_API_KEY / OPENAI_API_KEY
+	APIKey   string // falls back to the preset's key env var
 	BaseURL  string // override the provider endpoint
 	API      string // wire format override, as in Fallback.API
 	// SessionID is a stable conversation ID that providers may use for
