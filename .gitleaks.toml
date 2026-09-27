@@ -1,0 +1,7 @@
+# Default rules, plus files known to hold only public data.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Model IDs generated from the public models.dev catalog"
+paths = ['''plugins/brain/llm/catalog_gen\.go''']

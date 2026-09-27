@@ -38,8 +38,8 @@ func TestProvidersRouteModelsToTheirAPI(t *testing.T) {
 		provider, model, api, base, path string
 	}{
 		{"opencode-go", "opencode-go/kimi-k3", "", "/v1", "/v1/chat/completions"},
-		{"opencode-go", "qwen3.8-max", "", "/v1", "/v1/messages"},
-		{"opencode-go", "MiniMax-M3", "", "/v1/", "/v1/messages"},
+		{"opencode-go", "qwen3.8-flash", "", "/v1", "/v1/messages"},
+		{"opencode-go", "minimax-m3", "", "/v1/", "/v1/messages"},
 		{"opencode-go", "grok-4.7", "", "/v1", "/v1/responses"},
 		{"opencode-go", "union-alpha", APIAnthropicMessages, "/v1", "/v1/messages"},
 		{"openrouter", "openrouter/auto", "", "/v1", "/v1/chat/completions"},

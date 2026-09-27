@@ -2,8 +2,11 @@
 // format (an adapter in anthropic.go, openai.go, or responses.go); a
 // provider is data — where to send requests, which key to use, and which
 // API each model speaks. Gateways such as OpenCode Go or OpenRouter are
-// presets over the same adapters, not new code paths.
+// presets over the same adapters, not new code paths. Models that differ
+// from their preset's API are listed in catalog_gen.go.
 package llm
+
+//go:generate go run gen_catalog.go
 
 import (
 	"crypto/rand"
@@ -33,10 +36,9 @@ type preset struct {
 	// modelPrefix is dropped from model IDs copied from other tools'
 	// configs (e.g. OpenCode's "opencode-go/kimi-k3").
 	modelPrefix string
-	api         string
-	// modelAPI, when set, picks the API per model; a slot's API field
-	// still overrides it.
-	modelAPI func(model string) string
+	// api is the default wire API; catalog_gen.go overrides it per model
+	// and a slot's API field overrides both.
+	api string
 	// headers are sent with every request; session is a stable
 	// conversation ID (random when the caller has none).
 	headers func(session string) map[string]string
@@ -71,7 +73,6 @@ var presets = map[string]preset{
 		model:       "kimi-k3",
 		modelPrefix: "opencode-go/",
 		api:         APIOpenAICompletions,
-		modelAPI:    openCodeGoAPI,
 		// OpenCode Go asks clients to name themselves and to send a stable
 		// session per conversation for routing and prompt caching.
 		headers: func(session string) map[string]string {
@@ -114,8 +115,8 @@ func providerClient(slot Fallback, maxTokens int, sessionID string) (Client, str
 		baseURL = p.baseURL
 	}
 	api := slot.API
-	if api == "" && p.modelAPI != nil {
-		api = p.modelAPI(model)
+	if api == "" {
+		api = catalog[name][model]
 	}
 	if api == "" {
 		api = p.api
@@ -214,24 +215,6 @@ func providerNames() []string {
 	}
 	slices.Sort(names)
 	return names
-}
-
-// openCodeGoAPI maps a model to the API OpenCode Go serves it over, by
-// model family. Unknown families use Chat Completions, which covers most of
-// the catalog.
-func openCodeGoAPI(model string) string {
-	model = strings.ToLower(model)
-	for _, prefix := range []string{"minimax-", "qwen"} {
-		if strings.HasPrefix(model, prefix) {
-			return APIAnthropicMessages
-		}
-	}
-	for _, prefix := range []string{"grok-", "gpt-", "muse-"} {
-		if strings.HasPrefix(model, prefix) {
-			return APIOpenAIResponses
-		}
-	}
-	return APIOpenAICompletions
 }
 
 // userAgent names pons and its module version ("dev" for local builds).

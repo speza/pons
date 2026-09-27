@@ -224,12 +224,12 @@ Providers are presets over three wire APIs (`anthropic-messages`,
 | `anthropic` | `ANTHROPIC_API_KEY` | |
 | `openai` | `OPENAI_API_KEY` | Also any OpenAI-compatible server via `base_url` |
 | `codex` | `-login` | ChatGPT subscription |
-| `opencode-go` | `OPENCODE_API_KEY` | [OpenCode Go](https://opencode.ai/docs/go/) subscription; the API is picked per model family |
+| `opencode-go` | `OPENCODE_API_KEY` | [OpenCode Go](https://opencode.ai/docs/go/) subscription; the API is picked per model from a models.dev catalog (`make catalog`) |
 | `openrouter` | `OPENROUTER_API_KEY` | Default model `openrouter/auto` |
 
 `api` (or `-api`) overrides the wire format for a slot, for example
 `"provider": "openai", "api": "openai-responses"`, or an OpenCode Go model
-the family guess gets wrong. `base_url` is the API root as the provider
+newer than the catalog. `base_url` is the API root as the provider
 documents it, usually ending in `/v1`. For a temporary provider override,
 use flags:
 
