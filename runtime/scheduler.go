@@ -31,7 +31,10 @@ func (m *Manager) dispatch() {
 		claim, err := m.store.ClaimRunnable(m.ctx)
 		if err != nil {
 			m.releaseSlot(false)
-			if !errors.Is(err, context.Canceled) {
+			// Shutdown interrupts an in-flight claim, and drivers report
+			// that in their own words (SQLite: "interrupted"), not always
+			// as context.Canceled.
+			if m.ctx.Err() == nil {
 				m.report(fmt.Errorf("runtime: claim runnable work: %w", err))
 			}
 			return
