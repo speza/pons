@@ -41,6 +41,11 @@ cd "$repo_root"
 mkdir -p .build
 go build -o .build/pons ./cmd/pons
 
+# A tiny workspace: sandboxes that copy the workspace in (E2B) cap its size.
+workspace="$work_dir/workspace"
+mkdir -p "$workspace"
+cp go.mod "$workspace/"
+
 prompt='Use the read_file tool to read go.mod. If its module line is exactly "module github.com/samperrin/pons", reply with exactly SMOKE_OK and nothing else. Otherwise reply with exactly SMOKE_FAILED and nothing else.'
 
 failed=()
@@ -54,6 +59,8 @@ for model in "${models[@]}"; do
 		-provider "$provider" \
 		-model "$model" \
 		-state-dir "$state_dir" \
+		-workspace "$workspace" \
+		-workspace-root "$work_dir" \
 		-message "$prompt" >"$output_file" 2>&1; then
 		:
 	fi
