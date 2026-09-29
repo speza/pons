@@ -5,11 +5,13 @@
 //	agents/<id>/PERSONA.md         free-form persona instructions
 //	agents/<id>/revisions/<sha>.json  immutable snapshots of resolved definitions
 //	agents/<id>/memory/            the agent's own notes: MEMORY.md and topic files
+//	agents/<id>/workspace/         the agent's files under the agent workspace policy
 //
 // The owner edits agent.json and PERSONA.md; the runtime only reads them at
-// startup. The agent maintains memory/ itself; it is the only part of the
-// directory a run's hands are granted. Revision snapshots are content-addressed and write-once, so work
-// accepted under a revision can still resolve it after the files change.
+// startup. The agent maintains memory/ and workspace/ itself; they are the
+// only parts of the directory a run's hands are granted. Revision snapshots
+// are content-addressed and write-once, so work accepted under a revision can
+// still resolve it after the files change.
 package agentdir
 
 import (
@@ -33,6 +35,7 @@ const (
 	PersonaFile  = "PERSONA.md"
 	MemoryDir    = "memory"
 	MemoryIndex  = "MEMORY.md"
+	WorkspaceDir = "workspace"
 	revisionsDir = "revisions"
 
 	// DefaultMemoryBudget bounds the hydrated MEMORY.md in bytes.
@@ -46,6 +49,8 @@ type Settings struct {
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
 	MaxTurns int    `json:"max_turns"`
+	// Workspace is the workspace policy; empty means the agent policy.
+	Workspace string `json:"workspace"`
 }
 
 // Store reads agent directories and records their revisions.
@@ -70,18 +75,21 @@ func (s *Store) Dir(agentID string) string {
 }
 
 // Load returns an agent's settings and trimmed persona. On first start it
-// creates the directory with a default agent.json and an empty PERSONA.md;
-// existing files are never overwritten.
+// creates the directory with a default agent.json, an empty PERSONA.md, and
+// an empty workspace; existing files are never overwritten. The returned
+// settings carry a resolved workspace policy.
 func (s *Store) Load(agentID string) (Settings, string, error) {
-	if err := (ponsruntime.AgentDefinition{ID: agentID}).Validate(); err != nil {
+	if err := ponsruntime.ValidateAgentID(agentID); err != nil {
 		return Settings{}, "", err
 	}
 	dir := s.Dir(agentID)
-	if err := os.MkdirAll(filepath.Join(dir, revisionsDir), 0o700); err != nil {
-		return Settings{}, "", fmt.Errorf("agents: create %s: %w", dir, err)
+	for _, sub := range []string{revisionsDir, WorkspaceDir} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o700); err != nil {
+			return Settings{}, "", fmt.Errorf("agents: create %s: %w", dir, err)
+		}
 	}
 
-	defaults, err := json.MarshalIndent(Settings{}, "", "  ")
+	defaults, err := json.MarshalIndent(Settings{Workspace: ponsruntime.WorkspaceAgent}, "", "  ")
 	if err != nil {
 		return Settings{}, "", err
 	}
@@ -130,7 +138,7 @@ func (s *Store) Record(definition ponsruntime.AgentDefinition) error {
 // AgentRevision resolves a recorded revision. It fails when the snapshot is
 // missing, malformed, or no longer matches its fingerprint.
 func (s *Store) AgentRevision(_ context.Context, agentID, revision string) (ponsruntime.AgentDefinition, error) {
-	if err := (ponsruntime.AgentDefinition{ID: agentID}).Validate(); err != nil {
+	if err := ponsruntime.ValidateAgentID(agentID); err != nil {
 		return ponsruntime.AgentDefinition{}, err
 	}
 	if decoded, err := hex.DecodeString(revision); err != nil || len(decoded) != 32 {
@@ -151,6 +159,16 @@ func (s *Store) AgentRevision(_ context.Context, agentID, revision string) (pons
 	return definition, nil
 }
 
+// Workspace returns the resolved path of the agent's own workspace, creating
+// it if needed. Like memory, it must be a real directory: a link could widen
+// the grant to the rest of the agent directory.
+func (s *Store) Workspace(agentID string) (string, error) {
+	if err := ponsruntime.ValidateAgentID(agentID); err != nil {
+		return "", err
+	}
+	return realDirectory(filepath.Join(s.Dir(agentID), WorkspaceDir))
+}
+
 // Memory is an agent's memory directory and its index as hydrated into a
 // run. Index is data the agent or owner wrote, never instructions.
 type Memory struct {
@@ -164,26 +182,20 @@ type Memory struct {
 // widen a grant to the rest of the agent directory. A MEMORY.md that is not a
 // regular file hydrates as empty rather than following it.
 func (s *Store) Memory(agentID string, budget int) (Memory, error) {
-	if err := (ponsruntime.AgentDefinition{ID: agentID}).Validate(); err != nil {
+	if err := ponsruntime.ValidateAgentID(agentID); err != nil {
 		return Memory{}, err
 	}
 	if budget <= 0 {
 		budget = DefaultMemoryBudget
 	}
 	dir := filepath.Join(s.Dir(agentID), MemoryDir)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return Memory{}, fmt.Errorf("agents: create %s: %w", dir, err)
-	}
-	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
-		return Memory{}, fmt.Errorf("agents: %s must be a directory", dir)
+	resolved, err := realDirectory(dir)
+	if err != nil {
+		return Memory{}, err
 	}
 	indexPath := filepath.Join(dir, MemoryIndex)
 	if err := createIfMissing(indexPath, nil); err != nil {
 		return Memory{}, err
-	}
-	resolved, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		return Memory{}, fmt.Errorf("agents: resolve %s: %w", dir, err)
 	}
 
 	memory := Memory{Path: resolved}
@@ -201,6 +213,22 @@ func (s *Store) Memory(agentID string, budget int) (Memory, error) {
 	}
 	memory.Index, memory.Truncated = truncateIndex(strings.ToValidUTF8(string(data), "\uFFFD"), budget)
 	return memory, nil
+}
+
+// realDirectory creates dir if missing, requires it to be a directory rather
+// than a link, and returns its resolved path.
+func realDirectory(dir string) (string, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("agents: create %s: %w", dir, err)
+	}
+	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+		return "", fmt.Errorf("agents: %s must be a directory", dir)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", fmt.Errorf("agents: resolve %s: %w", dir, err)
+	}
+	return resolved, nil
 }
 
 // truncateIndex cuts text to at most limit bytes, preferring a line boundary
@@ -240,6 +268,14 @@ func readSettings(path string) (Settings, error) {
 	}
 	if settings.MaxTurns < 0 {
 		return Settings{}, fmt.Errorf("agents: %s: max_turns must not be negative", path)
+	}
+	switch settings.Workspace {
+	case "":
+		settings.Workspace = ponsruntime.WorkspaceAgent
+	case ponsruntime.WorkspaceAgent, ponsruntime.WorkspacePerConversation:
+	default:
+		return Settings{}, fmt.Errorf("agents: %s: workspace must be %q or %q, not %q",
+			path, ponsruntime.WorkspaceAgent, ponsruntime.WorkspacePerConversation, settings.Workspace)
 	}
 	return settings, nil
 }

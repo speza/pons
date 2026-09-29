@@ -145,8 +145,11 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 		requestNumber++
 		inboundID := fmt.Sprintf("inbound-%d", requestNumber)
 		req := ponsruntime.RunRequest{
-			Agent:          ponsruntime.AgentDefinition{ID: ponsruntime.DefaultAgentID, Model: "test", MaxTurns: 3},
-			ConversationID: "conversation-1", InboundMessageID: inboundID,
+			Agent: ponsruntime.AgentDefinition{
+				ID: ponsruntime.DefaultAgentID, Model: "test", MaxTurns: 3,
+				WorkspacePolicy: ponsruntime.WorkspacePerConversation,
+			},
+			ConversationID: "conversation-1", WorkspaceID: "conversation-1", InboundMessageID: inboundID,
 			RunID: fmt.Sprintf("run-%d", requestNumber), Text: text,
 			GitRepository: "https://github.com/acme/a.git", GitRevision: strings.Repeat("a", 40),
 			Emit: func(event ponsruntime.RunEvent) error {
@@ -373,7 +376,7 @@ func TestRuntimeServerShutdownClosesActiveSSE(t *testing.T) {
 		}), started)
 	}()
 	serverURL := <-started
-	response, err := http.Post(serverURL+"/v1/conversations", "application/json", strings.NewReader(fmt.Sprintf(`{"workspace":%q}`, workspace)))
+	response, err := http.Post(serverURL+"/v1/conversations", "application/json", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -647,7 +650,8 @@ func TestDefaultAgentResolvesDirectoryAndExcludesCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	if fresh.ID != ponsruntime.DefaultAgentID || fresh.Name != "" || fresh.Persona != "" || fresh.Model != "m" ||
-		fresh.MaxTurns != 7 || fresh.ProviderSlot != "primary" || !slices.Equal(fresh.PluginPaths, opts.PluginPaths) {
+		fresh.MaxTurns != 7 || fresh.ProviderSlot != "primary" || !slices.Equal(fresh.PluginPaths, opts.PluginPaths) ||
+		fresh.WorkspacePolicy != ponsruntime.WorkspaceAgent {
 		t.Fatalf("fresh agent = %+v", fresh)
 	}
 	if _, err := agents.AgentRevision(context.Background(), fresh.ID, fresh.Revision()); err != nil {
@@ -655,14 +659,14 @@ func TestDefaultAgentResolvesDirectoryAndExcludesCredentials(t *testing.T) {
 	}
 
 	dir := agents.Dir(ponsruntime.DefaultAgentID)
-	write(t, filepath.Join(dir, "agent.json"), `{"name":"Ada","provider":"backup","max_turns":4}`)
+	write(t, filepath.Join(dir, "agent.json"), `{"name":"Ada","provider":"backup","max_turns":4,"workspace":"per_conversation"}`)
 	write(t, filepath.Join(dir, "PERSONA.md"), "# Not a name\n\nBe brief.\n")
 	agent, err := defaultAgent(opts, agents)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if agent.Name != "Ada" || agent.Persona != "# Not a name\n\nBe brief." || agent.ProviderSlot != "backup" ||
-		agent.Model != "backup-model" || agent.MaxTurns != 4 {
+		agent.Model != "backup-model" || agent.MaxTurns != 4 || agent.WorkspacePolicy != ponsruntime.WorkspacePerConversation {
 		t.Fatalf("configured agent = %+v", agent)
 	}
 	encoded, err := json.Marshal(agent)
@@ -740,6 +744,7 @@ func TestAgentRunnerRejectsChangedRevisionPlugins(t *testing.T) {
 		Workspace: workspace, Environment: "seatbelt", Text: "queued work",
 		Agent: ponsruntime.AgentDefinition{
 			ID: "default", ProviderSlot: "primary", PluginPaths: []string{"/plugins/old.json"},
+			WorkspacePolicy: ponsruntime.WorkspacePerConversation,
 		},
 	}
 	_, err := runner.Run(context.Background(), request)
@@ -802,7 +807,7 @@ func TestEditedPersonaChangesIdentityAfterRestart(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		err := runBundled(ctx, newServerLogger(io.Discard, false), testServerOptions(serverOptions{
-			StateDir: stateDir, WorkspaceRoot: os.TempDir(), ClientWorkspace: t.TempDir(), MaxTurns: 3, MaxConcurrent: 1,
+			StateDir: stateDir, WorkspaceRoot: os.TempDir(), MaxTurns: 3, MaxConcurrent: 1,
 			Brain: llm.Config{Provider: "openai", Model: "test", APIKey: "test", BaseURL: provider.URL + "/v1"},
 		}), "", "", "who are you?", false)
 		if err != nil {

@@ -57,7 +57,7 @@ func main() {
 	model := flag.String("model", "", "model id (default: provider default)")
 	baseURL := flag.String("base-url", "", "override provider endpoint (for OpenAI-compatible servers)")
 	api := flag.String("api", "", "wire format: anthropic-messages | openai-completions | openai-responses (default: chosen by provider and model)")
-	workspace := flag.String("workspace", "", "host workspace selected for a new local, Seatbelt, or E2B archive conversation (default: current directory)")
+	workspace := flag.String("workspace", "", "host workspace selected for a new conversation when the agent's workspace policy is per_conversation (default: current directory)")
 	workspaceRoot := flag.String("workspace-root", "", "server-approved root for client-selected host workspaces (default: home directory)")
 	stateDir := flag.String("state-dir", "", "runtime state directory (default: ~/.pons/runtime/server/)")
 	compactChars := flag.Int("compact-chars", 0, "conversation size (chars) before auto-compaction; 0 = default ~400k, negative = off")
@@ -115,13 +115,11 @@ func main() {
 		GitRepository: *gitRepository, GitRevision: selectedGitRevision,
 		GitAllRepositories: *gitAllRepositories,
 	}
-	if *conversationID == "" && *gitRepository == "" {
-		selected := *workspace
-		if selected == "" {
-			selected = "."
-		}
+	// Without --workspace, the client picks the current directory only if the
+	// server's agent asks for a per-conversation workspace.
+	if *conversationID == "" && *workspace != "" {
 		var err error
-		conversationOptions.Workspace, err = filepath.Abs(selected)
+		conversationOptions.Workspace, err = filepath.Abs(*workspace)
 		if err != nil {
 			logger.Printf("workspace: %v", err)
 			os.Exit(1)

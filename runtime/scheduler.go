@@ -125,6 +125,7 @@ func (c *liveConversation) execute(
 		ConversationID:     c.conversation.ID,
 		RunID:              claim.Run.ID,
 		InboundMessageID:   claim.Message.ID,
+		WorkspaceID:        c.conversation.WorkspaceID,
 		Workspace:          c.conversation.Workspace,
 		Environment:        c.conversation.Environment,
 		GitRepository:      c.conversation.GitRepository,

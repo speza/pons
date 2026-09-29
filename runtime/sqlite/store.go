@@ -22,9 +22,9 @@ import (
 
 const (
 	runtimeDBName = "runtime.db"
-	// Version 11 drops the in-process "none" environment: older databases
-	// may hold conversations that can no longer run.
-	currentSchemaVersion = 11
+	// Version 12 records each conversation's logical workspace ID, fixed at
+	// creation by the agent's workspace policy.
+	currentSchemaVersion = 12
 )
 
 // Store is the local, exclusive-manager runtime backend. Its transactions
@@ -104,6 +104,7 @@ WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`).Scan(&tableCount); err != ni
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL CHECK (agent_id <> ''),
+  workspace_id TEXT NOT NULL CHECK (workspace_id <> ''),
   workspace TEXT NOT NULL,
   workspace_lock TEXT NOT NULL,
   git_repository TEXT NOT NULL DEFAULT '',
@@ -422,9 +423,13 @@ func (s *Store) CreateConversation(ctx context.Context, conversation ponsruntime
 	if workspaceLock == "" {
 		workspaceLock = conversation.Workspace
 	}
+	workspaceID := conversation.WorkspaceID
+	if workspaceID == "" {
+		workspaceID = conversation.ID
+	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO conversations(id, agent_id, workspace, workspace_lock, git_repository, git_revision, git_all_repositories, environment, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		conversation.ID, conversation.AgentID, conversation.Workspace, workspaceLock, conversation.GitRepository, conversation.GitRevision,
+		`INSERT INTO conversations(id, agent_id, workspace_id, workspace, workspace_lock, git_repository, git_revision, git_all_repositories, environment, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		conversation.ID, conversation.AgentID, workspaceID, conversation.Workspace, workspaceLock, conversation.GitRepository, conversation.GitRevision,
 		conversation.GitAllRepositories, conversation.Environment, encodeTime(conversation.CreatedAt))
 
 	if err != nil {
@@ -437,8 +442,8 @@ func (s *Store) Conversation(ctx context.Context, id string) (ponsruntime.Conver
 	var conversation ponsruntime.Conversation
 	var created int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, agent_id, workspace, workspace_lock, git_repository, git_revision, git_all_repositories, environment, created_at FROM conversations WHERE id = ?`, id,
-	).Scan(&conversation.ID, &conversation.AgentID, &conversation.Workspace, &conversation.WorkspaceLock, &conversation.GitRepository, &conversation.GitRevision,
+		`SELECT id, agent_id, workspace_id, workspace, workspace_lock, git_repository, git_revision, git_all_repositories, environment, created_at FROM conversations WHERE id = ?`, id,
+	).Scan(&conversation.ID, &conversation.AgentID, &conversation.WorkspaceID, &conversation.Workspace, &conversation.WorkspaceLock, &conversation.GitRepository, &conversation.GitRevision,
 		&conversation.GitAllRepositories, &conversation.Environment, &created)
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -453,7 +458,7 @@ func (s *Store) Conversation(ctx context.Context, id string) (ponsruntime.Conver
 
 func (s *Store) Conversations(ctx context.Context) ([]ponsruntime.Conversation, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, agent_id, workspace, workspace_lock, git_repository, git_revision, git_all_repositories, environment, created_at
+SELECT id, agent_id, workspace_id, workspace, workspace_lock, git_repository, git_revision, git_all_repositories, environment, created_at
 FROM conversations
 ORDER BY created_at DESC, id DESC`)
 	if err != nil {
@@ -465,7 +470,7 @@ ORDER BY created_at DESC, id DESC`)
 	for rows.Next() {
 		var conversation ponsruntime.Conversation
 		var created int64
-		if err := rows.Scan(&conversation.ID, &conversation.AgentID, &conversation.Workspace, &conversation.WorkspaceLock, &conversation.GitRepository, &conversation.GitRevision, &conversation.GitAllRepositories, &conversation.Environment, &created); err != nil {
+		if err := rows.Scan(&conversation.ID, &conversation.AgentID, &conversation.WorkspaceID, &conversation.Workspace, &conversation.WorkspaceLock, &conversation.GitRepository, &conversation.GitRevision, &conversation.GitAllRepositories, &conversation.Environment, &created); err != nil {
 			return nil, fmt.Errorf("runtime: list conversations: %w", err)
 		}
 		conversation.CreatedAt = decodeTime(created)
@@ -655,8 +660,8 @@ func conversationTx(ctx context.Context, tx *sql.Tx, id string) (ponsruntime.Con
 	var conversation ponsruntime.Conversation
 	var created int64
 	err := tx.QueryRowContext(ctx,
-		`SELECT id, agent_id, workspace, workspace_lock, git_repository, git_revision, git_all_repositories, environment, created_at FROM conversations WHERE id = ?`, id,
-	).Scan(&conversation.ID, &conversation.AgentID, &conversation.Workspace, &conversation.WorkspaceLock, &conversation.GitRepository, &conversation.GitRevision,
+		`SELECT id, agent_id, workspace_id, workspace, workspace_lock, git_repository, git_revision, git_all_repositories, environment, created_at FROM conversations WHERE id = ?`, id,
+	).Scan(&conversation.ID, &conversation.AgentID, &conversation.WorkspaceID, &conversation.Workspace, &conversation.WorkspaceLock, &conversation.GitRepository, &conversation.GitRevision,
 		&conversation.GitAllRepositories, &conversation.Environment, &created)
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -679,12 +684,12 @@ func (s *Store) ClaimRunnable(ctx context.Context) (*ponsruntime.ClaimedRun, err
 		return nil, err
 	}
 	defer tx.Rollback()
-	var id, conversationID, key, agentRevision, agentID, workspace, workspaceLock, gitRepository, gitRevision, environment string
+	var id, conversationID, key, agentRevision, agentID, workspaceID, workspace, workspaceLock, gitRepository, gitRevision, environment string
 	var gitAllRepositories bool
 	var accepted, conversationCreated int64
 	err = tx.QueryRowContext(ctx, `
 SELECT queued.id, queued.conversation_id, queued.idempotency_key, queued.agent_revision, queued.accepted_at,
-       conversation.agent_id, conversation.workspace, conversation.workspace_lock, conversation.git_repository, conversation.git_revision,
+       conversation.agent_id, conversation.workspace_id, conversation.workspace, conversation.workspace_lock, conversation.git_repository, conversation.git_revision,
        conversation.git_all_repositories, conversation.environment, conversation.created_at
 
 FROM submissions AS queued
@@ -702,7 +707,7 @@ WHERE queued.status = ?
   )
 ORDER BY queued.accepted_at, queued.id
 LIMIT 1`, ponsruntime.RunQueued, ponsruntime.RunRunning, ponsruntime.RunRunning,
-	).Scan(&id, &conversationID, &key, &agentRevision, &accepted, &agentID, &workspace, &workspaceLock, &gitRepository, &gitRevision,
+	).Scan(&id, &conversationID, &key, &agentRevision, &accepted, &agentID, &workspaceID, &workspace, &workspaceLock, &gitRepository, &gitRevision,
 		&gitAllRepositories, &environment, &conversationCreated)
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -775,7 +780,7 @@ VALUES(?, ?, ?, ?, ?, ?, ?)`, run.ID, conversationID, id, id, agentRevision, run
 	}
 	return &ponsruntime.ClaimedRun{
 		Conversation: ponsruntime.Conversation{
-			ID: conversationID, AgentID: agentID, Workspace: workspace, WorkspaceLock: workspaceLock, GitRepository: gitRepository,
+			ID: conversationID, AgentID: agentID, WorkspaceID: workspaceID, Workspace: workspace, WorkspaceLock: workspaceLock, GitRepository: gitRepository,
 			GitRevision: gitRevision, GitAllRepositories: gitAllRepositories, Environment: environment, CreatedAt: createdAt,
 		},
 		Message: ponsruntime.InboundMessage{ID: id, IdempotencyKey: key, Parts: parts, AcceptedAt: acceptedAt},

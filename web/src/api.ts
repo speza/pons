@@ -36,7 +36,7 @@ export function listConversations(signal?: AbortSignal): Promise<Conversation[]>
 }
 
 export interface CreateConversationOptions {
-  environment: string;
+  environment?: string;
   workspace?: string;
   git_repository?: string;
   git_revision?: string;

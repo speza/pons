@@ -259,12 +259,14 @@ go run ./cmd/pons client -i -workspace /path/to/project
 go run ./cmd/pons client -conversation <id> -message "continue"
 ```
 
-The client selects a workspace when creating a conversation; the server does
-not select a project at startup. `client -workspace` defaults to the client's
-current directory. That path must exist on the server host and be inside
-`workspace_root` (the server user's home directory by default). Set
-`"workspace_root"` in the global config to allow other host paths. Git
-conversations select a repository and commit instead; see the
+By default the agent has one workspace of its own, shared by all its
+conversations (see [Agent](#agent)), so a new conversation takes no workspace
+option. When `agent.json` sets `"workspace": "per_conversation"`, the client
+selects a workspace when creating a conversation instead. `client -workspace`
+then defaults to the client's current directory. That path must exist on the
+server host and be inside `workspace_root` (the server user's home directory by
+default). Set `"workspace_root"` in the global config to allow other host
+paths. Git conversations select a repository and commit instead; see the
 [Git workspace guide](docs/design/git-workspaces.md).
 
 The server reads `~/.pons/config.json`. A standalone `serve` process does not
@@ -314,8 +316,10 @@ make web-build
 go run ./cmd/pons serve --debug
 ```
 
-Open `http://127.0.0.1:7337/` in a browser. Choose a sandbox and a source,
-then select **New conversation**. With E2B, the Git source takes a
+Open `http://127.0.0.1:7337/` in a browser and select **New conversation**.
+Under the default `agent` workspace policy there is nothing to choose: the
+conversation uses the agent's workspace. Under `per_conversation`, choose a
+sandbox and a source first. With E2B, the Git source takes a
 credential-free HTTPS repository URL and either a branch name or a full
 40-character commit SHA. Pons uses the branch tip when it first provisions the
 workspace, then creates a separate work branch. E2B can also upload a host
@@ -519,13 +523,22 @@ restart the server to change the agent.
     "name": "Ada",
     "provider": "",
     "model": "",
-    "max_turns": 0
+    "max_turns": 0,
+    "workspace": "agent"
   }
   ```
 
-  `provider` names a configured provider slot. A malformed file stops the
+  `provider` names a configured provider slot. `workspace` is the workspace
+  policy: `agent` (the default when empty) gives every conversation the
+  agent's own `workspace/` directory; `per_conversation` lets each new
+  conversation pick a host directory or Git repository. A conversation keeps
+  the workspace it was created with when the policy changes. Conversations
+  sharing the agent workspace run one at a time. The `agent` policy is Seatbelt
+  only for now; on E2B, set `per_conversation`. A malformed file stops the
   server from starting.
 - `PERSONA.md` holds free-form instructions, used verbatim.
+- `workspace/` holds the agent's own files under the `agent` policy. They
+  persist across conversations and server restarts.
 - `memory/` holds the agent's own notes: `MEMORY.md`, an index with one line
   per topic, and one file per topic. The agent keeps these up to date itself,
   and each conversation starts with `MEMORY.md` (up to 16 KiB) as reference
@@ -533,9 +546,9 @@ restart the server to change the agent.
   compacted. You can read or edit the files, but you
   shouldn't need to. Memory has no history of its own.
 
-Runs are granted only `memory/`, never the rest of the agent directory.
-The sandbox enforces that, so the agent cannot change `agent.json`,
-`PERSONA.md`, or `revisions/`. Seatbelt grants `memory/` in place. E2B copies
+Runs are granted only `workspace/` (under the `agent` policy) and `memory/`,
+never the rest of the agent directory. The sandbox enforces that, so the agent
+cannot read or change `agent.json`, `PERSONA.md`, or `revisions/`. Seatbelt grants `memory/` in place. E2B copies
 it into the sandbox at `/home/user/.pons/memory` when a run starts and writes
 back the files the run changed when it ends; links in the sandbox copy are not
 synced back. Replacing a memory directory with a file requires a Unix server

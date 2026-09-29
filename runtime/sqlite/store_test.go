@@ -54,6 +54,38 @@ func TestOpenRejectsOlderExistingDatabase(t *testing.T) {
 	}
 }
 
+func TestConversationWorkspaceIDRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	conversation := ponsruntime.Conversation{
+		ID: ponsruntime.NewID(), AgentID: testAgent.ID, WorkspaceID: "agent-default",
+		WorkspaceLock: "agent-default", Environment: "seatbelt", CreatedAt: time.Now().UTC(),
+	}
+	if err := store.CreateConversation(ctx, conversation); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := acceptInput(store, ctx, conversation.ID, "k", []ponsruntime.TextPart{{Type: "text", Text: "go"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	read, err := store.Conversation(ctx, conversation.ID)
+	if err != nil || read.WorkspaceID != "agent-default" || read.WorkspaceLock != "agent-default" {
+		t.Fatalf("conversation = %+v, %v", read, err)
+	}
+	listed, err := store.Conversations(ctx)
+	if err != nil || len(listed) != 1 || listed[0].WorkspaceID != "agent-default" {
+		t.Fatalf("conversations = %+v, %v", listed, err)
+	}
+	claim, err := store.ClaimRunnable(ctx)
+	if err != nil || claim == nil || claim.Conversation.WorkspaceID != "agent-default" {
+		t.Fatalf("claim = %+v, %v", claim, err)
+	}
+}
+
 func TestOpenConfiguresBusyTimeout(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {

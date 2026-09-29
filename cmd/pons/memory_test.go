@@ -114,7 +114,7 @@ func bundledRun(t *testing.T, stateDir, providerURL, message string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	err := runBundled(ctx, newServerLogger(io.Discard, false), testServerOptions(serverOptions{
-		StateDir: stateDir, WorkspaceRoot: os.TempDir(), ClientWorkspace: t.TempDir(), MaxTurns: 4, MaxConcurrent: 1,
+		StateDir: stateDir, WorkspaceRoot: os.TempDir(), MaxTurns: 4, MaxConcurrent: 1,
 		Brain: llm.Config{Provider: "openai", Model: "test", APIKey: "test", BaseURL: providerURL + "/v1"},
 	}), "", "", message, false)
 	if err != nil {
@@ -220,8 +220,10 @@ func remoteMemoryRun(t *testing.T, execution remoteMemoryEnvironment, grants []s
 	}, logger: newServerLogger(io.Discard, false), agents: agents}
 
 	_, err = runner.Run(context.Background(), ponsruntime.RunRequest{
-		Agent:          ponsruntime.AgentDefinition{ID: "default", Model: "test", MaxTurns: 2},
-		ConversationID: "conversation-1", RunID: "run-1", Text: "hi",
+		Agent: ponsruntime.AgentDefinition{
+			ID: "default", Model: "test", MaxTurns: 2, WorkspacePolicy: ponsruntime.WorkspacePerConversation,
+		},
+		ConversationID: "conversation-1", WorkspaceID: "conversation-1", RunID: "run-1", Text: "hi",
 		GitRepository: "https://github.com/acme/a.git", GitRevision: strings.Repeat("a", 40),
 		Emit: func(ponsruntime.RunEvent) error { return nil },
 	})

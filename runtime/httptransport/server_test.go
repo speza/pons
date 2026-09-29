@@ -209,7 +209,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestHandlerExposesAgentReadOnly(t *testing.T) {
-	agent := ponsruntime.AgentSummary{ID: "default", Name: "Ada"}
+	agent := ponsruntime.AgentSummary{ID: "default", Name: "Ada", WorkspacePolicy: ponsruntime.WorkspaceAgent}
 	runtime := &fakeRuntime{view: ponsruntime.ConversationView{
 		Conversation: ponsruntime.Conversation{ID: "conversation-1", AgentID: "default"},
 		Agent:        agent,
@@ -217,8 +217,8 @@ func TestHandlerExposesAgentReadOnly(t *testing.T) {
 	handler := HandlerWithOptions(runtime, HandlerOptions{Agent: agent})
 
 	for path, want := range map[string]string{
-		"/v1/options":                      `"agent":{"id":"default","name":"Ada"}`,
-		"/v1/conversations/conversation-1": `"agent":{"id":"default","name":"Ada"}`,
+		"/v1/options":                      `"agent":{"id":"default","name":"Ada","workspace_policy":"agent"}`,
+		"/v1/conversations/conversation-1": `"agent":{"id":"default","name":"Ada","workspace_policy":"agent"}`,
 	} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))

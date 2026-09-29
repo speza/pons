@@ -23,9 +23,11 @@ type Config struct {
 	Agent          AgentDefinition
 	AgentRevisions AgentRevisions
 
-	Store               Store
-	Runner              Runner
-	PrepareConversation func(ConversationOptions) (ConversationOptions, error)
+	Store  Store
+	Runner Runner
+	// PrepareConversation validates and normalizes a new conversation's
+	// options under the given agent's workspace policy.
+	PrepareConversation func(AgentDefinition, ConversationOptions) (ConversationOptions, error)
 	MaxConcurrent       int
 	EnvironmentOptions  []string
 	DefaultEnvironment  string
@@ -110,9 +112,19 @@ func New(cfg Config) (*Manager, error) {
 	return m, nil
 }
 
+// CreateConversation fixes the new conversation's workspace from the current
+// agent's workspace policy. Under the agent policy the server owns the
+// workspace: the client chooses no source, and the conversation runs in the
+// default environment so the agent's workspace lives in one provider.
 func (m *Manager) CreateConversation(ctx context.Context, selected ConversationOptions) (Conversation, error) {
 	if err := m.checkOpen(); err != nil {
 		return Conversation{}, err
+	}
+	agentWorkspace := m.cfg.Agent.WorkspacePolicy == WorkspaceAgent
+	if agentWorkspace {
+		if err := rejectWorkspaceChoice(selected, m.cfg.DefaultEnvironment); err != nil {
+			return Conversation{}, err
+		}
 	}
 	environment, err := m.environment(selected.Environment)
 	if err != nil {
@@ -121,12 +133,12 @@ func (m *Manager) CreateConversation(ctx context.Context, selected ConversationO
 	selected.Environment = environment
 	if m.cfg.PrepareConversation != nil {
 		var err error
-		selected, err = m.cfg.PrepareConversation(selected)
+		selected, err = m.cfg.PrepareConversation(m.cfg.Agent, selected)
 		if err != nil {
 			return Conversation{}, fmt.Errorf("%w: %w", ErrInvalidConversation, err)
 		}
 	}
-	if selected.Workspace == "" && selected.GitRepository == "" {
+	if !agentWorkspace && selected.Workspace == "" && selected.GitRepository == "" {
 		return Conversation{}, fmt.Errorf("%w: workspace or Git repository is required", ErrInvalidConversation)
 	}
 	if selected.Workspace != "" && selected.GitRepository != "" {
@@ -142,8 +154,13 @@ func (m *Manager) CreateConversation(ctx context.Context, selected ConversationO
 		Environment:        selected.Environment,
 		CreatedAt:          time.Now().UTC().Truncate(time.Microsecond),
 	}
+	value.WorkspaceID = value.ID
 	value.WorkspaceLock = value.Workspace
-	if selected.Environment == "e2b" || selected.GitRepository != "" {
+	switch {
+	case agentWorkspace:
+		value.WorkspaceID = AgentWorkspaceID(value.AgentID)
+		value.WorkspaceLock = value.WorkspaceID
+	case selected.Environment == "e2b" || selected.GitRepository != "":
 		value.WorkspaceLock = value.ID
 	}
 
@@ -154,6 +171,20 @@ func (m *Manager) CreateConversation(ctx context.Context, selected ConversationO
 		return Conversation{}, err
 	}
 	return value, nil
+}
+
+// rejectWorkspaceChoice enforces that the agent policy takes no per-conversation
+// workspace, Git source, or non-default environment.
+func rejectWorkspaceChoice(selected ConversationOptions, defaultEnvironment string) error {
+	if selected.Workspace != "" || selected.GitRepository != "" || selected.GitRevision != "" || selected.GitAllRepositories {
+		return fmt.Errorf("%w: the agent uses its own workspace; workspace and Git options are not accepted", ErrInvalidConversation)
+	}
+	requested := strings.TrimSpace(selected.Environment)
+	if requested != "" && requested != strings.TrimSpace(defaultEnvironment) {
+		return fmt.Errorf("%w: the agent's workspace lives in %q; environment %q is not accepted",
+			ErrInvalidConversation, defaultEnvironment, requested)
+	}
+	return nil
 }
 
 func (m *Manager) environment(requested string) (string, error) {

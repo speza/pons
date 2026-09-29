@@ -1,11 +1,15 @@
 export interface AgentSummary {
   id: string;
   name?: string;
+  // "agent": the agent owns one workspace shared by its conversations.
+  // "per_conversation": each new conversation picks its own source.
+  workspace_policy?: "agent" | "per_conversation";
 }
 
 export interface Conversation {
   conversation_id: string;
   agent_id: string;
+  workspace_id: string;
   workspace: string;
   environment?: string;
   git_repository?: string;

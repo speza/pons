@@ -147,7 +147,11 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 		return err
 	}
 	logger.Info("agent ready", "agent_id", agent.ID, "agent_name", agent.Name,
-		"agent_revision", agent.Revision(), "agent_dir", agents.Dir(agent.ID))
+		"agent_revision", agent.Revision(), "agent_dir", agents.Dir(agent.ID),
+		"workspace_policy", agent.WorkspacePolicy)
+	if agent.WorkspacePolicy == ponsruntime.WorkspaceAgent && opts.Sandbox == "e2b" {
+		logger.Warn("new conversations will fail: " + errAgentWorkspaceE2B.Error())
+	}
 
 	environmentOptions := []string{opts.Sandbox}
 	network := opts.EnvironmentSpec.Network
@@ -166,7 +170,15 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 		MaxConcurrent:      opts.MaxConcurrent,
 		EnvironmentOptions: environmentOptions,
 		DefaultEnvironment: opts.Sandbox,
-		PrepareConversation: func(selection ponsruntime.ConversationOptions) (ponsruntime.ConversationOptions, error) {
+		PrepareConversation: func(agent ponsruntime.AgentDefinition, selection ponsruntime.ConversationOptions) (ponsruntime.ConversationOptions, error) {
+			if agent.WorkspacePolicy == ponsruntime.WorkspaceAgent {
+				// The server owns the agent's workspace; Manager has already
+				// rejected any client choice.
+				if opts.Sandbox == "e2b" {
+					return selection, errAgentWorkspaceE2B
+				}
+				return selection, nil
+			}
 			if (selection.GitRepository == "") != (selection.GitRevision == "") {
 				return selection, errors.New("git repository and revision must be set together")
 			}
@@ -304,19 +316,24 @@ func defaultAgent(opts serverOptions, agents *agentdir.Store) (ponsruntime.Agent
 	}
 
 	agent := ponsruntime.AgentDefinition{
-		ID:           ponsruntime.DefaultAgentID,
-		Name:         settings.Name,
-		Persona:      persona,
-		ProviderSlot: slot,
-		Model:        model,
-		MaxTurns:     maxTurns,
-		PluginPaths:  slices.Clone(opts.PluginPaths),
+		ID:              ponsruntime.DefaultAgentID,
+		Name:            settings.Name,
+		Persona:         persona,
+		ProviderSlot:    slot,
+		Model:           model,
+		MaxTurns:        maxTurns,
+		PluginPaths:     slices.Clone(opts.PluginPaths),
+		WorkspacePolicy: settings.Workspace,
 	}
 	if err := agents.Record(agent); err != nil {
 		return ponsruntime.AgentDefinition{}, err
 	}
 	return agent, nil
 }
+
+// errAgentWorkspaceE2B marks the gap until E2B can seed an empty agent
+// workspace (agent workspaces spec, delivery step 2).
+var errAgentWorkspaceE2B = errors.New(`agent workspaces are not yet supported on E2B; set "workspace": "per_conversation" in the agent's agent.json`)
 
 func fallbackIndex(fallbacks []llm.Fallback, id string) int {
 	return slices.IndexFunc(fallbacks, func(fallback llm.Fallback) bool { return fallback.ID == id })
@@ -573,7 +590,23 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	if !slices.Equal(agent.PluginPaths, r.opts.PluginPaths) {
 		return result, errors.New("agent revision's hands plugin configuration changed; restore its plugin list or submit new work")
 	}
-	if request.GitRepository == "" {
+	// The conversation's workspace ID, fixed at creation, decides where it
+	// runs; the revision's current policy never moves it.
+	workspacePath := request.Workspace
+	switch {
+	case request.WorkspaceID == ponsruntime.AgentWorkspaceID(agent.ID):
+		if r.opts.Sandbox == "e2b" {
+			return result, errAgentWorkspaceE2B
+		}
+		if r.agents == nil {
+			return result, errors.New("agent workspace requires the agent directory")
+		}
+		// The server chose this path under its state directory, so it is not
+		// subject to the client workspace checks.
+		if workspacePath, err = r.agents.Workspace(agent.ID); err != nil {
+			return result, err
+		}
+	case request.GitRepository == "":
 		if _, err := validateConversationWorkspace(request.Workspace, r.opts.WorkspaceRoot, r.opts.StateDir); err != nil {
 			return result, fmt.Errorf("run host workspace: %w", err)
 		}
@@ -651,10 +684,10 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}
 
 	core := pons.New()
-	core.Workspace, core.MaxTurns = request.Workspace, agent.MaxTurns
+	core.Workspace, core.MaxTurns = workspacePath, agent.MaxTurns
 	core.RecentActionContext = runtimeActionContext(request.Context, request.Text)
 	runLog := r.logger.With("conversation_id", request.ConversationID, "run_id", request.RunID,
-		"workspace_id", request.ConversationID, "agent_id", agent.ID, "agent_revision", agent.Revision())
+		"workspace_id", request.WorkspaceID, "agent_id", agent.ID, "agent_revision", agent.Revision())
 	runLog.Info("run started")
 	defer func() {
 		if err != nil {
@@ -666,12 +699,13 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 
 	// Hands always run in an execution environment; there is no in-process
 	// fallback. Only the memory directory is granted beyond the workspace;
-	// the rest of the agent directory stays outside every grant. Concat
-	// copies so concurrent runs never share a slice.
+	// the rest of the agent directory, apart from an agent workspace, stays
+	// outside every grant. Concat copies so concurrent runs never share a
+	// slice.
 	spec.ReadWrite = slices.Concat(spec.ReadWrite, memoryGrant)
 	memoryIndex := len(spec.ReadWrite) - 1
-	spec.WorkspaceID = request.ConversationID
-	spec.WorkspacePath = request.Workspace
+	spec.WorkspaceID = request.WorkspaceID
+	spec.WorkspacePath = workspacePath
 	spec.RunID = request.RunID
 	spec.WorkspacePlan = environment.WorkspacePlan{}
 	if request.GitRepository != "" {
@@ -746,7 +780,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 			continue
 		}
 		launch := hookLaunch{Path: r.opts.PluginPath, MaxResultBytes: r.opts.PluginMaxResultBytes}
-		plugin, pluginErr := launch.start(source.Manifest, source.Config, request.Workspace)
+		plugin, pluginErr := launch.start(source.Manifest, source.Config, workspacePath)
 		if pluginErr != nil {
 			return result, pluginErr
 		}
@@ -759,7 +793,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}
 
 	runLog.Debug("hands ready", "sandbox", metadata.Provider, "sandbox_id", metadata.EnvironmentID,
-		"network", metadata.Network, "workspace", request.Workspace, "tools", len(core.ToolSpecs()))
+		"network", metadata.Network, "workspace", workspacePath, "tools", len(core.ToolSpecs()))
 	core.OnEventError(func(event pons.Event) error {
 		switch event.Type {
 		case pons.EventActionDecision:
@@ -995,6 +1029,12 @@ func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, m
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "agent: %s\n", agentLabel(runtimeOptions.Agent))
+	if conversationID == "" && runtimeOptions.Agent.WorkspacePolicy == ponsruntime.WorkspacePerConversation &&
+		options.Workspace == "" && options.GitRepository == "" {
+		if options.Workspace, err = filepath.Abs("."); err != nil {
+			return fmt.Errorf("runtime client: workspace: %w", err)
+		}
+	}
 	sendCount := 0
 	send := func(text string) error {
 		key := idempotencyKey

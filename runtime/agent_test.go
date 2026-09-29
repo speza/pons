@@ -8,12 +8,20 @@ import (
 
 func TestAgentValidateRejectsMultilineName(t *testing.T) {
 	for _, name := range []string{"Ada\nGrace", " Ada", "Ada\r"} {
-		if err := (ponsruntime.AgentDefinition{ID: "default", Name: name}).Validate(); err == nil {
+		if err := (ponsruntime.AgentDefinition{ID: "default", Name: name, WorkspacePolicy: ponsruntime.WorkspaceAgent}).Validate(); err == nil {
 			t.Errorf("name %q accepted", name)
 		}
 	}
-	if err := (ponsruntime.AgentDefinition{ID: "default", Name: "Ada Lovelace"}).Validate(); err != nil {
+	if err := (ponsruntime.AgentDefinition{ID: "default", Name: "Ada Lovelace", WorkspacePolicy: ponsruntime.WorkspaceAgent}).Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAgentValidateRequiresKnownWorkspacePolicy(t *testing.T) {
+	for _, policy := range []string{"", "shared", "Agent"} {
+		if err := (ponsruntime.AgentDefinition{ID: "default", WorkspacePolicy: policy}).Validate(); err == nil {
+			t.Errorf("workspace policy %q accepted", policy)
+		}
 	}
 }
 
@@ -21,6 +29,7 @@ func TestAgentRevisionIsDeterministicAndTracksPersona(t *testing.T) {
 	base := ponsruntime.AgentDefinition{
 		ID: ponsruntime.DefaultAgentID, Name: "Ada", Persona: "Be brief.", ProviderSlot: "primary",
 		Model: "model", MaxTurns: 10, PluginPaths: []string{"/plugins/a.json"},
+		WorkspacePolicy: ponsruntime.WorkspaceAgent,
 	}
 	same := base
 	same.PluginPaths = []string{"/plugins/a.json"}
@@ -45,6 +54,9 @@ func TestAgentRevisionIsDeterministicAndTracksPersona(t *testing.T) {
 		"turns":    func(d *ponsruntime.AgentDefinition) { d.MaxTurns = 11 },
 		"plugins":  func(d *ponsruntime.AgentDefinition) { d.PluginPaths = nil },
 		"identity": func(d *ponsruntime.AgentDefinition) { d.ID = "other" },
+		"workspace": func(d *ponsruntime.AgentDefinition) {
+			d.WorkspacePolicy = ponsruntime.WorkspacePerConversation
+		},
 	} {
 		changed := base
 		change(&changed)

@@ -14,6 +14,7 @@ import {
 import {
   consumeEvents,
   createConversation,
+  type CreateConversationOptions,
   getRuntimeOptions,
   getConversation,
   listConversations,
@@ -132,6 +133,9 @@ function App() {
   const [newGitRevision, setNewGitRevision] = useState("");
   const [newGitBranch, setNewGitBranch] = useState("");
   const [newGitBase, setNewGitBase] = useState<"branch" | "commit">("branch");
+  // Under the agent policy the server owns the workspace, so a new
+  // conversation offers no environment or source choice.
+  const agentWorkspace = runtimeOptions.agent.workspace_policy === "agent";
   const liveDraftMessage = useRef("");
   const pendingSubmission = useRef<PendingSubmission | null>(null);
 
@@ -347,15 +351,19 @@ function App() {
     setCreating(true);
     setError("");
     try {
-      const options = newEnvironment === "e2b" && newSource === "git"
-        ? {
-            environment: newEnvironment,
-            git_repository: newGitRepository.trim(),
-            git_revision: newGitBase === "branch"
-              ? `refs/heads/${newGitBranch.trim()}`
-              : newGitRevision.trim(),
-          }
-        : { environment: newEnvironment, workspace: newWorkspace.trim() };
+      // The agent policy sends no choice; the server fixes the workspace.
+      let options: CreateConversationOptions = {};
+      if (!agentWorkspace && newEnvironment === "e2b" && newSource === "git") {
+        options = {
+          environment: newEnvironment,
+          git_repository: newGitRepository.trim(),
+          git_revision: newGitBase === "branch"
+            ? `refs/heads/${newGitBranch.trim()}`
+            : newGitRevision.trim(),
+        };
+      } else if (!agentWorkspace) {
+        options = { environment: newEnvironment, workspace: newWorkspace.trim() };
+      }
       const conversation = await createConversation(options);
       setConversations((current) => [conversation, ...current]);
       setActiveId(conversation.conversation_id);
@@ -424,11 +432,11 @@ function App() {
     ? [...(view?.environment_events ?? [])].reverse().find((event) => event.run_id === view?.active_run?.id)?.environment_progress?.message
     : null;
   const gitSourceSelected = newEnvironment === "e2b" && newSource === "git";
-  const canCreateConversation = gitSourceSelected
+  const canCreateConversation = agentWorkspace || (gitSourceSelected
     ? newGitRepository.trim().length > 0 && (newGitBase === "branch"
       ? newGitBranch.trim().length > 0
       : /^[0-9a-fA-F]{40}$/.test(newGitRevision.trim()))
-    : newWorkspace.trim().length > 0;
+    : newWorkspace.trim().length > 0);
 
   return (
     <div className="app-shell">
@@ -445,107 +453,116 @@ function App() {
         </div>
 
         <div className="new-session-controls">
-          <label className="environment-picker" htmlFor="new-environment">
-            <span>Sandbox for new sessions</span>
-            <select
-              id="new-environment"
-              value={newEnvironment}
-              onChange={(event) => {
-                const environment = event.target.value;
-                setNewEnvironment(environment);
-                setNewSource(environment === "e2b" ? "git" : "workspace");
-              }}
-              disabled={creating}
-            >
-              {runtimeOptions.environments.map((option) => (
-                <option key={option} value={option}>
-                  {environmentLabel(option)}
-                </option>
-              ))}
-            </select>
-          </label>
-          {newEnvironment === "e2b" && (
-            <label className="environment-picker" htmlFor="new-source">
-              <span>Workspace source</span>
+          {agentWorkspace ? (
+            <p className="source-hint">
+              Agent workspace · new sessions share {agentName(runtimeOptions.agent)}'s files in{" "}
+              {environmentLabel(runtimeOptions.default_environment)}.
+            </p>
+          ) : (
+            <>
+            <label className="environment-picker" htmlFor="new-environment">
+              <span>Sandbox for new sessions</span>
               <select
-                id="new-source"
-                value={newSource}
-                onChange={(event) => setNewSource(event.target.value as "workspace" | "git")}
+                id="new-environment"
+                value={newEnvironment}
+                onChange={(event) => {
+                  const environment = event.target.value;
+                  setNewEnvironment(environment);
+                  setNewSource(environment === "e2b" ? "git" : "workspace");
+                }}
                 disabled={creating}
               >
-                <option value="git">Git repository</option>
-                <option value="workspace">Host directory upload</option>
+                {runtimeOptions.environments.map((option) => (
+                  <option key={option} value={option}>
+                    {environmentLabel(option)}
+                  </option>
+                ))}
               </select>
             </label>
-          )}
-          {gitSourceSelected ? (
-            <>
-              <label className="environment-picker" htmlFor="new-git-repository">
-                <span>Git repository URL</span>
+            {newEnvironment === "e2b" && (
+              <label className="environment-picker" htmlFor="new-source">
+                <span>Workspace source</span>
+                <select
+                  id="new-source"
+                  value={newSource}
+                  onChange={(event) => setNewSource(event.target.value as "workspace" | "git")}
+                  disabled={creating}
+                >
+                  <option value="git">Git repository</option>
+                  <option value="workspace">Host directory upload</option>
+                </select>
+              </label>
+            )}
+            {gitSourceSelected ? (
+              <>
+                <label className="environment-picker" htmlFor="new-git-repository">
+                  <span>Git repository URL</span>
+                  <input
+                    id="new-git-repository"
+                    type="url"
+                    value={newGitRepository}
+                    onChange={(event) => setNewGitRepository(event.target.value)}
+                    placeholder="https://github.com/owner/repo.git"
+                    disabled={creating}
+                  />
+                </label>
+                <label className="environment-picker" htmlFor="new-git-base">
+                  <span>Start from</span>
+                  <select
+                    id="new-git-base"
+                    value={newGitBase}
+                    onChange={(event) => setNewGitBase(event.target.value as "branch" | "commit")}
+                    disabled={creating}
+                  >
+                    <option value="branch">Branch</option>
+                    <option value="commit">Commit SHA</option>
+                  </select>
+                </label>
+                {newGitBase === "branch" ? (
+                  <label className="environment-picker" htmlFor="new-git-branch">
+                    <span>Branch name</span>
+                    <input
+                      id="new-git-branch"
+                      type="text"
+                      value={newGitBranch}
+                      onChange={(event) => setNewGitBranch(event.target.value)}
+                      placeholder="main"
+                      disabled={creating}
+                    />
+                  </label>
+                ) : (
+                  <label className="environment-picker" htmlFor="new-git-revision">
+                    <span>Base commit SHA</span>
+                    <input
+                      id="new-git-revision"
+                      type="text"
+                      value={newGitRevision}
+                      onChange={(event) => setNewGitRevision(event.target.value)}
+                      placeholder="40-character commit ID"
+                      disabled={creating}
+                    />
+                  </label>
+                )}
+                <p className="source-hint">
+                  {newGitBase === "branch"
+                    ? "Pons uses the branch tip when it first sets up the workspace, then works on its own branch."
+                    : "Pons creates a separate work branch from this commit."}
+                </p>
+              </>
+            ) : (
+              <label className="environment-picker" htmlFor="new-workspace">
+                <span>Workspace path</span>
                 <input
-                  id="new-git-repository"
-                  type="url"
-                  value={newGitRepository}
-                  onChange={(event) => setNewGitRepository(event.target.value)}
-                  placeholder="https://github.com/owner/repo.git"
+                  id="new-workspace"
+                  type="text"
+                  value={newWorkspace}
+                  onChange={(event) => setNewWorkspace(event.target.value)}
+                  placeholder="/absolute/path/to/workspace"
                   disabled={creating}
                 />
               </label>
-              <label className="environment-picker" htmlFor="new-git-base">
-                <span>Start from</span>
-                <select
-                  id="new-git-base"
-                  value={newGitBase}
-                  onChange={(event) => setNewGitBase(event.target.value as "branch" | "commit")}
-                  disabled={creating}
-                >
-                  <option value="branch">Branch</option>
-                  <option value="commit">Commit SHA</option>
-                </select>
-              </label>
-              {newGitBase === "branch" ? (
-                <label className="environment-picker" htmlFor="new-git-branch">
-                  <span>Branch name</span>
-                  <input
-                    id="new-git-branch"
-                    type="text"
-                    value={newGitBranch}
-                    onChange={(event) => setNewGitBranch(event.target.value)}
-                    placeholder="main"
-                    disabled={creating}
-                  />
-                </label>
-              ) : (
-                <label className="environment-picker" htmlFor="new-git-revision">
-                  <span>Base commit SHA</span>
-                  <input
-                    id="new-git-revision"
-                    type="text"
-                    value={newGitRevision}
-                    onChange={(event) => setNewGitRevision(event.target.value)}
-                    placeholder="40-character commit ID"
-                    disabled={creating}
-                  />
-                </label>
-              )}
-              <p className="source-hint">
-                {newGitBase === "branch"
-                  ? "Pons uses the branch tip when it first sets up the workspace, then works on its own branch."
-                  : "Pons creates a separate work branch from this commit."}
-              </p>
+            )}
             </>
-          ) : (
-            <label className="environment-picker" htmlFor="new-workspace">
-              <span>Workspace path</span>
-              <input
-                id="new-workspace"
-                type="text"
-                value={newWorkspace}
-                onChange={(event) => setNewWorkspace(event.target.value)}
-                placeholder="/absolute/path/to/workspace"
-                disabled={creating}
-              />
-            </label>
           )}
           <button className="new-conversation" type="button" onClick={() => void createNewConversation()} disabled={creating || !canCreateConversation}>
             <span aria-hidden="true">+</span>
@@ -604,6 +621,11 @@ function App() {
             {activeConversation && (
               <span className="environment-pill">
                 {environmentLabel(activeConversation.environment || runtimeOptions.default_environment)}
+              </span>
+            )}
+            {activeConversation && !activeConversation.workspace && !activeConversation.git_repository && (
+              <span className="environment-pill" title="Agent workspace">
+                {activeConversation.workspace_id}
               </span>
             )}
             {runStatus && (
