@@ -507,6 +507,18 @@ func TestClientWorkspaceMustStayWithinServerRoot(t *testing.T) {
 	if _, err := validateConversationWorkspace(workspace, root, filepath.Join(workspace, "state")); err == nil {
 		t.Fatal("state directory inside workspace accepted")
 	}
+
+	// The default root, the home directory, contains the state directory;
+	// its agent files and workspaces are the server's to place.
+	state := filepath.Join(root, ".pons", "runtime", "server")
+	for _, inside := range []string{state, filepath.Join(state, "agents", "default"), filepath.Join(state, "agents", "default", "workspace")} {
+		if err := os.MkdirAll(inside, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := validateConversationWorkspace(inside, root, state); err == nil {
+			t.Fatalf("workspace %s inside the state directory accepted", inside)
+		}
+	}
 }
 
 func TestExecutionEnvironmentConfiguresE2B(t *testing.T) {

@@ -51,14 +51,19 @@ func TestAgentPolicyConversationsShareOneWorkspaceAndRunInTurn(t *testing.T) {
 	var running atomic.Bool
 	release := make(chan struct{})
 	ran := make(chan RunRequest, 2)
-	m := policyManager(t, openStore(t), agentPolicy(ponsruntime.WorkspaceAgent), RunnerFunc(func(_ context.Context, request RunRequest) (RunResult, error) {
+	m := policyManager(t, openStore(t), agentPolicy(ponsruntime.WorkspaceAgent), RunnerFunc(func(ctx context.Context, request RunRequest) (RunResult, error) {
 		if !running.CompareAndSwap(false, true) {
 			t.Error("two runs used the agent workspace at once")
 		}
+		defer running.Store(false)
 		ran <- request
-		<-release
-		running.Store(false)
-		return RunResult{Answer: "done"}, nil
+		// Watching ctx lets Close end a run held here when the test fails.
+		select {
+		case <-release:
+			return RunResult{Answer: "done"}, nil
+		case <-ctx.Done():
+			return RunResult{}, ctx.Err()
+		}
 	}))
 	defer m.Close()
 
@@ -68,8 +73,9 @@ func TestAgentPolicyConversationsShareOneWorkspaceAndRunInTurn(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if conversation.WorkspaceID != "agent-default" || conversation.WorkspaceLock != "agent-default" ||
-			conversation.Workspace != "" || conversation.Environment != "seatbelt" {
+		if !conversation.AgentWorkspace || conversation.WorkspaceID != "agent-default" ||
+			conversation.WorkspaceLock != "agent-default" || conversation.Workspace != "" ||
+			conversation.Environment != "seatbelt" {
 			t.Fatalf("conversation = %+v", conversation)
 		}
 		if _, err := m.Submit(ctx, conversation.ID, "go", []TextPart{{Type: "text", Text: "go"}}); err != nil {
@@ -80,7 +86,7 @@ func TestAgentPolicyConversationsShareOneWorkspaceAndRunInTurn(t *testing.T) {
 
 	for range 2 {
 		request := receiveRequest(t, ran)
-		if request.WorkspaceID != "agent-default" || request.Workspace != "" {
+		if !request.AgentWorkspace || request.WorkspaceID != "agent-default" || request.Workspace != "" {
 			t.Fatalf("request workspace = %q %q", request.WorkspaceID, request.Workspace)
 		}
 		release <- struct{}{}
@@ -125,7 +131,7 @@ func TestConversationWorkspaceSurvivesPolicyChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hosted.WorkspaceID != hosted.ID || hosted.WorkspaceLock != hostPath {
+	if hosted.AgentWorkspace || hosted.WorkspaceID != hosted.ID || hosted.WorkspaceLock != hostPath {
 		t.Fatalf("per-conversation workspace = %+v", hosted)
 	}
 	if _, err := perConversation.Submit(ctx, hosted.ID, "hosted", []TextPart{{Type: "text", Text: "hosted"}}); err != nil {
@@ -159,10 +165,10 @@ func TestConversationWorkspaceSurvivesPolicyChange(t *testing.T) {
 		request := receiveRequest(t, ran)
 		got[request.ConversationID] = request
 	}
-	if request := got[hosted.ID]; request.WorkspaceID != hosted.ID || request.Workspace != hostPath {
+	if request := got[hosted.ID]; request.AgentWorkspace || request.WorkspaceID != hosted.ID || request.Workspace != hostPath {
 		t.Fatalf("hosted conversation ran in %q %q", request.WorkspaceID, request.Workspace)
 	}
-	if request := got[owned.ID]; request.WorkspaceID != "agent-default" || request.Workspace != "" {
+	if request := got[owned.ID]; !request.AgentWorkspace || request.WorkspaceID != "agent-default" || request.Workspace != "" {
 		t.Fatalf("agent conversation ran in %q %q", request.WorkspaceID, request.Workspace)
 	}
 }

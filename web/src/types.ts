@@ -10,6 +10,7 @@ export interface Conversation {
   conversation_id: string;
   agent_id: string;
   workspace_id: string;
+  agent_workspace?: boolean;
   workspace: string;
   environment?: string;
   git_repository?: string;

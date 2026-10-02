@@ -49,7 +49,7 @@ type Settings struct {
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
 	MaxTurns int    `json:"max_turns"`
-	// Workspace is the workspace policy; empty means the agent policy.
+	// Workspace is the workspace policy, or empty for the server's default.
 	Workspace string `json:"workspace"`
 }
 
@@ -75,21 +75,19 @@ func (s *Store) Dir(agentID string) string {
 }
 
 // Load returns an agent's settings and trimmed persona. On first start it
-// creates the directory with a default agent.json, an empty PERSONA.md, and
-// an empty workspace; existing files are never overwritten. The returned
-// settings carry a resolved workspace policy.
+// creates the directory with a default agent.json and an empty PERSONA.md;
+// existing files are never overwritten. The workspace is created on first
+// use, so a run that damages it cannot stop the server from starting.
 func (s *Store) Load(agentID string) (Settings, string, error) {
 	if err := ponsruntime.ValidateAgentID(agentID); err != nil {
 		return Settings{}, "", err
 	}
 	dir := s.Dir(agentID)
-	for _, sub := range []string{revisionsDir, WorkspaceDir} {
-		if err := os.MkdirAll(filepath.Join(dir, sub), 0o700); err != nil {
-			return Settings{}, "", fmt.Errorf("agents: create %s: %w", dir, err)
-		}
+	if err := os.MkdirAll(filepath.Join(dir, revisionsDir), 0o700); err != nil {
+		return Settings{}, "", fmt.Errorf("agents: create %s: %w", dir, err)
 	}
 
-	defaults, err := json.MarshalIndent(Settings{Workspace: ponsruntime.WorkspaceAgent}, "", "  ")
+	defaults, err := json.MarshalIndent(Settings{}, "", "  ")
 	if err != nil {
 		return Settings{}, "", err
 	}
@@ -270,9 +268,7 @@ func readSettings(path string) (Settings, error) {
 		return Settings{}, fmt.Errorf("agents: %s: max_turns must not be negative", path)
 	}
 	switch settings.Workspace {
-	case "":
-		settings.Workspace = ponsruntime.WorkspaceAgent
-	case ponsruntime.WorkspaceAgent, ponsruntime.WorkspacePerConversation:
+	case "", ponsruntime.WorkspaceAgent, ponsruntime.WorkspacePerConversation:
 	default:
 		return Settings{}, fmt.Errorf("agents: %s: workspace must be %q or %q, not %q",
 			path, ponsruntime.WorkspaceAgent, ponsruntime.WorkspacePerConversation, settings.Workspace)

@@ -213,8 +213,12 @@ exists. Install `pons-hands`, log in once, then run a task:
 ```sh
 go install ./cmd/pons-hands
 go run ./cmd/pons -login
-go run ./cmd/pons -message "inspect this project"
+go run ./cmd/pons -message "introduce yourself"
 ```
+
+On Seatbelt the agent works in a workspace of its own, not the current
+directory; set `"workspace": "per_conversation"` in its `agent.json` to work
+on a project directory instead (see [Agent](#agent)).
 
 Providers are presets over three wire APIs (`anthropic-messages`,
 `openai-completions`, `openai-responses`):
@@ -235,7 +239,7 @@ use flags:
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-…
-go run ./cmd/pons -provider anthropic -message "inspect this project"
+go run ./cmd/pons -provider anthropic -message "introduce yourself"
 ```
 
 Bundled mode also reads `.pons.json` from its current directory. Explicit
@@ -255,18 +259,19 @@ go run ./cmd/pons serve --debug
 
 ```sh
 # Terminal 2
-go run ./cmd/pons client -i -workspace /path/to/project
+go run ./cmd/pons client -i
 go run ./cmd/pons client -conversation <id> -message "continue"
 ```
 
-By default the agent has one workspace of its own, shared by all its
-conversations (see [Agent](#agent)), so a new conversation takes no workspace
-option. When `agent.json` sets `"workspace": "per_conversation"`, the client
-selects a workspace when creating a conversation instead. `client -workspace`
-then defaults to the client's current directory. That path must exist on the
-server host and be inside `workspace_root` (the server user's home directory by
-default). Set `"workspace_root"` in the global config to allow other host
-paths. Git conversations select a repository and commit instead; see the
+On Seatbelt the agent has one workspace of its own by default, shared by all
+its conversations (see [Agent](#agent)), so a new conversation takes no
+workspace option and the client says so. Under the `per_conversation` policy,
+the default on E2B, the client selects a workspace when creating a
+conversation instead: `client -workspace /path/to/project`, defaulting to the
+client's current directory. That path must exist on the
+server host, be inside `workspace_root` (the server user's home directory by
+default), and be outside the runtime state directory. Set `"workspace_root"` in
+the global config to allow other host paths. Git conversations select a repository and commit instead; see the
 [Git workspace guide](docs/design/git-workspaces.md).
 
 The server reads `~/.pons/config.json`. A standalone `serve` process does not
@@ -356,7 +361,7 @@ finds `pons-hands` on `PATH`, or use `-hands-command`:
 go build -o .build/pons-hands ./cmd/pons-hands
 go run ./cmd/pons -provider codex -sandbox seatbelt \
   -hands-command .build/pons-hands \
-  -message "inspect this project"
+  -message "introduce yourself"
 ```
 
 Elsewhere, use `-sandbox e2b`; the server refuses to start without a sandbox.
@@ -524,21 +529,22 @@ restart the server to change the agent.
     "provider": "",
     "model": "",
     "max_turns": 0,
-    "workspace": "agent"
+    "workspace": ""
   }
   ```
 
   `provider` names a configured provider slot. `workspace` is the workspace
-  policy: `agent` (the default when empty) gives every conversation the
-  agent's own `workspace/` directory; `per_conversation` lets each new
-  conversation pick a host directory or Git repository. A conversation keeps
-  the workspace it was created with when the policy changes. Conversations
-  sharing the agent workspace run one at a time. The `agent` policy is Seatbelt
-  only for now; on E2B, set `per_conversation`. A malformed file stops the
-  server from starting.
+  policy: `agent` gives every conversation the agent's own `workspace/`
+  directory; `per_conversation` lets each new conversation pick a host
+  directory or Git repository. Empty means `agent` on Seatbelt and
+  `per_conversation` on E2B, which does not support `agent` yet; setting
+  `agent` on E2B stops the server from starting. A conversation keeps the
+  workspace it was created with when the policy changes. Conversations sharing
+  the agent workspace run one at a time. A malformed file stops the server
+  from starting.
 - `PERSONA.md` holds free-form instructions, used verbatim.
-- `workspace/` holds the agent's own files under the `agent` policy. They
-  persist across conversations and server restarts.
+- `workspace/` holds the agent's own files under the `agent` policy, created
+  on first use. They persist across conversations and server restarts.
 - `memory/` holds the agent's own notes: `MEMORY.md`, an index with one line
   per topic, and one file per topic. The agent keeps these up to date itself,
   and each conversation starts with `MEMORY.md` (up to 16 KiB) as reference

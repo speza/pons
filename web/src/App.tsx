@@ -134,8 +134,10 @@ function App() {
   const [newGitBranch, setNewGitBranch] = useState("");
   const [newGitBase, setNewGitBase] = useState<"branch" | "commit">("branch");
   // Under the agent policy the server owns the workspace, so a new
-  // conversation offers no environment or source choice.
-  const agentWorkspace = runtimeOptions.agent.workspace_policy === "agent";
+  // conversation offers no environment or source choice. Until the policy
+  // is known, no choice is offered and nothing can be created.
+  const workspacePolicy = runtimeOptions.agent.workspace_policy;
+  const agentWorkspace = workspacePolicy === "agent";
   const liveDraftMessage = useRef("");
   const pendingSubmission = useRef<PendingSubmission | null>(null);
 
@@ -432,11 +434,12 @@ function App() {
     ? [...(view?.environment_events ?? [])].reverse().find((event) => event.run_id === view?.active_run?.id)?.environment_progress?.message
     : null;
   const gitSourceSelected = newEnvironment === "e2b" && newSource === "git";
-  const canCreateConversation = agentWorkspace || (gitSourceSelected
+  const sourceComplete = gitSourceSelected
     ? newGitRepository.trim().length > 0 && (newGitBase === "branch"
       ? newGitBranch.trim().length > 0
       : /^[0-9a-fA-F]{40}$/.test(newGitRevision.trim()))
-    : newWorkspace.trim().length > 0);
+    : newWorkspace.trim().length > 0;
+  const canCreateConversation = workspacePolicy !== undefined && (agentWorkspace || sourceComplete);
 
   return (
     <div className="app-shell">
@@ -453,7 +456,9 @@ function App() {
         </div>
 
         <div className="new-session-controls">
-          {agentWorkspace ? (
+          {workspacePolicy === undefined ? (
+            <p className="source-hint">Loading runtime options…</p>
+          ) : agentWorkspace ? (
             <p className="source-hint">
               Agent workspace · new sessions share {agentName(runtimeOptions.agent)}'s files in{" "}
               {environmentLabel(runtimeOptions.default_environment)}.
@@ -623,7 +628,7 @@ function App() {
                 {environmentLabel(activeConversation.environment || runtimeOptions.default_environment)}
               </span>
             )}
-            {activeConversation && !activeConversation.workspace && !activeConversation.git_repository && (
+            {activeConversation?.agent_workspace && (
               <span className="environment-pill" title="Agent workspace">
                 {activeConversation.workspace_id}
               </span>

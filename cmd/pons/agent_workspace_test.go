@@ -14,7 +14,6 @@ import (
 	"github.com/samperrin/pons/plugins/brain/llm"
 	ponsruntime "github.com/samperrin/pons/runtime"
 	"github.com/samperrin/pons/runtime/agentdir"
-	"github.com/samperrin/pons/runtime/httptransport"
 )
 
 func TestAgentWorkspacePersistsAcrossConversations(t *testing.T) {
@@ -73,7 +72,7 @@ func agentWorkspaceRequest() ponsruntime.RunRequest {
 			WorkspacePolicy: ponsruntime.WorkspaceAgent,
 		},
 		ConversationID: "conversation-1", WorkspaceID: ponsruntime.AgentWorkspaceID(ponsruntime.DefaultAgentID),
-		RunID: "run-1", Environment: "seatbelt", Text: "hi",
+		AgentWorkspace: true, RunID: "run-1", Environment: "seatbelt", Text: "hi",
 		Emit: func(ponsruntime.RunEvent) error { return nil },
 	}
 }
@@ -97,16 +96,34 @@ func TestAgentWorkspaceRunGrantsOnlyWorkspaceAndMemory(t *testing.T) {
 	}
 }
 
+func TestEmptyWorkspacePolicyFollowsSandbox(t *testing.T) {
+	for _, test := range []struct {
+		sandbox, setting, want string
+	}{
+		{"seatbelt", "", ponsruntime.WorkspaceAgent},
+		{"e2b", "", ponsruntime.WorkspacePerConversation},
+		{"seatbelt", "per_conversation", ponsruntime.WorkspacePerConversation},
+		{"e2b", "per_conversation", ponsruntime.WorkspacePerConversation},
+	} {
+		agents, err := agentdir.Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		write(t, filepath.Join(agents.Dir(ponsruntime.DefaultAgentID), agentdir.SettingsFile), `{"workspace":"`+test.setting+`"}`)
+		agent, err := defaultAgent(serverOptions{Sandbox: test.sandbox}, agents)
+		if err != nil || agent.WorkspacePolicy != test.want {
+			t.Errorf("%s with %q = %q, %v; want %q", test.sandbox, test.setting, agent.WorkspacePolicy, err, test.want)
+		}
+	}
+}
+
 func TestAgentWorkspaceIsNotYetSupportedOnE2B(t *testing.T) {
-	runner, execution, _ := agentWorkspaceRunner(t, "e2b")
-	request := agentWorkspaceRequest()
-	request.Environment = "e2b"
-	if _, err := runner.Run(context.Background(), request); !errors.Is(err, errAgentWorkspaceE2B) {
-		t.Fatalf("run err = %v", err)
+	stateDir := t.TempDir()
+	agents, err := agentdir.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(execution.specs) != 0 {
-		t.Fatal("E2B environment started for an agent workspace")
-	}
+	write(t, filepath.Join(agents.Dir(ponsruntime.DefaultAgentID), agentdir.SettingsFile), `{"workspace":"agent"}`)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -114,21 +131,16 @@ func TestAgentWorkspaceIsNotYetSupportedOnE2B(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- runServerReady(ctx, newServerLogger(io.Discard, false), serverOptions{
-			Address: "127.0.0.1:0", StateDir: t.TempDir(), WorkspaceRoot: t.TempDir(),
+			Address: "127.0.0.1:0", StateDir: stateDir, WorkspaceRoot: t.TempDir(),
 			MaxConcurrent: 1, Sandbox: "e2b", Environment: &recordingEnvironment{},
 		}, started)
 	}()
-	client := httptransport.Client{BaseURL: <-started}
-	options, err := client.RuntimeOptions(ctx)
-	if err != nil || options.Agent.WorkspacePolicy != ponsruntime.WorkspaceAgent {
-		t.Fatalf("runtime options = %+v, %v", options, err)
-	}
-	if _, err := client.CreateConversation(ctx, ponsruntime.ConversationOptions{}); err == nil ||
-		!strings.Contains(err.Error(), "not yet supported on E2B") {
-		t.Fatalf("create conversation err = %v", err)
-	}
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	select {
+	case err := <-done:
+		if !errors.Is(err, errAgentWorkspaceE2B) || !strings.Contains(err.Error(), agentdir.SettingsFile) {
+			t.Fatalf("startup err = %v", err)
+		}
+	case <-started:
+		t.Fatal("E2B server started with the agent workspace policy")
 	}
 }

@@ -74,8 +74,9 @@ in a new conversation, on a replaced E2B sandbox.
 
 | Value | Meaning |
 | --- | --- |
-| `agent` | One workspace for every conversation the agent owns. Default when the field is empty or missing. |
+| `agent` | One workspace for every conversation the agent owns. |
 | `per_conversation` | Current behavior: the client picks a host directory or Git repository per conversation. |
+| empty or missing | `agent` where the sandbox supports it; until delivery step 2, `per_conversation` on E2B. |
 
 Any other value fails startup with an error naming the file. The resolved
 policy becomes `AgentDefinition.WorkspacePolicy`, so it is part of the
@@ -84,10 +85,11 @@ revision fingerprint.
 ### Workspace identity
 
 A conversation's workspace is fixed when the conversation is created, and is
-recorded on it as `workspace_id`. The runner uses the conversation's
-`workspace_id` rather than deriving one from the conversation ID or the
-current agent revision, so changing the policy never moves an existing
-conversation to a different workspace.
+recorded on it as `workspace_id`, with `agent_workspace` marking the agent's
+own workspace. The runner uses these rather than deriving them from the
+conversation ID, the workspace ID's spelling, or the current agent revision,
+so changing the policy never moves an existing conversation to a different
+workspace.
 
 | Policy | `workspace_id` | Workspace lock |
 | --- | --- | --- |
@@ -127,14 +129,18 @@ The agent workspace is a directory the server owns:
   workspace/      new: the agent's files
 ```
 
-`agentdir.Store.Load` creates `workspace/` (mode 0700) alongside `memory/`.
-The runner sets `spec.WorkspacePath` to it. Seatbelt grants `workspace/` and
+`agentdir.Store.Workspace` creates `workspace/` (mode 0700) on first use and
+requires it to be a real directory, like `memory/`. It is not created at
+startup: hands can replace it, and that must fail only later runs, not server
+startup. The runner sets `spec.WorkspacePath` to it. Seatbelt grants `workspace/` and
 `memory/` read-write; `agent.json`, `PERSONA.md`, and `revisions/` stay
 outside every grant.
 
 The server chooses this path itself, so it bypasses
-`validateConversationWorkspace`, which keeps rejecting client-selected paths
-inside the state directory.
+`validateConversationWorkspace`. That check now rejects client-selected paths
+inside the state directory as well as paths containing it, so a
+`per_conversation` client cannot reach `agent.json` or share the agent
+workspace under a different lock.
 
 No checkpoints are taken on Seatbelt in this slice; the directory is the
 durable copy.
@@ -175,19 +181,23 @@ In `cmd/pons/runtime_mode.go`:
 
 ### Store
 
-- `conversations` gains `workspace_id`.
+- `conversations` gains `workspace_id` (required, never defaulted) and
+  `agent_workspace`.
 - The E2B `workspaces.strategy` column accepts `empty`.
-- The SQLite schema version is bumped. Older state directories are rejected,
-  per the project's pre-compatibility rule.
+- The SQLite schema version is bumped. Older databases are rejected, per the
+  project's pre-compatibility rule; the error says to remove the database and
+  `workspaces/` but keep `agents/`, which now holds the agent's workspace.
 
 ### Clients
 
 - CLI: `client` defaults `-workspace` to the current directory only when the
   server's agent reports `per_conversation`; under `agent` it sends no
-  workspace, and an explicit `-workspace` is rejected by the server.
+  workspace, prints that the current directory is not used, and an explicit
+  `-workspace` is rejected by the server.
 - Web: when the agent's policy is `agent`, the new-conversation form drops
   the environment and source pickers and shows "Agent workspace". Under
-  `per_conversation` it is unchanged.
+  `per_conversation` it is unchanged. Until the policy is known, the form
+  offers no choice and cannot create.
 - The conversation header shows the workspace ID rather than a host path for
   agent workspaces.
 
@@ -195,7 +205,8 @@ In `cmd/pons/runtime_mode.go`:
 
 All deterministic, with no provider credentials or network:
 
-- **Policy parsing:** empty and missing `workspace` resolve to `agent`;
+- **Policy parsing:** empty and missing `workspace` resolve to `agent` on
+  Seatbelt and `per_conversation` on E2B;
   `per_conversation` is accepted; any other value fails startup; the policy
   changes the revision.
 - **Identity:** two conversations under `agent` share `agent-<id>` and one
@@ -229,12 +240,14 @@ All deterministic, with no provider credentials or network:
 ## Delivery
 
 1. **Policy, identity, Seatbelt, clients.** Everything except E2B seeding.
-   E2B conversations keep working under `per_conversation`; the `agent`
-   policy on E2B fails with a clear "not yet supported" error when a
-   conversation is created (and, as a guard, when a run starts). The server
-   still starts, logging a warning, so existing `per_conversation`
-   conversations remain usable.
-2. **E2B `empty` seed.** Removes that error.
+   On E2B an empty policy resolves to `per_conversation`, so a fresh or
+   upgraded E2B server keeps working; an explicit `agent` policy stops the
+   server at startup with a clear "not yet supported" error naming the file.
+   That startup check is the only one: an agent-workspace conversation
+   records its environment, and the runner already refuses a conversation
+   recorded under another environment.
+2. **E2B `empty` seed.** Removes that error and makes an empty policy
+   resolve to `agent` on E2B too.
 
 ## Later slices
 

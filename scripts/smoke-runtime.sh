@@ -16,6 +16,11 @@ cd "$repo_root"
 mkdir -p .build
 go build -o .build/pons-hands ./cmd/pons-hands
 
+# The default agent works in its own workspace; seed the file it reads.
+agent_workspace="$state_dir/agents/default/workspace"
+mkdir -p "$agent_workspace"
+cp go.mod "$agent_workspace/"
+
 prompt='Use the read_file tool to read go.mod. If its module line is exactly "module github.com/samperrin/pons", reply with exactly SMOKE_OK and nothing else. Otherwise reply with exactly SMOKE_FAILED and nothing else.'
 
 go run ./cmd/pons \

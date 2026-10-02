@@ -47,7 +47,7 @@ func TestOpenRejectsOlderExistingDatabase(t *testing.T) {
 			if reopened, err := Open(stateDir); err == nil {
 				_ = reopened.Close()
 				t.Fatal("accepted older database")
-			} else if !strings.Contains(err.Error(), "recreate the runtime state directory") {
+			} else if !strings.Contains(err.Error(), "keeping agents/") {
 				t.Fatalf("error = %v", err)
 			}
 		})
@@ -62,7 +62,7 @@ func TestConversationWorkspaceIDRoundTrips(t *testing.T) {
 	}
 	defer store.Close()
 	conversation := ponsruntime.Conversation{
-		ID: ponsruntime.NewID(), AgentID: testAgent.ID, WorkspaceID: "agent-default",
+		ID: ponsruntime.NewID(), AgentID: testAgent.ID, WorkspaceID: "agent-default", AgentWorkspace: true,
 		WorkspaceLock: "agent-default", Environment: "seatbelt", CreatedAt: time.Now().UTC(),
 	}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
@@ -73,16 +73,21 @@ func TestConversationWorkspaceIDRoundTrips(t *testing.T) {
 	}
 
 	read, err := store.Conversation(ctx, conversation.ID)
-	if err != nil || read.WorkspaceID != "agent-default" || read.WorkspaceLock != "agent-default" {
+	if err != nil || read.WorkspaceID != "agent-default" || !read.AgentWorkspace || read.WorkspaceLock != "agent-default" {
 		t.Fatalf("conversation = %+v, %v", read, err)
 	}
 	listed, err := store.Conversations(ctx)
-	if err != nil || len(listed) != 1 || listed[0].WorkspaceID != "agent-default" {
+	if err != nil || len(listed) != 1 || listed[0].WorkspaceID != "agent-default" || !listed[0].AgentWorkspace {
 		t.Fatalf("conversations = %+v, %v", listed, err)
 	}
 	claim, err := store.ClaimRunnable(ctx)
-	if err != nil || claim == nil || claim.Conversation.WorkspaceID != "agent-default" {
+	if err != nil || claim == nil || claim.Conversation.WorkspaceID != "agent-default" || !claim.Conversation.AgentWorkspace {
 		t.Fatalf("claim = %+v, %v", claim, err)
+	}
+	unnamed := conversation
+	unnamed.ID, unnamed.WorkspaceID = ponsruntime.NewID(), ""
+	if err := store.CreateConversation(ctx, unnamed); err == nil {
+		t.Fatal("conversation without a workspace ID accepted")
 	}
 }
 
@@ -117,7 +122,7 @@ func TestConversationGitSelectionSurvivesClaim(t *testing.T) {
 		{"session-a-again", "https://github.com/acme/a.git", false},
 	} {
 		conversation := ponsruntime.Conversation{
-			ID: selection.id, AgentID: testAgent.ID, Workspace: t.TempDir(), GitRepository: selection.repository,
+			ID: selection.id, AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), GitRepository: selection.repository,
 			GitRevision: strings.Repeat("a", 40), GitAllRepositories: selection.all,
 			CreatedAt: time.Now().UTC(),
 		}
@@ -150,7 +155,7 @@ func TestContentEventsProjectSnapshotAndReplay(t *testing.T) {
 	}
 	defer store.Close()
 	ctx := context.Background()
-	conversation := ponsruntime.Conversation{ID: "event-log", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: "event-log", AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +256,7 @@ func TestAcceptedInputEnvelopeAndCommonAdmission(t *testing.T) {
 	}
 	defer store.Close()
 	ctx := context.Background()
-	conversation := ponsruntime.Conversation{ID: "sources", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: "sources", AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +310,7 @@ func TestAgentEventsShareCursorButStayOutOfClientReplay(t *testing.T) {
 	}
 	defer store.Close()
 	ctx := context.Background()
-	conversation := ponsruntime.Conversation{ID: "agent-log", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: "agent-log", AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +373,7 @@ func TestClaimReplaysCompactionAndCommittedModelOutput(t *testing.T) {
 	}
 	defer func() { _ = store.Close() }()
 	ctx := context.Background()
-	conversation := ponsruntime.Conversation{ID: "compaction-replay", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: "compaction-replay", AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
 	}
@@ -477,7 +482,7 @@ func TestClaimReplaysCommittedToolCallsWithProviderItems(t *testing.T) {
 	defer store.Close()
 	ctx := t.Context()
 	conversation := ponsruntime.Conversation{
-		ID: "rewritten-call", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC(),
+		ID: "rewritten-call", AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC(),
 	}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
@@ -537,7 +542,7 @@ func TestClaimProjectsContextFromStartOfLog(t *testing.T) {
 	}
 	defer store.Close()
 	ctx := context.Background()
-	conversation := ponsruntime.Conversation{ID: "full-context", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: "full-context", AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
 	}
@@ -586,7 +591,7 @@ func TestProjectedContextGroupsParallelToolResults(t *testing.T) {
 	}
 	defer store.Close()
 	ctx := context.Background()
-	conversation := ponsruntime.Conversation{ID: "tool-tail", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: "tool-tail", AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
 	}
@@ -644,7 +649,7 @@ func TestIndependentRemoteWorkspacesCanBeClaimedTogether(t *testing.T) {
 	seed := t.TempDir()
 	for _, id := range []string{"repo-a", "repo-b"} {
 		if err := store.CreateConversation(ctx, ponsruntime.Conversation{
-			ID: id, AgentID: testAgent.ID, Workspace: seed, WorkspaceLock: id, CreatedAt: time.Now().UTC(),
+			ID: id, AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: seed, WorkspaceLock: id, CreatedAt: time.Now().UTC(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -715,11 +720,11 @@ func TestConversationsAreReturnedNewestFirst(t *testing.T) {
 
 	ctx := context.Background()
 	old := ponsruntime.Conversation{
-		ID: "old", AgentID: testAgent.ID, Workspace: "/old", Environment: "seatbelt",
+		ID: "old", AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: "/old", Environment: "seatbelt",
 		CreatedAt: time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC),
 	}
 	newest := ponsruntime.Conversation{
-		ID: "new", AgentID: testAgent.ID, Workspace: "/new", Environment: "e2b",
+		ID: "new", AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: "/new", Environment: "e2b",
 		CreatedAt: time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC),
 	}
 	if err := store.CreateConversation(ctx, old); err != nil {
@@ -935,7 +940,7 @@ func TestToolCallIDsAreScopedToTheirRun(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	conversation := ponsruntime.Conversation{
-		ID: "conversation", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC(),
+		ID: "conversation", AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC(),
 	}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
@@ -995,7 +1000,7 @@ func TestOpenRebuildsIndexesAndRecoversUncertainTool(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	conversation := ponsruntime.Conversation{ID: "rebuild", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: "rebuild", AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
 	}
@@ -1089,7 +1094,7 @@ func TestIndexRebuildRollsBackWhenLogIsInvalid(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	conversation := ponsruntime.Conversation{ID: "invalid-log", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: "invalid-log", AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
 	}
@@ -1128,7 +1133,7 @@ func TestFailRunAtomicallyInterruptsRequestedTools(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	conversation := ponsruntime.Conversation{
-		ID: "conversation", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC(),
+		ID: "conversation", AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC(),
 	}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
@@ -1218,7 +1223,7 @@ func TestAgentRevisionIsRecordedOnSubmissionAndRun(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	conversation := ponsruntime.Conversation{
-		ID: "conversation", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC(),
+		ID: "conversation", AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC(),
 	}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
@@ -1259,7 +1264,7 @@ func TestRebuildRestoresStoppedRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	conversation := ponsruntime.Conversation{ID: "stopped", AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: "stopped", AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
 	}
@@ -1298,7 +1303,7 @@ func TestCompetingSQLiteClaimsDoNotDuplicateSubmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: workspace, CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: workspace, CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(context.Background(), conversation); err != nil {
 		t.Fatal(err)
 	}
@@ -1341,7 +1346,7 @@ func TestClaimHistoryExcludesLaterQueuedMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
 	}
@@ -1385,7 +1390,7 @@ func TestAssistantToolTurnsRemainOrderedAndComplete(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(ctx, conversation); err != nil {
 		t.Fatal(err)
 	}

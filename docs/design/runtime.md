@@ -371,7 +371,9 @@ initialization, and connection policy are confined to `runtime/sqlite`; the
 manager only consumes the `runtime.Store` contract. Store shutdown belongs to
 the composing process, not the manager. During the current pre-compatibility
 phase, schema versions are checked at startup and an older database is rejected
-with instructions to recreate the runtime state directory rather than migrated.
+rather than migrated, with instructions to remove the database and
+`workspaces/` checkpoints while keeping `agents/`, which holds the owner's
+agent settings, memory, and workspace.
 
 ## HTTP API
 

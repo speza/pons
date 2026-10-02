@@ -149,9 +149,6 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 	logger.Info("agent ready", "agent_id", agent.ID, "agent_name", agent.Name,
 		"agent_revision", agent.Revision(), "agent_dir", agents.Dir(agent.ID),
 		"workspace_policy", agent.WorkspacePolicy)
-	if agent.WorkspacePolicy == ponsruntime.WorkspaceAgent && opts.Sandbox == "e2b" {
-		logger.Warn("new conversations will fail: " + errAgentWorkspaceE2B.Error())
-	}
 
 	environmentOptions := []string{opts.Sandbox}
 	network := opts.EnvironmentSpec.Network
@@ -170,15 +167,7 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 		MaxConcurrent:      opts.MaxConcurrent,
 		EnvironmentOptions: environmentOptions,
 		DefaultEnvironment: opts.Sandbox,
-		PrepareConversation: func(agent ponsruntime.AgentDefinition, selection ponsruntime.ConversationOptions) (ponsruntime.ConversationOptions, error) {
-			if agent.WorkspacePolicy == ponsruntime.WorkspaceAgent {
-				// The server owns the agent's workspace; Manager has already
-				// rejected any client choice.
-				if opts.Sandbox == "e2b" {
-					return selection, errAgentWorkspaceE2B
-				}
-				return selection, nil
-			}
+		PrepareConversation: func(selection ponsruntime.ConversationOptions) (ponsruntime.ConversationOptions, error) {
 			if (selection.GitRepository == "") != (selection.GitRevision == "") {
 				return selection, errors.New("git repository and revision must be set together")
 			}
@@ -314,6 +303,19 @@ func defaultAgent(opts serverOptions, agents *agentdir.Store) (ponsruntime.Agent
 	if settings.MaxTurns > 0 {
 		maxTurns = settings.MaxTurns
 	}
+	// An empty policy means the agent's own workspace wherever the sandbox
+	// supports it. E2B cannot seed one yet (agent workspaces spec, delivery
+	// step 2), so it keeps per-conversation workspaces.
+	policy := settings.Workspace
+	if policy == "" {
+		policy = ponsruntime.WorkspaceAgent
+		if opts.Sandbox == "e2b" {
+			policy = ponsruntime.WorkspacePerConversation
+		}
+	}
+	if policy == ponsruntime.WorkspaceAgent && opts.Sandbox == "e2b" {
+		return ponsruntime.AgentDefinition{}, fmt.Errorf("agent %s: %w", agents.Dir(ponsruntime.DefaultAgentID), errAgentWorkspaceE2B)
+	}
 
 	agent := ponsruntime.AgentDefinition{
 		ID:              ponsruntime.DefaultAgentID,
@@ -323,7 +325,7 @@ func defaultAgent(opts serverOptions, agents *agentdir.Store) (ponsruntime.Agent
 		Model:           model,
 		MaxTurns:        maxTurns,
 		PluginPaths:     slices.Clone(opts.PluginPaths),
-		WorkspacePolicy: settings.Workspace,
+		WorkspacePolicy: policy,
 	}
 	if err := agents.Record(agent); err != nil {
 		return ponsruntime.AgentDefinition{}, err
@@ -331,9 +333,7 @@ func defaultAgent(opts serverOptions, agents *agentdir.Store) (ponsruntime.Agent
 	return agent, nil
 }
 
-// errAgentWorkspaceE2B marks the gap until E2B can seed an empty agent
-// workspace (agent workspaces spec, delivery step 2).
-var errAgentWorkspaceE2B = errors.New(`agent workspaces are not yet supported on E2B; set "workspace": "per_conversation" in the agent's agent.json`)
+var errAgentWorkspaceE2B = errors.New(`the "agent" workspace policy is not yet supported on E2B; set "workspace" to "per_conversation" or "" in agent.json`)
 
 func fallbackIndex(fallbacks []llm.Fallback, id string) int {
 	return slices.IndexFunc(fallbacks, func(fallback llm.Fallback) bool { return fallback.ID == id })
@@ -517,6 +517,19 @@ func validateConversationWorkspace(workspace, root, stateDir string) (string, er
 	if err := validateRemoteStateDirectory(resolved, stateDir); err != nil {
 		return "", err
 	}
+	// The state directory holds agent settings, workspaces, and checkpoints
+	// that only the server may place; a client path must not reach into it.
+	statePath, err := resolvePathWithMissingLeaf(stateDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve state directory: %w", err)
+	}
+	inside, err := pathContains(statePath, resolved)
+	if err != nil {
+		return "", err
+	}
+	if inside {
+		return "", errors.New("host workspace must be outside the runtime state directory")
+	}
 	return resolved, nil
 }
 
@@ -590,14 +603,13 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	if !slices.Equal(agent.PluginPaths, r.opts.PluginPaths) {
 		return result, errors.New("agent revision's hands plugin configuration changed; restore its plugin list or submit new work")
 	}
-	// The conversation's workspace ID, fixed at creation, decides where it
+	// The conversation's workspace, fixed at creation, decides where it
 	// runs; the revision's current policy never moves it.
 	workspacePath := request.Workspace
 	switch {
-	case request.WorkspaceID == ponsruntime.AgentWorkspaceID(agent.ID):
-		if r.opts.Sandbox == "e2b" {
-			return result, errAgentWorkspaceE2B
-		}
+	case request.AgentWorkspace:
+		// The conversation's recorded environment keeps it off providers
+		// that cannot host an agent workspace.
 		if r.agents == nil {
 			return result, errors.New("agent workspace requires the agent directory")
 		}
@@ -1029,10 +1041,17 @@ func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, m
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "agent: %s\n", agentLabel(runtimeOptions.Agent))
-	if conversationID == "" && runtimeOptions.Agent.WorkspacePolicy == ponsruntime.WorkspacePerConversation &&
-		options.Workspace == "" && options.GitRepository == "" {
-		if options.Workspace, err = filepath.Abs("."); err != nil {
-			return fmt.Errorf("runtime client: workspace: %w", err)
+	if conversationID == "" {
+		switch runtimeOptions.Agent.WorkspacePolicy {
+		case ponsruntime.WorkspaceAgent:
+			// The current directory is not used, so say where work happens.
+			fmt.Fprintln(os.Stderr, "workspace: the agent's own workspace (the current directory is not used)")
+		case ponsruntime.WorkspacePerConversation:
+			if options.Workspace == "" && options.GitRepository == "" {
+				if options.Workspace, err = filepath.Abs("."); err != nil {
+					return fmt.Errorf("runtime client: workspace: %w", err)
+				}
+			}
 		}
 	}
 	sendCount := 0

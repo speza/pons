@@ -3,6 +3,7 @@ package agentdir
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,7 +21,7 @@ func TestLoadCreatesDefaultsOnceAndNeverOverwrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings != (Settings{Workspace: ponsruntime.WorkspaceAgent}) || persona != "" {
+	if settings != (Settings{}) || persona != "" {
 		t.Fatalf("defaults = %+v, %q", settings, persona)
 	}
 
@@ -31,14 +32,14 @@ func TestLoadCreatesDefaultsOnceAndNeverOverwrites(t *testing.T) {
 			t.Fatalf("%s = %v, %v", name, info, err)
 		}
 	}
-	if info, err := os.Stat(filepath.Join(dir, WorkspaceDir)); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
-		t.Fatalf("%s = %v, %v", WorkspaceDir, info, err)
+	if _, err := os.Stat(filepath.Join(dir, WorkspaceDir)); !os.IsNotExist(err) {
+		t.Fatalf("%s created before first use: %v", WorkspaceDir, err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, SettingsFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{`"name"`, `"provider"`, `"model"`, `"max_turns"`, `"workspace": "agent"`} {
+	for _, field := range []string{`"name"`, `"provider"`, `"model"`, `"max_turns"`, `"workspace"`} {
 		if !strings.Contains(string(data), field) {
 			t.Fatalf("default agent.json lacks %s:\n%s", field, data)
 		}
@@ -50,7 +51,7 @@ func TestLoadCreatesDefaultsOnceAndNeverOverwrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings != (Settings{Name: "Ada", Model: "m", MaxTurns: 5, Workspace: ponsruntime.WorkspaceAgent}) || persona != "# Not a name\n\nBe brief." {
+	if settings != (Settings{Name: "Ada", Model: "m", MaxTurns: 5}) || persona != "# Not a name\n\nBe brief." {
 		t.Fatalf("edited agent = %+v, %q", settings, persona)
 	}
 
@@ -86,6 +87,23 @@ func TestWorkspaceMustBeARealDirectory(t *testing.T) {
 	}
 	if _, err := store.Workspace(ponsruntime.DefaultAgentID); err == nil {
 		t.Fatal("linked workspace accepted")
+	}
+
+	// Hands may replace the workspace with anything; only runs fail, and
+	// the server still starts.
+	for _, replace := range []func() error{
+		func() error { return os.Symlink(filepath.Join(t.TempDir(), "missing"), workspace) },
+		func() error { return os.WriteFile(workspace, []byte("x"), 0o600) },
+	} {
+		if err := errors.Join(os.Remove(workspace), replace()); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.Load(ponsruntime.DefaultAgentID); err != nil {
+			t.Fatalf("load with a damaged workspace: %v", err)
+		}
+		if _, err := store.Workspace(ponsruntime.DefaultAgentID); err == nil {
+			t.Fatal("damaged workspace accepted")
+		}
 	}
 }
 

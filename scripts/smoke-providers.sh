@@ -53,7 +53,10 @@ for model in "${models[@]}"; do
 	printf '\n== %s %s\n' "$provider" "$model"
 	state_dir="$work_dir/$(tr '/' '_' <<<"$model")"
 	output_file="$state_dir.out"
-	mkdir -p "$state_dir"
+	# This checks providers, not workspaces: let the client pick the tiny
+	# workspace whatever the sandbox's default policy.
+	mkdir -p "$state_dir/agents/default"
+	printf '{"workspace": "per_conversation"}\n' >"$state_dir/agents/default/agent.json"
 	# Keep going on failure so one run reports every model.
 	if ! .build/pons \
 		-provider "$provider" \

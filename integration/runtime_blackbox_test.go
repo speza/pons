@@ -447,7 +447,7 @@ func createConversation(t *testing.T, baseURL string) ponsruntime.Conversation {
 	t.Helper()
 	var conversation ponsruntime.Conversation
 	doJSON(t, http.MethodPost, baseURL+"/v1/conversations", []byte(`{}`), "", http.StatusCreated, &conversation)
-	if conversation.ID == "" || conversation.WorkspaceID != "agent-default" || conversation.Workspace != "" {
+	if conversation.ID == "" || !conversation.AgentWorkspace || conversation.WorkspaceID != "agent-default" || conversation.Workspace != "" {
 		t.Fatalf("created conversation = %+v", conversation)
 	}
 	return conversation

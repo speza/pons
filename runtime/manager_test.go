@@ -281,7 +281,7 @@ func TestManagerDoesNotEagerlyHydrateDormantConversations(t *testing.T) {
 	ctx := context.Background()
 	var first ponsruntime.Conversation
 	for range 50 {
-		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 		if err := base.CreateConversation(ctx, conversation); err != nil {
 			t.Fatal(err)
 		}
@@ -363,7 +363,7 @@ func TestSchedulerBoundsActiveRunGoroutines(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	for i := range 4 {
-		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 		if err := store.CreateConversation(ctx, conversation); err != nil {
 			t.Fatal(err)
 		}
@@ -423,7 +423,7 @@ func TestWorkspaceExclusionIsEnforcedByRunnableClaim(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()
 	for i := range 2 {
-		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: workspace, CreatedAt: time.Now().UTC().Add(time.Duration(i) * time.Nanosecond)}
+		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: workspace, CreatedAt: time.Now().UTC().Add(time.Duration(i) * time.Nanosecond)}
 		if err := store.CreateConversation(ctx, conversation); err != nil {
 			t.Fatal(err)
 		}
@@ -472,7 +472,7 @@ func TestSubscribeDuringClaimReturnsOrderedDurableEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer base.Close()
-	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 	if err := base.CreateConversation(context.Background(), conversation); err != nil {
 		t.Fatal(err)
 	}
@@ -998,7 +998,7 @@ func TestRestartMarksRequestedToolInterruptedWithoutRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: workspace, CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: workspace, CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(context.Background(), conversation); err != nil {
 		t.Fatal(err)
 	}
@@ -1050,7 +1050,7 @@ func TestRestartRunsDurablyQueuedSubmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: workspace, CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: workspace, CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(context.Background(), conversation); err != nil {
 		t.Fatal(err)
 	}

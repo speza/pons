@@ -25,9 +25,10 @@ type Config struct {
 
 	Store  Store
 	Runner Runner
-	// PrepareConversation validates and normalizes a new conversation's
-	// options under the given agent's workspace policy.
-	PrepareConversation func(AgentDefinition, ConversationOptions) (ConversationOptions, error)
+	// PrepareConversation validates and normalizes a client's workspace
+	// choice. It is not called under the agent workspace policy, which
+	// takes no choice.
+	PrepareConversation func(ConversationOptions) (ConversationOptions, error)
 	MaxConcurrent       int
 	EnvironmentOptions  []string
 	DefaultEnvironment  string
@@ -131,9 +132,9 @@ func (m *Manager) CreateConversation(ctx context.Context, selected ConversationO
 		return Conversation{}, err
 	}
 	selected.Environment = environment
-	if m.cfg.PrepareConversation != nil {
+	if m.cfg.PrepareConversation != nil && !agentWorkspace {
 		var err error
-		selected, err = m.cfg.PrepareConversation(m.cfg.Agent, selected)
+		selected, err = m.cfg.PrepareConversation(selected)
 		if err != nil {
 			return Conversation{}, fmt.Errorf("%w: %w", ErrInvalidConversation, err)
 		}
@@ -158,6 +159,7 @@ func (m *Manager) CreateConversation(ctx context.Context, selected ConversationO
 	value.WorkspaceLock = value.Workspace
 	switch {
 	case agentWorkspace:
+		value.AgentWorkspace = true
 		value.WorkspaceID = AgentWorkspaceID(value.AgentID)
 		value.WorkspaceLock = value.WorkspaceID
 	case selected.Environment == "e2b" || selected.GitRepository != "":
