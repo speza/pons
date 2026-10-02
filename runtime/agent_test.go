@@ -17,6 +17,17 @@ func TestAgentValidateRejectsMultilineName(t *testing.T) {
 	}
 }
 
+func TestValidateAgentIDRejectsPathSegments(t *testing.T) {
+	for _, id := range []string{"", ".", "..", "a/b", `a\b`, " default"} {
+		if err := ponsruntime.ValidateAgentID(id); err == nil {
+			t.Errorf("agent ID %q accepted", id)
+		}
+	}
+	if err := ponsruntime.ValidateAgentID("default"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAgentValidateRequiresKnownWorkspacePolicy(t *testing.T) {
 	for _, policy := range []string{"", "shared", "Agent"} {
 		if err := (ponsruntime.AgentDefinition{ID: "default", WorkspacePolicy: policy}).Validate(); err == nil {

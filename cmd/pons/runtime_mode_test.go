@@ -443,18 +443,18 @@ func TestRuntimeContextTurnsNormalizeEmptyToolArguments(t *testing.T) {
 	}
 }
 
-func TestRemoteStateDirectoryMustBeOutsideWorkspace(t *testing.T) {
+func TestWorkspaceAndStateDirectoryAreDisjoint(t *testing.T) {
 	workspace := t.TempDir()
 	for _, stateDir := range []string{workspace, filepath.Join(workspace, ".pons", "runtime")} {
-		if err := validateRemoteStateDirectory(workspace, stateDir); err == nil {
+		if err := validateWorkspaceOutsideState(workspace, stateDir); err == nil {
 			t.Fatalf("state directory %q was accepted", stateDir)
 		}
 	}
-	if err := validateRemoteStateDirectory(workspace, t.TempDir()); err != nil {
+	if err := validateWorkspaceOutsideState(workspace, t.TempDir()); err != nil {
 		t.Fatalf("separate state directory rejected: %v", err)
 	}
 	missingSource := filepath.Join(t.TempDir(), "removed-source")
-	if err := validateRemoteStateDirectory(missingSource, t.TempDir()); err != nil {
+	if err := validateWorkspaceOutsideState(missingSource, t.TempDir()); err != nil {
 		t.Fatalf("missing one-time source rejected: %v", err)
 	}
 	stateTarget := filepath.Join(workspace, "state")
@@ -466,8 +466,11 @@ func TestRemoteStateDirectoryMustBeOutsideWorkspace(t *testing.T) {
 	if err := os.Symlink(stateTarget, link); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateRemoteStateDirectory(workspace, filepath.Join(link, "runtime")); err == nil {
+	if err := validateWorkspaceOutsideState(workspace, filepath.Join(link, "runtime")); err == nil {
 		t.Fatal("state directory reached through symlink was accepted")
+	}
+	if err := validateWorkspaceOutsideState(filepath.Join(workspace, ".pons", "runtime", "agents"), filepath.Join(workspace, ".pons", "runtime")); err == nil {
+		t.Fatal("workspace inside the state directory was accepted")
 	}
 }
 
@@ -753,7 +756,7 @@ func TestAgentRunnerRejectsChangedRevisionPlugins(t *testing.T) {
 		},
 	}
 	request := ponsruntime.RunRequest{
-		Workspace: workspace, Environment: "seatbelt", Text: "queued work",
+		WorkspaceID: "conversation-1", Workspace: workspace, Environment: "seatbelt", Text: "queued work",
 		Agent: ponsruntime.AgentDefinition{
 			ID: "default", ProviderSlot: "primary", PluginPaths: []string{"/plugins/old.json"},
 			WorkspacePolicy: ponsruntime.WorkspacePerConversation,

@@ -304,17 +304,18 @@ func defaultAgent(opts serverOptions, agents *agentdir.Store) (ponsruntime.Agent
 		maxTurns = settings.MaxTurns
 	}
 	// An empty policy means the agent's own workspace wherever the sandbox
-	// supports it. E2B cannot seed one yet (agent workspaces spec, delivery
-	// step 2), so it keeps per-conversation workspaces.
+	// can host it.
+	supported := hostsAgentWorkspace(opts.Environment)
 	policy := settings.Workspace
 	if policy == "" {
 		policy = ponsruntime.WorkspaceAgent
-		if opts.Sandbox == "e2b" {
+		if !supported {
 			policy = ponsruntime.WorkspacePerConversation
 		}
 	}
-	if policy == ponsruntime.WorkspaceAgent && opts.Sandbox == "e2b" {
-		return ponsruntime.AgentDefinition{}, fmt.Errorf("agent %s: %w", agents.Dir(ponsruntime.DefaultAgentID), errAgentWorkspaceE2B)
+	if policy == ponsruntime.WorkspaceAgent && !supported {
+		return ponsruntime.AgentDefinition{}, fmt.Errorf("agent %s: sandbox %q: %w",
+			agents.Dir(ponsruntime.DefaultAgentID), opts.Sandbox, errAgentWorkspaceUnsupported)
 	}
 
 	agent := ponsruntime.AgentDefinition{
@@ -333,7 +334,16 @@ func defaultAgent(opts serverOptions, agents *agentdir.Store) (ponsruntime.Agent
 	return agent, nil
 }
 
-var errAgentWorkspaceE2B = errors.New(`the "agent" workspace policy is not yet supported on E2B; set "workspace" to "per_conversation" or "" in agent.json`)
+var errAgentWorkspaceUnsupported = errors.New(`the "agent" workspace policy is not yet supported by this sandbox; set "workspace" to "per_conversation" or "" in agent.json`)
+
+// hostsAgentWorkspace reports whether a provider can run hands in the agent's
+// workspace directory in place. A durable provider, such as E2B, works on a
+// remote copy it checkpoints and cannot yet seed an empty agent workspace
+// (agent workspaces spec, delivery step 2).
+func hostsAgentWorkspace(provider environment.Provider) bool {
+	_, durable := provider.(environment.DurableProvider)
+	return !durable
+}
 
 func fallbackIndex(fallbacks []llm.Fallback, id string) int {
 	return slices.IndexFunc(fallbacks, func(fallback llm.Fallback) bool { return fallback.ID == id })
@@ -469,7 +479,11 @@ func validateLoopbackAddress(address string) error {
 	return nil
 }
 
-func validateRemoteStateDirectory(workspace, stateDir string) error {
+// validateWorkspaceOutsideState requires a client-selected workspace and the
+// state directory to be disjoint. A workspace containing the state directory
+// would hand hands the runtime database; one inside it would reach agent
+// settings, agent workspaces, and checkpoints that only the server places.
+func validateWorkspaceOutsideState(workspace, stateDir string) error {
 	workspacePath, err := resolvePathWithMissingLeaf(workspace)
 	if err != nil {
 		return fmt.Errorf("runtime server: resolve workspace: %w", err)
@@ -478,12 +492,14 @@ func validateRemoteStateDirectory(workspace, stateDir string) error {
 	if err != nil {
 		return fmt.Errorf("runtime server: resolve state directory: %w", err)
 	}
-	contained, err := pathContains(workspacePath, statePath)
-	if err != nil {
-		return fmt.Errorf("runtime server: compare workspace and state directory: %w", err)
-	}
-	if contained {
-		return errors.New("runtime server: remote workspace state directory must be outside the source workspace")
+	for _, pair := range [][2]string{{workspacePath, statePath}, {statePath, workspacePath}} {
+		contained, err := pathContains(pair[0], pair[1])
+		if err != nil {
+			return fmt.Errorf("runtime server: compare workspace and state directory: %w", err)
+		}
+		if contained {
+			return errors.New("runtime server: workspace and runtime state directory must not contain each other")
+		}
 	}
 	return nil
 }
@@ -514,21 +530,8 @@ func validateConversationWorkspace(workspace, root, stateDir string) (string, er
 	if !allowed {
 		return "", fmt.Errorf("host workspace %q is outside allowed root %q", workspace, root)
 	}
-	if err := validateRemoteStateDirectory(resolved, stateDir); err != nil {
+	if err := validateWorkspaceOutsideState(resolved, stateDir); err != nil {
 		return "", err
-	}
-	// The state directory holds agent settings, workspaces, and checkpoints
-	// that only the server may place; a client path must not reach into it.
-	statePath, err := resolvePathWithMissingLeaf(stateDir)
-	if err != nil {
-		return "", fmt.Errorf("resolve state directory: %w", err)
-	}
-	inside, err := pathContains(statePath, resolved)
-	if err != nil {
-		return "", err
-	}
-	if inside {
-		return "", errors.New("host workspace must be outside the runtime state directory")
 	}
 	return resolved, nil
 }
@@ -608,8 +611,12 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	workspacePath := request.Workspace
 	switch {
 	case request.AgentWorkspace:
-		// The conversation's recorded environment keeps it off providers
-		// that cannot host an agent workspace.
+		if request.WorkspaceID != ponsruntime.AgentWorkspaceID(agent.ID) || request.Workspace != "" || request.GitRepository != "" {
+			return result, fmt.Errorf("agent workspace run has inconsistent workspace %q", request.WorkspaceID)
+		}
+		if !hostsAgentWorkspace(r.opts.Environment) {
+			return result, fmt.Errorf("sandbox %q: %w", r.opts.Sandbox, errAgentWorkspaceUnsupported)
+		}
 		if r.agents == nil {
 			return result, errors.New("agent workspace requires the agent directory")
 		}
@@ -618,6 +625,8 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		if workspacePath, err = r.agents.Workspace(agent.ID); err != nil {
 			return result, err
 		}
+	case request.WorkspaceID == "" || request.WorkspaceID == ponsruntime.AgentWorkspaceID(agent.ID):
+		return result, fmt.Errorf("run has inconsistent workspace %q", request.WorkspaceID)
 	case request.GitRepository == "":
 		if _, err := validateConversationWorkspace(request.Workspace, r.opts.WorkspaceRoot, r.opts.StateDir); err != nil {
 			return result, fmt.Errorf("run host workspace: %w", err)
@@ -1044,6 +1053,9 @@ func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, m
 	if conversationID == "" {
 		switch runtimeOptions.Agent.WorkspacePolicy {
 		case ponsruntime.WorkspaceAgent:
+			if options.Workspace != "" || options.GitRepository != "" || options.GitRevision != "" || options.GitAllRepositories {
+				return errors.New(`runtime client: the agent works in its own workspace, so workspace and Git options do not apply; set "workspace": "per_conversation" in its agent.json to choose one`)
+			}
 			// The current directory is not used, so say where work happens.
 			fmt.Fprintln(os.Stderr, "workspace: the agent's own workspace (the current directory is not used)")
 		case ponsruntime.WorkspacePerConversation:

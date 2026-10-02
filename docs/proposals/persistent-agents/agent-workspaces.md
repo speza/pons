@@ -130,7 +130,8 @@ The agent workspace is a directory the server owns:
 ```
 
 `agentdir.Store.Workspace` creates `workspace/` (mode 0700) on first use and
-requires it to be a real directory, like `memory/`. It is not created at
+requires it to be a real directory, like `memory/`. Agent IDs `.` and `..` are rejected, so the
+directory can never resolve outside `agents/<id>/`. It is not created at
 startup: hands can replace it, and that must fail only later runs, not server
 startup. The runner sets `spec.WorkspacePath` to it. Seatbelt grants `workspace/` and
 `memory/` read-write; `agent.json`, `PERSONA.md`, and `revisions/` stay
@@ -192,12 +193,13 @@ In `cmd/pons/runtime_mode.go`:
 
 - CLI: `client` defaults `-workspace` to the current directory only when the
   server's agent reports `per_conversation`; under `agent` it sends no
-  workspace, prints that the current directory is not used, and an explicit
-  `-workspace` is rejected by the server.
+  workspace and prints that the current directory is not used; it rejects
+  an explicit `-workspace` or Git option itself before creating anything.
 - Web: when the agent's policy is `agent`, the new-conversation form drops
   the environment and source pickers and shows "Agent workspace". Under
   `per_conversation` it is unchanged. Until the policy is known, the form
-  offers no choice and cannot create.
+  offers no choice and cannot create; if loading it fails, the form offers a
+  retry.
 - The conversation header shows the workspace ID rather than a host path for
   agent workspaces.
 
@@ -243,9 +245,11 @@ All deterministic, with no provider credentials or network:
    On E2B an empty policy resolves to `per_conversation`, so a fresh or
    upgraded E2B server keeps working; an explicit `agent` policy stops the
    server at startup with a clear "not yet supported" error naming the file.
-   That startup check is the only one: an agent-workspace conversation
-   records its environment, and the runner already refuses a conversation
-   recorded under another environment.
+   Support is a provider capability, not a sandbox name: a durable provider
+   (one that keeps a remote copy it checkpoints, today only E2B) cannot host
+   the agent workspace in place. The server checks it at startup, and the
+   runner checks it again, with the run's workspace fields, before starting
+   hands.
 2. **E2B `empty` seed.** Removes that error and makes an empty policy
    resolve to `agent` on E2B too.
 

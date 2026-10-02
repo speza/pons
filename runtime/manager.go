@@ -122,14 +122,18 @@ func (m *Manager) CreateConversation(ctx context.Context, selected ConversationO
 		return Conversation{}, err
 	}
 	agentWorkspace := m.cfg.Agent.WorkspacePolicy == WorkspaceAgent
-	if agentWorkspace {
-		if err := rejectWorkspaceChoice(selected, m.cfg.DefaultEnvironment); err != nil {
-			return Conversation{}, err
-		}
+	if agentWorkspace && (selected.Workspace != "" || selected.GitRepository != "" ||
+		selected.GitRevision != "" || selected.GitAllRepositories) {
+		return Conversation{}, fmt.Errorf("%w: the agent uses its own workspace; workspace and Git options are not accepted", ErrInvalidConversation)
 	}
 	environment, err := m.environment(selected.Environment)
 	if err != nil {
 		return Conversation{}, err
+	}
+	// One agent workspace lives in exactly one provider: the default.
+	if defaultEnvironment, _ := m.environment(""); agentWorkspace && environment != defaultEnvironment {
+		return Conversation{}, fmt.Errorf("%w: the agent's workspace lives in %q; environment %q is not accepted",
+			ErrInvalidConversation, defaultEnvironment, environment)
 	}
 	selected.Environment = environment
 	if m.cfg.PrepareConversation != nil && !agentWorkspace {
@@ -173,20 +177,6 @@ func (m *Manager) CreateConversation(ctx context.Context, selected ConversationO
 		return Conversation{}, err
 	}
 	return value, nil
-}
-
-// rejectWorkspaceChoice enforces that the agent policy takes no per-conversation
-// workspace, Git source, or non-default environment.
-func rejectWorkspaceChoice(selected ConversationOptions, defaultEnvironment string) error {
-	if selected.Workspace != "" || selected.GitRepository != "" || selected.GitRevision != "" || selected.GitAllRepositories {
-		return fmt.Errorf("%w: the agent uses its own workspace; workspace and Git options are not accepted", ErrInvalidConversation)
-	}
-	requested := strings.TrimSpace(selected.Environment)
-	if requested != "" && requested != strings.TrimSpace(defaultEnvironment) {
-		return fmt.Errorf("%w: the agent's workspace lives in %q; environment %q is not accepted",
-			ErrInvalidConversation, defaultEnvironment, requested)
-	}
-	return nil
 }
 
 func (m *Manager) environment(requested string) (string, error) {

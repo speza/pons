@@ -58,9 +58,11 @@ type AgentSummary struct {
 	WorkspacePolicy string `json:"workspace_policy"`
 }
 
-// ValidateAgentID rejects IDs that cannot name an agent directory.
+// ValidateAgentID rejects IDs that cannot name their own agent directory.
+// The directory roots sandbox grants, so "." and ".." must never resolve to
+// a parent or a directory shared with other agents.
 func ValidateAgentID(id string) error {
-	if id == "" || strings.ContainsAny(id, `/\`) || id != strings.TrimSpace(id) {
+	if id == "" || id == "." || id == ".." || strings.ContainsAny(id, `/\`) || id != strings.TrimSpace(id) {
 		return fmt.Errorf("%w: id %q", ErrInvalidAgent, id)
 	}
 	return nil

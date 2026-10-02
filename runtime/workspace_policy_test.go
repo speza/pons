@@ -28,7 +28,7 @@ func policyManager(t *testing.T, store ponsruntime.Store, agent ponsruntime.Agen
 	m, err := New(Config{
 		Agent: agent, AgentRevisions: policyRevisions,
 		Store: store, Runner: runner, MaxConcurrent: 2,
-		EnvironmentOptions: []string{"seatbelt"}, DefaultEnvironment: "seatbelt",
+		EnvironmentOptions: []string{"seatbelt", "e2b"}, DefaultEnvironment: "seatbelt",
 	})
 	if err != nil {
 		t.Fatal(err)

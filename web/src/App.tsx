@@ -126,6 +126,7 @@ function App() {
     environments: [],
     default_environment: "",
   });
+  const [optionsFailed, setOptionsFailed] = useState(false);
   const [newEnvironment, setNewEnvironment] = useState("");
   const [newWorkspace, setNewWorkspace] = useState("");
   const [newSource, setNewSource] = useState<"workspace" | "git">("workspace");
@@ -160,26 +161,33 @@ function App() {
     }
   }, []);
 
+  // The new-conversation form depends on these options, so a failed load
+  // leaves a retry rather than a form that can never submit.
+  const loadRuntimeOptions = useCallback(async (signal?: AbortSignal) => {
+    setOptionsFailed(false);
+    try {
+      const options = await getRuntimeOptions(signal);
+      const environments = options.environments;
+      const defaultEnvironment = environments.includes(options.default_environment)
+        ? options.default_environment
+        : (environments[0] ?? "");
+      setRuntimeOptions({ agent: options.agent, environments, default_environment: defaultEnvironment });
+      setNewEnvironment(defaultEnvironment);
+      setNewSource(defaultEnvironment === "e2b" ? "git" : "workspace");
+    } catch (cause) {
+      if (!signal?.aborted) {
+        setOptionsFailed(true);
+        setError(cause instanceof Error ? cause.message : "Could not load runtime options");
+      }
+    }
+  }, []);
+
   useEffect(() => {
     const controller = new AbortController();
-    void getRuntimeOptions(controller.signal)
-      .then((options) => {
-        const environments = options.environments;
-        const defaultEnvironment = environments.includes(options.default_environment)
-          ? options.default_environment
-          : (environments[0] ?? "");
-        setRuntimeOptions({ agent: options.agent, environments, default_environment: defaultEnvironment });
-        setNewEnvironment(defaultEnvironment);
-        setNewSource(defaultEnvironment === "e2b" ? "git" : "workspace");
-      })
-      .catch((cause) => {
-        if (!controller.signal.aborted) {
-          setError(cause instanceof Error ? cause.message : "Could not load runtime options");
-        }
-      });
+    void loadRuntimeOptions(controller.signal);
     void loadConversations(controller.signal);
     return () => controller.abort();
-  }, [loadConversations]);
+  }, [loadConversations, loadRuntimeOptions]);
 
   useEffect(() => writeStoredConversation(activeId), [activeId]);
 
@@ -457,7 +465,16 @@ function App() {
 
         <div className="new-session-controls">
           {workspacePolicy === undefined ? (
-            <p className="source-hint">Loading runtime options…</p>
+            optionsFailed ? (
+              <p className="source-hint">
+                Could not load runtime options.{" "}
+                <button className="setup-jump" type="button" onClick={() => void loadRuntimeOptions()}>
+                  Retry
+                </button>
+              </p>
+            ) : (
+              <p className="source-hint">Loading runtime options…</p>
+            )
           ) : agentWorkspace ? (
             <p className="source-hint">
               Agent workspace · new sessions share {agentName(runtimeOptions.agent)}'s files in{" "}

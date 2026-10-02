@@ -242,8 +242,9 @@ export ANTHROPIC_API_KEY=sk-ant-…
 go run ./cmd/pons -provider anthropic -message "introduce yourself"
 ```
 
-Bundled mode also reads `.pons.json` from its current directory. Explicit
-flags override config values. See [configuration](#configuration) for E2B and
+Bundled mode also reads `.pons.json` from its current directory for
+configuration such as the provider and plugins; it does not make that
+directory the agent's workspace. Explicit flags override config values. See [configuration](#configuration) for E2B and
 GitHub App settings.
 
 ## Long-lived runtime
@@ -538,7 +539,8 @@ restart the server to change the agent.
   directory; `per_conversation` lets each new conversation pick a host
   directory or Git repository. Empty means `agent` on Seatbelt and
   `per_conversation` on E2B, which does not support `agent` yet; setting
-  `agent` on E2B stops the server from starting. A conversation keeps the
+  `agent` on E2B stops the server from starting. Under `agent`, the client
+  rejects `-workspace` and Git options rather than ignoring them. A conversation keeps the
   workspace it was created with when the policy changes. Conversations sharing
   the agent workspace run one at a time. A malformed file stops the server
   from starting.
