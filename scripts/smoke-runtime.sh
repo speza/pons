@@ -23,10 +23,15 @@ cp go.mod "$agent_workspace/"
 
 prompt='Use the read_file tool to read go.mod. If its module line is exactly "module github.com/samperrin/pons", reply with exactly SMOKE_OK and nothing else. Otherwise reply with exactly SMOKE_FAILED and nothing else.'
 
+# The run is local, so turn off any E2B-only GitHub App from the global
+# config; explicit flags override it.
 go run ./cmd/pons \
 	-provider codex \
 	-model "$model" \
 	-sandbox seatbelt \
+	-github-app-id 0 \
+	-github-app-installation-id 0 \
+	-github-app-private-key "" \
 	-hands-command "$repo_root/.build/pons-hands" \
 	-state-dir "$state_dir" \
 	-debug \
