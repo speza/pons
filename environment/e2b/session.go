@@ -144,7 +144,7 @@ func (s *e2bSession) persistCheckpoint(ctx context.Context, archive io.ReadSeeke
 	// BaseRevision is a checkpoint reference; git/v1's is a Git object ID and
 	// must not be passed to the checkpoint store.
 	keep := []string{s.workspace.CheckpointRef}
-	if s.workspace.Strategy != environment.WorkspaceStrategyGit {
+	if s.workspace.Strategy == environment.WorkspaceStrategyArchive || s.workspace.Strategy == environment.WorkspaceStrategyEmpty {
 		keep = append([]string{s.workspace.BaseRevision}, keep...)
 	}
 	if err := s.checkpoints.PruneWorkspaceCheckpoints(ctx, s.workspace.ID, keep); err != nil && s.onError != nil {

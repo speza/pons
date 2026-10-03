@@ -586,7 +586,7 @@ func validateE2BSpec(spec environment.Spec) (string, []string, environment.Netwo
 	switch spec.WorkspacePlan.Strategy {
 	case environment.WorkspaceStrategyGit:
 	case environment.WorkspaceStrategyEmpty:
-		if spec.WorkspacePath != "" || spec.WorkspacePlan.SourceRef != "" || spec.WorkspacePlan.BaseRevision != "" {
+		if spec.WorkspacePath != "" {
 			return "", nil, "", nil, errors.New("environment: empty workspace takes no source")
 		}
 	default:
@@ -620,10 +620,8 @@ func validateE2BSpec(spec environment.Spec) (string, []string, environment.Netwo
 	if network != environment.NetworkDisabled && network != environment.NetworkEnabled {
 		return "", nil, "", nil, fmt.Errorf("environment: invalid network policy %q", network)
 	}
-	if spec.WorkspacePlan.Strategy != environment.WorkspaceStrategyEmpty {
-		if err := gitworkspace.ValidatePlan(spec.WorkspacePlan); err != nil {
-			return "", nil, "", nil, err
-		}
+	if err := gitworkspace.ValidatePlan(spec.WorkspacePlan); err != nil {
+		return "", nil, "", nil, err
 	}
 	if (spec.WorkspacePlan.Strategy == environment.WorkspaceStrategyGit || spec.GitAllRepositories) && network != environment.NetworkEnabled {
 		return "", nil, "", nil, errors.New("environment: Git workspace access requires network access")

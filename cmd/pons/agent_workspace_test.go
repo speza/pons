@@ -96,26 +96,20 @@ func TestAgentWorkspaceRunGrantsOnlyWorkspaceAndMemory(t *testing.T) {
 	}
 }
 
-func TestEmptyWorkspacePolicyResolvesToAgent(t *testing.T) {
-	for _, test := range []struct {
-		sandbox, setting, want string
-	}{
-		{"seatbelt", "", ponsruntime.WorkspaceAgent},
-		{"e2b", "", ponsruntime.WorkspaceAgent},
-		{"e2b", "per_conversation", ponsruntime.WorkspacePerConversation},
+func TestWorkspacePolicyDefaultsToAgent(t *testing.T) {
+	for setting, want := range map[string]string{
+		"":                 ponsruntime.WorkspaceAgent,
+		"agent":            ponsruntime.WorkspaceAgent,
+		"per_conversation": ponsruntime.WorkspacePerConversation,
 	} {
-		var provider environment.Provider = &recordingEnvironment{}
-		if test.sandbox == "e2b" {
-			provider = &lifecycleEnvironment{}
-		}
 		agents, err := agentdir.Open(t.TempDir())
 		if err != nil {
 			t.Fatal(err)
 		}
-		write(t, filepath.Join(agents.Dir(ponsruntime.DefaultAgentID), agentdir.SettingsFile), `{"workspace":"`+test.setting+`"}`)
-		agent, err := defaultAgent(serverOptions{Sandbox: test.sandbox, Environment: provider}, agents)
-		if err != nil || agent.WorkspacePolicy != test.want {
-			t.Errorf("%s with %q = %q, %v; want %q", test.sandbox, test.setting, agent.WorkspacePolicy, err, test.want)
+		write(t, filepath.Join(agents.Dir(ponsruntime.DefaultAgentID), agentdir.SettingsFile), `{"workspace":"`+setting+`"}`)
+		agent, err := defaultAgent(serverOptions{}, agents)
+		if err != nil || agent.WorkspacePolicy != want {
+			t.Errorf("%q = %q, %v; want %q", setting, agent.WorkspacePolicy, err, want)
 		}
 	}
 }

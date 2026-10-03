@@ -80,7 +80,16 @@ the server.
 
 ## 4. Create and resume conversations
 
-In another terminal, supply a credential-free HTTPS URL and either a remote
+By default the agent works in its own workspace and a new conversation takes
+no repository. To pick a repository per conversation, set the agent's
+workspace policy before starting the server:
+
+```sh
+mkdir -p ~/.pons/runtime/server/agents/default
+printf '{"workspace": "per_conversation"}\n' >~/.pons/runtime/server/agents/default/agent.json
+```
+
+Then, in another terminal, supply a credential-free HTTPS URL and either a remote
 branch name or a full 40-character commit ID:
 
 ```sh

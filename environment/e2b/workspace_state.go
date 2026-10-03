@@ -2,6 +2,7 @@ package e2b
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -59,9 +60,12 @@ func loadOrCreateWorkspace(
 	}
 
 	if plan.Strategy == environment.WorkspaceStrategyEmpty {
+		var archive bytes.Buffer
+		if err := tar.NewWriter(&archive).Close(); err != nil {
+			return environment.WorkspaceState{}, err
+		}
 		return seedWorkspace(
-			ctx, store, checkpoints, workspaceID, environment.WorkspaceStrategyEmpty, "", limit, onError,
-			func(out io.Writer) error { return tar.NewWriter(out).Close() },
+			ctx, store, checkpoints, workspaceID, environment.WorkspaceStrategyEmpty, "", &archive, limit, onError,
 		)
 	}
 
@@ -76,9 +80,17 @@ func loadOrCreateWorkspace(
 		}
 		return environment.WorkspaceState{}, errors.New("environment: workspace source must be a directory")
 	}
+	archive, err := stageWorkspaceArchive(func(out io.Writer) error {
+		return writeWorkspaceArchive(ctx, out, canonicalSource, limit)
+	})
+	if err != nil {
+		return environment.WorkspaceState{}, err
+	}
+
+	defer os.Remove(archive.Name())
+	defer archive.Close()
 	return seedWorkspace(
-		ctx, store, checkpoints, workspaceID, environment.WorkspaceStrategyArchive, canonicalSource, limit, onError,
-		func(out io.Writer) error { return writeWorkspaceArchive(ctx, out, canonicalSource, limit) },
+		ctx, store, checkpoints, workspaceID, environment.WorkspaceStrategyArchive, canonicalSource, archive, limit, onError,
 	)
 }
 
@@ -91,17 +103,10 @@ func seedWorkspace(
 	workspaceID string,
 	strategy environment.WorkspaceStrategy,
 	sourceRef string,
+	archive io.Reader,
 	limit int64,
 	onError func(error),
-	write func(io.Writer) error,
 ) (environment.WorkspaceState, error) {
-	archive, err := stageWorkspaceArchive(write)
-	if err != nil {
-		return environment.WorkspaceState{}, err
-	}
-
-	defer os.Remove(archive.Name())
-	defer archive.Close()
 	checkpointRef, err := checkpoints.PutWorkspaceCheckpoint(ctx, workspaceID, archive, limit)
 	if err != nil {
 		return environment.WorkspaceState{}, err

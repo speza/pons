@@ -597,17 +597,19 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	// The conversation's workspace, fixed at creation, decides where it
 	// runs; the revision's current policy never moves it.
 	workspacePath := request.Workspace
+	var workspacePlan environment.WorkspacePlan
 	switch {
 	case request.AgentWorkspace:
 		if request.WorkspaceID != ponsruntime.AgentWorkspaceID(agent.ID) || request.Workspace != "" || request.GitRepository != "" {
 			return result, fmt.Errorf("agent workspace run has inconsistent workspace %q", request.WorkspaceID)
 		}
-		// A durable provider seeds its own copy and needs no host directory.
-		if seedsAgentWorkspace(r.opts.Environment) {
-			break
-		}
 		if r.agents == nil {
 			return result, errors.New("agent workspace requires the agent directory")
+		}
+		// A durable provider seeds its own copy and needs no host directory.
+		if seedsAgentWorkspace(r.opts.Environment) {
+			workspacePlan = environment.WorkspacePlan{Strategy: environment.WorkspaceStrategyEmpty}
+			break
 		}
 		// The server chose this path under its state directory, so it is not
 		// subject to the client workspace checks.
@@ -619,6 +621,12 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	case request.GitRepository == "":
 		if _, err := validateConversationWorkspace(request.Workspace, r.opts.WorkspaceRoot, r.opts.StateDir); err != nil {
 			return result, fmt.Errorf("run host workspace: %w", err)
+		}
+	default:
+		workspacePlan = environment.WorkspacePlan{
+			Strategy:     environment.WorkspaceStrategyGit,
+			SourceRef:    request.GitRepository,
+			BaseRevision: request.GitRevision,
 		}
 	}
 
@@ -717,17 +725,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	spec.WorkspaceID = request.WorkspaceID
 	spec.WorkspacePath = workspacePath
 	spec.RunID = request.RunID
-	spec.WorkspacePlan = environment.WorkspacePlan{}
-	switch {
-	case request.AgentWorkspace && workspacePath == "":
-		spec.WorkspacePlan = environment.WorkspacePlan{Strategy: environment.WorkspaceStrategyEmpty}
-	case request.GitRepository != "":
-		spec.WorkspacePlan = environment.WorkspacePlan{
-			Strategy:     environment.WorkspaceStrategyGit,
-			SourceRef:    request.GitRepository,
-			BaseRevision: request.GitRevision,
-		}
-	}
+	spec.WorkspacePlan = workspacePlan
 	spec.GitAllRepositories = request.GitAllRepositories
 	spec.ReportProgress = func(step, message string) error {
 		return request.Emit(ponsruntime.RunEvent{Type: ponsruntime.EventEnvironmentProgress, Step: step, Message: message})

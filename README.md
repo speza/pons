@@ -216,8 +216,9 @@ go run ./cmd/pons -login
 go run ./cmd/pons -message "introduce yourself"
 ```
 
-The agent works in a workspace of its own, not the current directory; set `"workspace": "per_conversation"` in its `agent.json` to work
-on a project directory instead (see [Agent](#agent)).
+The agent works in a workspace of its own, not the current directory; set
+`"workspace": "per_conversation"` in its `agent.json` to work on a project
+directory instead (see [Agent](#agent)).
 
 Providers are presets over three wire APIs (`anthropic-messages`,
 `openai-completions`, `openai-responses`):
@@ -380,8 +381,9 @@ make smoke-e2b
 
 Run `go run ./cmd/pons serve --debug` after configuring the server.
 
-Each client can create an independent checkout from a repository and full
-commit ID:
+With `"workspace": "per_conversation"` in the agent's `agent.json` (see
+[Agent](#agent)), each client can create an independent checkout from a
+repository and full commit ID:
 
 ```sh
 go run ./cmd/pons client -i \
