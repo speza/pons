@@ -101,6 +101,19 @@ func TestValidateE2BGitWorkspaceRequiresNetwork(t *testing.T) {
 	}
 }
 
+func TestValidateE2BEmptyWorkspaceTakesNoSource(t *testing.T) {
+	empty := environment.WorkspacePlan{Strategy: environment.WorkspaceStrategyEmpty}
+	for name, spec := range map[string]environment.Spec{
+		"host path": {WorkspacePath: t.TempDir(), WorkspacePlan: empty},
+		"source":    {WorkspacePlan: environment.WorkspacePlan{Strategy: environment.WorkspaceStrategyEmpty, SourceRef: "https://github.com/example/project.git"}},
+	} {
+		spec.WorkspaceID, spec.Command = "workspace", []string{defaultE2BHandsPath}
+		if _, _, _, _, err := validateE2BSpec(spec); err == nil || !strings.Contains(err.Error(), "takes no source") {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+}
+
 func TestE2BWorkspaceGetsCredentialsBeforeCreatingSandbox(t *testing.T) {
 	wantErr := errors.New("token unavailable")
 	var called bool

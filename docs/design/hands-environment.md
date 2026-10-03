@@ -187,6 +187,13 @@ path is therefore only the source for a new logical workspace. The initial
 provider uploads that bounded seed once and persists a full validated
 checkpoint after every run without replacing the source checkout.
 
+The `agent` workspace policy has no local path. Its `agent-<id>` workspace
+uses the `empty` strategy: the first placement stores an empty archive as the
+base checkpoint, and every conversation of the agent then reconnects to the
+retained sandbox or restores the latest checkpoint onto a replacement (see
+[remote workspaces](remote-workspaces.md#empty-strategy-empty)). The agent's
+`memory/` is copied in separately and is not part of the checkpoint.
+
 SQLite stores logical workspace metadata separately from replaceable sandbox
 placement. Checkpoint archives live under the runtime state directory and are
 addressed by digest; a future checkpoint-store implementation may use S3 or

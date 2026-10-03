@@ -26,6 +26,9 @@ type WorkspaceStrategy string
 const (
 	WorkspaceStrategyArchive WorkspaceStrategy = "archive/v1"
 	WorkspaceStrategyGit     WorkspaceStrategy = "git/v1"
+	// WorkspaceStrategyEmpty seeds a workspace with no files and no host
+	// source, then persists it like archive/v1.
+	WorkspaceStrategyEmpty WorkspaceStrategy = "empty"
 )
 
 // WorkspaceState is durable logical workspace metadata. It survives the loss

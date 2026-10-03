@@ -303,19 +303,9 @@ func defaultAgent(opts serverOptions, agents *agentdir.Store) (ponsruntime.Agent
 	if settings.MaxTurns > 0 {
 		maxTurns = settings.MaxTurns
 	}
-	// An empty policy means the agent's own workspace wherever the sandbox
-	// can host it.
-	supported := hostsAgentWorkspace(opts.Environment)
 	policy := settings.Workspace
 	if policy == "" {
 		policy = ponsruntime.WorkspaceAgent
-		if !supported {
-			policy = ponsruntime.WorkspacePerConversation
-		}
-	}
-	if policy == ponsruntime.WorkspaceAgent && !supported {
-		return ponsruntime.AgentDefinition{}, fmt.Errorf("agent %s: sandbox %q: %w",
-			agents.Dir(ponsruntime.DefaultAgentID), opts.Sandbox, errAgentWorkspaceUnsupported)
 	}
 
 	agent := ponsruntime.AgentDefinition{
@@ -334,15 +324,13 @@ func defaultAgent(opts serverOptions, agents *agentdir.Store) (ponsruntime.Agent
 	return agent, nil
 }
 
-var errAgentWorkspaceUnsupported = errors.New(`the "agent" workspace policy is not yet supported by this sandbox; set "workspace" to "per_conversation" or "" in agent.json`)
-
-// hostsAgentWorkspace reports whether a provider can run hands in the agent's
-// workspace directory in place. A durable provider, such as E2B, works on a
-// remote copy it checkpoints and cannot yet seed an empty agent workspace
-// (agent workspaces spec, delivery step 2).
-func hostsAgentWorkspace(provider environment.Provider) bool {
+// seedsAgentWorkspace reports whether a provider keeps the agent workspace
+// itself. A durable provider, such as E2B, works on a remote copy it
+// checkpoints, seeded empty on first use; others run hands in the agent's
+// workspace directory in place.
+func seedsAgentWorkspace(provider environment.Provider) bool {
 	_, durable := provider.(environment.DurableProvider)
-	return !durable
+	return durable
 }
 
 func fallbackIndex(fallbacks []llm.Fallback, id string) int {
@@ -614,8 +602,9 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 		if request.WorkspaceID != ponsruntime.AgentWorkspaceID(agent.ID) || request.Workspace != "" || request.GitRepository != "" {
 			return result, fmt.Errorf("agent workspace run has inconsistent workspace %q", request.WorkspaceID)
 		}
-		if !hostsAgentWorkspace(r.opts.Environment) {
-			return result, fmt.Errorf("sandbox %q: %w", r.opts.Sandbox, errAgentWorkspaceUnsupported)
+		// A durable provider seeds its own copy and needs no host directory.
+		if seedsAgentWorkspace(r.opts.Environment) {
+			break
 		}
 		if r.agents == nil {
 			return result, errors.New("agent workspace requires the agent directory")
@@ -729,7 +718,10 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	spec.WorkspacePath = workspacePath
 	spec.RunID = request.RunID
 	spec.WorkspacePlan = environment.WorkspacePlan{}
-	if request.GitRepository != "" {
+	switch {
+	case request.AgentWorkspace && workspacePath == "":
+		spec.WorkspacePlan = environment.WorkspacePlan{Strategy: environment.WorkspaceStrategyEmpty}
+	case request.GitRepository != "":
 		spec.WorkspacePlan = environment.WorkspacePlan{
 			Strategy:     environment.WorkspaceStrategyGit,
 			SourceRef:    request.GitRepository,

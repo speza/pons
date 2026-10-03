@@ -1,6 +1,7 @@
 package e2b
 
 import (
+	"archive/tar"
 	"context"
 	"errors"
 	"fmt"
@@ -57,6 +58,13 @@ func loadOrCreateWorkspace(
 		}, nil
 	}
 
+	if plan.Strategy == environment.WorkspaceStrategyEmpty {
+		return seedWorkspace(
+			ctx, store, checkpoints, workspaceID, environment.WorkspaceStrategyEmpty, "", limit, onError,
+			func(out io.Writer) error { return tar.NewWriter(out).Close() },
+		)
+	}
+
 	canonicalSource, err := filepath.EvalSymlinks(sourcePath)
 	if err != nil {
 		return environment.WorkspaceState{}, fmt.Errorf("environment: workspace source: %w", err)
@@ -68,9 +76,26 @@ func loadOrCreateWorkspace(
 		}
 		return environment.WorkspaceState{}, errors.New("environment: workspace source must be a directory")
 	}
-	archive, err := stageWorkspaceArchive(func(out io.Writer) error {
-		return writeWorkspaceArchive(ctx, out, canonicalSource, limit)
-	})
+	return seedWorkspace(
+		ctx, store, checkpoints, workspaceID, environment.WorkspaceStrategyArchive, canonicalSource, limit, onError,
+		func(out io.Writer) error { return writeWorkspaceArchive(ctx, out, canonicalSource, limit) },
+	)
+}
+
+// seedWorkspace stores the first archive as both the base and the current
+// checkpoint, then records the logical workspace.
+func seedWorkspace(
+	ctx context.Context,
+	store environment.StateStore,
+	checkpoints environment.CheckpointStore,
+	workspaceID string,
+	strategy environment.WorkspaceStrategy,
+	sourceRef string,
+	limit int64,
+	onError func(error),
+	write func(io.Writer) error,
+) (environment.WorkspaceState, error) {
+	archive, err := stageWorkspaceArchive(write)
 	if err != nil {
 		return environment.WorkspaceState{}, err
 	}
@@ -82,10 +107,10 @@ func loadOrCreateWorkspace(
 		return environment.WorkspaceState{}, err
 	}
 	now := time.Now().UTC()
-	state = environment.WorkspaceState{
+	state := environment.WorkspaceState{
 		ID:              workspaceID,
-		Strategy:        environment.WorkspaceStrategyArchive,
-		SourceRef:       canonicalSource,
+		Strategy:        strategy,
+		SourceRef:       sourceRef,
 		BaseRevision:    checkpointRef,
 		CheckpointRef:   checkpointRef,
 		SetupGeneration: e2bSetupGeneration,

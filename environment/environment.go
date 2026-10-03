@@ -41,7 +41,8 @@ type ResourceLimits struct {
 // workspace. SourceRef is a non-secret source identifier; for git/v1 it is a
 // credential-free HTTPS repository URL. BaseRevision is an immutable commit ID
 // or a fully qualified branch ref, resolved when the workspace is provisioned.
-// A zero plan preserves the provider's archive/v1 behavior.
+// A zero plan preserves the provider's archive/v1 behavior. The empty strategy
+// takes neither a source nor a WorkspacePath.
 type WorkspacePlan struct {
 	Strategy     WorkspaceStrategy
 	SourceRef    string

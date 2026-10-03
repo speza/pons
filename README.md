@@ -216,8 +216,7 @@ go run ./cmd/pons -login
 go run ./cmd/pons -message "introduce yourself"
 ```
 
-On Seatbelt the agent works in a workspace of its own, not the current
-directory; set `"workspace": "per_conversation"` in its `agent.json` to work
+The agent works in a workspace of its own, not the current directory; set `"workspace": "per_conversation"` in its `agent.json` to work
 on a project directory instead (see [Agent](#agent)).
 
 Providers are presets over three wire APIs (`anthropic-messages`,
@@ -264,11 +263,10 @@ go run ./cmd/pons client -i
 go run ./cmd/pons client -conversation <id> -message "continue"
 ```
 
-On Seatbelt the agent has one workspace of its own by default, shared by all
-its conversations (see [Agent](#agent)), so a new conversation takes no
-workspace option and the client says so. Under the `per_conversation` policy,
-the default on E2B, the client selects a workspace when creating a
-conversation instead: `client -workspace /path/to/project`, defaulting to the
+By default the agent has one workspace of its own, shared by all its
+conversations on Seatbelt or E2B (see [Agent](#agent)), so a new conversation
+takes no workspace option and the client says so. Under the `per_conversation`
+policy, the client selects a workspace when creating a conversation instead: `client -workspace /path/to/project`, defaulting to the
 client's current directory. That path must exist on the
 server host, be inside `workspace_root` (the server user's home directory by
 default), and be outside the runtime state directory. Set `"workspace_root"` in
@@ -537,16 +535,17 @@ restart the server to change the agent.
   `provider` names a configured provider slot. `workspace` is the workspace
   policy: `agent` gives every conversation the agent's own `workspace/`
   directory; `per_conversation` lets each new conversation pick a host
-  directory or Git repository. Empty means `agent` on Seatbelt and
-  `per_conversation` on E2B, which does not support `agent` yet; setting
-  `agent` on E2B stops the server from starting. Under `agent`, the client
+  directory or Git repository. Empty means `agent`. On E2B the agent
+  workspace starts empty in the sandbox and persists through checkpoints
+  under the state directory's `workspaces/`, not in `workspace/`. Under
+  `agent`, the client
   rejects `-workspace` and Git options rather than ignoring them. A conversation keeps the
   workspace it was created with when the policy changes. Conversations sharing
   the agent workspace run one at a time. A malformed file stops the server
   from starting.
 - `PERSONA.md` holds free-form instructions, used verbatim.
-- `workspace/` holds the agent's own files under the `agent` policy, created
-  on first use. They persist across conversations and server restarts.
+- `workspace/` holds the agent's own files under the `agent` policy on
+  Seatbelt, created on first use. They persist across conversations and server restarts.
 - `memory/` holds the agent's own notes: `MEMORY.md`, an index with one line
   per topic, and one file per topic. The agent keeps these up to date itself,
   and each conversation starts with `MEMORY.md` (up to 16 KiB) as reference
