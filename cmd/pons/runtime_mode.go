@@ -147,7 +147,8 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 		return err
 	}
 	logger.Info("agent ready", "agent_id", agent.ID, "agent_name", agent.Name,
-		"agent_revision", agent.Revision(), "agent_dir", agents.Dir(agent.ID))
+		"agent_revision", agent.Revision(), "agent_dir", agents.Dir(agent.ID),
+		"workspace_policy", agent.WorkspacePolicy)
 
 	environmentOptions := []string{opts.Sandbox}
 	network := opts.EnvironmentSpec.Network
@@ -302,20 +303,46 @@ func defaultAgent(opts serverOptions, agents *agentdir.Store) (ponsruntime.Agent
 	if settings.MaxTurns > 0 {
 		maxTurns = settings.MaxTurns
 	}
+	// An empty policy means the agent's own workspace wherever the sandbox
+	// can host it.
+	supported := hostsAgentWorkspace(opts.Environment)
+	policy := settings.Workspace
+	if policy == "" {
+		policy = ponsruntime.WorkspaceAgent
+		if !supported {
+			policy = ponsruntime.WorkspacePerConversation
+		}
+	}
+	if policy == ponsruntime.WorkspaceAgent && !supported {
+		return ponsruntime.AgentDefinition{}, fmt.Errorf("agent %s: sandbox %q: %w",
+			agents.Dir(ponsruntime.DefaultAgentID), opts.Sandbox, errAgentWorkspaceUnsupported)
+	}
 
 	agent := ponsruntime.AgentDefinition{
-		ID:           ponsruntime.DefaultAgentID,
-		Name:         settings.Name,
-		Persona:      persona,
-		ProviderSlot: slot,
-		Model:        model,
-		MaxTurns:     maxTurns,
-		PluginPaths:  slices.Clone(opts.PluginPaths),
+		ID:              ponsruntime.DefaultAgentID,
+		Name:            settings.Name,
+		Persona:         persona,
+		ProviderSlot:    slot,
+		Model:           model,
+		MaxTurns:        maxTurns,
+		PluginPaths:     slices.Clone(opts.PluginPaths),
+		WorkspacePolicy: policy,
 	}
 	if err := agents.Record(agent); err != nil {
 		return ponsruntime.AgentDefinition{}, err
 	}
 	return agent, nil
+}
+
+var errAgentWorkspaceUnsupported = errors.New(`the "agent" workspace policy is not yet supported by this sandbox; set "workspace" to "per_conversation" or "" in agent.json`)
+
+// hostsAgentWorkspace reports whether a provider can run hands in the agent's
+// workspace directory in place. A durable provider, such as E2B, works on a
+// remote copy it checkpoints and cannot yet seed an empty agent workspace
+// (agent workspaces spec, delivery step 2).
+func hostsAgentWorkspace(provider environment.Provider) bool {
+	_, durable := provider.(environment.DurableProvider)
+	return !durable
 }
 
 func fallbackIndex(fallbacks []llm.Fallback, id string) int {
@@ -452,7 +479,11 @@ func validateLoopbackAddress(address string) error {
 	return nil
 }
 
-func validateRemoteStateDirectory(workspace, stateDir string) error {
+// validateWorkspaceOutsideState requires a client-selected workspace and the
+// state directory to be disjoint. A workspace containing the state directory
+// would hand hands the runtime database; one inside it would reach agent
+// settings, agent workspaces, and checkpoints that only the server places.
+func validateWorkspaceOutsideState(workspace, stateDir string) error {
 	workspacePath, err := resolvePathWithMissingLeaf(workspace)
 	if err != nil {
 		return fmt.Errorf("runtime server: resolve workspace: %w", err)
@@ -461,12 +492,14 @@ func validateRemoteStateDirectory(workspace, stateDir string) error {
 	if err != nil {
 		return fmt.Errorf("runtime server: resolve state directory: %w", err)
 	}
-	contained, err := pathContains(workspacePath, statePath)
-	if err != nil {
-		return fmt.Errorf("runtime server: compare workspace and state directory: %w", err)
-	}
-	if contained {
-		return errors.New("runtime server: remote workspace state directory must be outside the source workspace")
+	for _, pair := range [][2]string{{workspacePath, statePath}, {statePath, workspacePath}} {
+		contained, err := pathContains(pair[0], pair[1])
+		if err != nil {
+			return fmt.Errorf("runtime server: compare workspace and state directory: %w", err)
+		}
+		if contained {
+			return errors.New("runtime server: workspace and runtime state directory must not contain each other")
+		}
 	}
 	return nil
 }
@@ -497,7 +530,7 @@ func validateConversationWorkspace(workspace, root, stateDir string) (string, er
 	if !allowed {
 		return "", fmt.Errorf("host workspace %q is outside allowed root %q", workspace, root)
 	}
-	if err := validateRemoteStateDirectory(resolved, stateDir); err != nil {
+	if err := validateWorkspaceOutsideState(resolved, stateDir); err != nil {
 		return "", err
 	}
 	return resolved, nil
@@ -573,7 +606,28 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	if !slices.Equal(agent.PluginPaths, r.opts.PluginPaths) {
 		return result, errors.New("agent revision's hands plugin configuration changed; restore its plugin list or submit new work")
 	}
-	if request.GitRepository == "" {
+	// The conversation's workspace, fixed at creation, decides where it
+	// runs; the revision's current policy never moves it.
+	workspacePath := request.Workspace
+	switch {
+	case request.AgentWorkspace:
+		if request.WorkspaceID != ponsruntime.AgentWorkspaceID(agent.ID) || request.Workspace != "" || request.GitRepository != "" {
+			return result, fmt.Errorf("agent workspace run has inconsistent workspace %q", request.WorkspaceID)
+		}
+		if !hostsAgentWorkspace(r.opts.Environment) {
+			return result, fmt.Errorf("sandbox %q: %w", r.opts.Sandbox, errAgentWorkspaceUnsupported)
+		}
+		if r.agents == nil {
+			return result, errors.New("agent workspace requires the agent directory")
+		}
+		// The server chose this path under its state directory, so it is not
+		// subject to the client workspace checks.
+		if workspacePath, err = r.agents.Workspace(agent.ID); err != nil {
+			return result, err
+		}
+	case request.WorkspaceID == "" || request.WorkspaceID == ponsruntime.AgentWorkspaceID(agent.ID):
+		return result, fmt.Errorf("run has inconsistent workspace %q", request.WorkspaceID)
+	case request.GitRepository == "":
 		if _, err := validateConversationWorkspace(request.Workspace, r.opts.WorkspaceRoot, r.opts.StateDir); err != nil {
 			return result, fmt.Errorf("run host workspace: %w", err)
 		}
@@ -651,10 +705,10 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}
 
 	core := pons.New()
-	core.Workspace, core.MaxTurns = request.Workspace, agent.MaxTurns
+	core.Workspace, core.MaxTurns = workspacePath, agent.MaxTurns
 	core.RecentActionContext = runtimeActionContext(request.Context, request.Text)
 	runLog := r.logger.With("conversation_id", request.ConversationID, "run_id", request.RunID,
-		"workspace_id", request.ConversationID, "agent_id", agent.ID, "agent_revision", agent.Revision())
+		"workspace_id", request.WorkspaceID, "agent_id", agent.ID, "agent_revision", agent.Revision())
 	runLog.Info("run started")
 	defer func() {
 		if err != nil {
@@ -666,12 +720,13 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 
 	// Hands always run in an execution environment; there is no in-process
 	// fallback. Only the memory directory is granted beyond the workspace;
-	// the rest of the agent directory stays outside every grant. Concat
-	// copies so concurrent runs never share a slice.
+	// the rest of the agent directory, apart from an agent workspace, stays
+	// outside every grant. Concat copies so concurrent runs never share a
+	// slice.
 	spec.ReadWrite = slices.Concat(spec.ReadWrite, memoryGrant)
 	memoryIndex := len(spec.ReadWrite) - 1
-	spec.WorkspaceID = request.ConversationID
-	spec.WorkspacePath = request.Workspace
+	spec.WorkspaceID = request.WorkspaceID
+	spec.WorkspacePath = workspacePath
 	spec.RunID = request.RunID
 	spec.WorkspacePlan = environment.WorkspacePlan{}
 	if request.GitRepository != "" {
@@ -746,7 +801,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 			continue
 		}
 		launch := hookLaunch{Path: r.opts.PluginPath, MaxResultBytes: r.opts.PluginMaxResultBytes}
-		plugin, pluginErr := launch.start(source.Manifest, source.Config, request.Workspace)
+		plugin, pluginErr := launch.start(source.Manifest, source.Config, workspacePath)
 		if pluginErr != nil {
 			return result, pluginErr
 		}
@@ -759,7 +814,7 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}
 
 	runLog.Debug("hands ready", "sandbox", metadata.Provider, "sandbox_id", metadata.EnvironmentID,
-		"network", metadata.Network, "workspace", request.Workspace, "tools", len(core.ToolSpecs()))
+		"network", metadata.Network, "workspace", workspacePath, "tools", len(core.ToolSpecs()))
 	core.OnEventError(func(event pons.Event) error {
 		switch event.Type {
 		case pons.EventActionDecision:
@@ -995,6 +1050,22 @@ func runClient(ctx context.Context, serverURL, conversationID, idempotencyKey, m
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "agent: %s\n", agentLabel(runtimeOptions.Agent))
+	if conversationID == "" {
+		switch runtimeOptions.Agent.WorkspacePolicy {
+		case ponsruntime.WorkspaceAgent:
+			if options.Workspace != "" || options.GitRepository != "" || options.GitRevision != "" || options.GitAllRepositories {
+				return errors.New(`runtime client: the agent works in its own workspace, so workspace and Git options do not apply; set "workspace": "per_conversation" in its agent.json to choose one`)
+			}
+			// The current directory is not used, so say where work happens.
+			fmt.Fprintln(os.Stderr, "workspace: the agent's own workspace (the current directory is not used)")
+		case ponsruntime.WorkspacePerConversation:
+			if options.Workspace == "" && options.GitRepository == "" {
+				if options.Workspace, err = filepath.Abs("."); err != nil {
+					return fmt.Errorf("runtime client: workspace: %w", err)
+				}
+			}
+		}
+	}
 	sendCount := 0
 	send := func(text string) error {
 		key := idempotencyKey

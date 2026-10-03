@@ -145,8 +145,11 @@ func TestAgentRunnerHydratesFreshBrainFromConversation(t *testing.T) {
 		requestNumber++
 		inboundID := fmt.Sprintf("inbound-%d", requestNumber)
 		req := ponsruntime.RunRequest{
-			Agent:          ponsruntime.AgentDefinition{ID: ponsruntime.DefaultAgentID, Model: "test", MaxTurns: 3},
-			ConversationID: "conversation-1", InboundMessageID: inboundID,
+			Agent: ponsruntime.AgentDefinition{
+				ID: ponsruntime.DefaultAgentID, Model: "test", MaxTurns: 3,
+				WorkspacePolicy: ponsruntime.WorkspacePerConversation,
+			},
+			ConversationID: "conversation-1", WorkspaceID: "conversation-1", InboundMessageID: inboundID,
 			RunID: fmt.Sprintf("run-%d", requestNumber), Text: text,
 			GitRepository: "https://github.com/acme/a.git", GitRevision: strings.Repeat("a", 40),
 			Emit: func(event ponsruntime.RunEvent) error {
@@ -373,7 +376,7 @@ func TestRuntimeServerShutdownClosesActiveSSE(t *testing.T) {
 		}), started)
 	}()
 	serverURL := <-started
-	response, err := http.Post(serverURL+"/v1/conversations", "application/json", strings.NewReader(fmt.Sprintf(`{"workspace":%q}`, workspace)))
+	response, err := http.Post(serverURL+"/v1/conversations", "application/json", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -440,18 +443,18 @@ func TestRuntimeContextTurnsNormalizeEmptyToolArguments(t *testing.T) {
 	}
 }
 
-func TestRemoteStateDirectoryMustBeOutsideWorkspace(t *testing.T) {
+func TestWorkspaceAndStateDirectoryAreDisjoint(t *testing.T) {
 	workspace := t.TempDir()
 	for _, stateDir := range []string{workspace, filepath.Join(workspace, ".pons", "runtime")} {
-		if err := validateRemoteStateDirectory(workspace, stateDir); err == nil {
+		if err := validateWorkspaceOutsideState(workspace, stateDir); err == nil {
 			t.Fatalf("state directory %q was accepted", stateDir)
 		}
 	}
-	if err := validateRemoteStateDirectory(workspace, t.TempDir()); err != nil {
+	if err := validateWorkspaceOutsideState(workspace, t.TempDir()); err != nil {
 		t.Fatalf("separate state directory rejected: %v", err)
 	}
 	missingSource := filepath.Join(t.TempDir(), "removed-source")
-	if err := validateRemoteStateDirectory(missingSource, t.TempDir()); err != nil {
+	if err := validateWorkspaceOutsideState(missingSource, t.TempDir()); err != nil {
 		t.Fatalf("missing one-time source rejected: %v", err)
 	}
 	stateTarget := filepath.Join(workspace, "state")
@@ -463,8 +466,11 @@ func TestRemoteStateDirectoryMustBeOutsideWorkspace(t *testing.T) {
 	if err := os.Symlink(stateTarget, link); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateRemoteStateDirectory(workspace, filepath.Join(link, "runtime")); err == nil {
+	if err := validateWorkspaceOutsideState(workspace, filepath.Join(link, "runtime")); err == nil {
 		t.Fatal("state directory reached through symlink was accepted")
+	}
+	if err := validateWorkspaceOutsideState(filepath.Join(workspace, ".pons", "runtime", "agents"), filepath.Join(workspace, ".pons", "runtime")); err == nil {
+		t.Fatal("workspace inside the state directory was accepted")
 	}
 }
 
@@ -503,6 +509,18 @@ func TestClientWorkspaceMustStayWithinServerRoot(t *testing.T) {
 	}
 	if _, err := validateConversationWorkspace(workspace, root, filepath.Join(workspace, "state")); err == nil {
 		t.Fatal("state directory inside workspace accepted")
+	}
+
+	// The default root, the home directory, contains the state directory;
+	// its agent files and workspaces are the server's to place.
+	state := filepath.Join(root, ".pons", "runtime", "server")
+	for _, inside := range []string{state, filepath.Join(state, "agents", "default"), filepath.Join(state, "agents", "default", "workspace")} {
+		if err := os.MkdirAll(inside, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := validateConversationWorkspace(inside, root, state); err == nil {
+			t.Fatalf("workspace %s inside the state directory accepted", inside)
+		}
 	}
 }
 
@@ -647,7 +665,8 @@ func TestDefaultAgentResolvesDirectoryAndExcludesCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	if fresh.ID != ponsruntime.DefaultAgentID || fresh.Name != "" || fresh.Persona != "" || fresh.Model != "m" ||
-		fresh.MaxTurns != 7 || fresh.ProviderSlot != "primary" || !slices.Equal(fresh.PluginPaths, opts.PluginPaths) {
+		fresh.MaxTurns != 7 || fresh.ProviderSlot != "primary" || !slices.Equal(fresh.PluginPaths, opts.PluginPaths) ||
+		fresh.WorkspacePolicy != ponsruntime.WorkspaceAgent {
 		t.Fatalf("fresh agent = %+v", fresh)
 	}
 	if _, err := agents.AgentRevision(context.Background(), fresh.ID, fresh.Revision()); err != nil {
@@ -655,14 +674,14 @@ func TestDefaultAgentResolvesDirectoryAndExcludesCredentials(t *testing.T) {
 	}
 
 	dir := agents.Dir(ponsruntime.DefaultAgentID)
-	write(t, filepath.Join(dir, "agent.json"), `{"name":"Ada","provider":"backup","max_turns":4}`)
+	write(t, filepath.Join(dir, "agent.json"), `{"name":"Ada","provider":"backup","max_turns":4,"workspace":"per_conversation"}`)
 	write(t, filepath.Join(dir, "PERSONA.md"), "# Not a name\n\nBe brief.\n")
 	agent, err := defaultAgent(opts, agents)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if agent.Name != "Ada" || agent.Persona != "# Not a name\n\nBe brief." || agent.ProviderSlot != "backup" ||
-		agent.Model != "backup-model" || agent.MaxTurns != 4 {
+		agent.Model != "backup-model" || agent.MaxTurns != 4 || agent.WorkspacePolicy != ponsruntime.WorkspacePerConversation {
 		t.Fatalf("configured agent = %+v", agent)
 	}
 	encoded, err := json.Marshal(agent)
@@ -737,9 +756,10 @@ func TestAgentRunnerRejectsChangedRevisionPlugins(t *testing.T) {
 		},
 	}
 	request := ponsruntime.RunRequest{
-		Workspace: workspace, Environment: "seatbelt", Text: "queued work",
+		WorkspaceID: "conversation-1", Workspace: workspace, Environment: "seatbelt", Text: "queued work",
 		Agent: ponsruntime.AgentDefinition{
 			ID: "default", ProviderSlot: "primary", PluginPaths: []string{"/plugins/old.json"},
+			WorkspacePolicy: ponsruntime.WorkspacePerConversation,
 		},
 	}
 	_, err := runner.Run(context.Background(), request)
@@ -802,7 +822,7 @@ func TestEditedPersonaChangesIdentityAfterRestart(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		err := runBundled(ctx, newServerLogger(io.Discard, false), testServerOptions(serverOptions{
-			StateDir: stateDir, WorkspaceRoot: os.TempDir(), ClientWorkspace: t.TempDir(), MaxTurns: 3, MaxConcurrent: 1,
+			StateDir: stateDir, WorkspaceRoot: os.TempDir(), MaxTurns: 3, MaxConcurrent: 1,
 			Brain: llm.Config{Provider: "openai", Model: "test", APIKey: "test", BaseURL: provider.URL + "/v1"},
 		}), "", "", "who are you?", false)
 		if err != nil {

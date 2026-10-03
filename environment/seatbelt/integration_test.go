@@ -147,7 +147,9 @@ func TestSeatbeltIntegration(t *testing.T) {
 // TestSeatbeltMemoryGrant proves the plan's phase 2 boundary: hands may write
 // the agent's memory directory, but never its siblings PERSONA.md,
 // agent.json, and revisions.
-func TestSeatbeltMemoryGrant(t *testing.T) {
+// TestSeatbeltAgentDirectoryGrants mirrors an agent-workspace run: the
+// workspace and memory are the agent directory's only granted parts.
+func TestSeatbeltAgentDirectoryGrants(t *testing.T) {
 	if os.Getenv("PONS_SEATBELT_TEST") != "1" {
 		t.Skip("set PONS_SEATBELT_TEST=1 to run the macOS Seatbelt integration test")
 	}
@@ -156,8 +158,8 @@ func TestSeatbeltMemoryGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	workspace := root + "/workspace"
 	agentDir := root + "/state/agents/default"
+	workspace := agentDir + "/workspace"
 	memoryDir := agentDir + "/memory"
 	for _, dir := range []string{workspace, agentDir + "/revisions", memoryDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -212,7 +214,16 @@ func TestSeatbeltMemoryGrant(t *testing.T) {
 	if data, err := os.ReadFile(memoryDir + "/MEMORY.md"); err != nil || string(data) != "- notemore\n" {
 		t.Fatalf("memory copy = %q, %v", data, err)
 	}
+	if result := execute("write_file", map[string]string{"path": "notes.txt", "content": "kept"}); !result.OK {
+		t.Fatalf("workspace write = %+v", result)
+	}
+	if data, err := os.ReadFile(workspace + "/notes.txt"); err != nil || string(data) != "kept" {
+		t.Fatalf("workspace file = %q, %v", data, err)
+	}
 	for _, path := range protected {
+		if result := execute("bash", map[string]any{"command": "cat " + path, "timeout": 5}); result.ExitCode == 0 {
+			t.Fatalf("bash read %s: %+v", path, result)
+		}
 		if result := execute("write_file", map[string]string{"path": path, "content": "agent"}); result.OK {
 			t.Fatalf("write_file reached %s", path)
 		}

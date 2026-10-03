@@ -338,10 +338,14 @@ type EnvironmentProgress struct {
 type RunRequest struct {
 	// Agent is the definition revision the submission was accepted under. The
 	// runner composes the brain from it rather than from current settings.
-	Agent              AgentDefinition
-	ConversationID     string
-	RunID              string
-	InboundMessageID   string
+	Agent            AgentDefinition
+	ConversationID   string
+	RunID            string
+	InboundMessageID string
+	WorkspaceID      string
+	// AgentWorkspace marks a run in the agent's own server-owned workspace;
+	// Workspace is then empty.
+	AgentWorkspace     bool
 	Workspace          string
 	Environment        string
 	GitRepository      string
@@ -382,9 +386,15 @@ func (f RunnerFunc) Run(ctx context.Context, req RunRequest) (RunResult, error) 
 	return f(ctx, req)
 }
 
+// Conversation is fixed at creation. WorkspaceID names the logical workspace
+// its runs use: the conversation's own ID, or AgentWorkspaceID when
+// AgentWorkspace marks a conversation created under the agent workspace
+// policy. Workspace is then empty because the server owns the directory.
 type Conversation struct {
 	ID                 string    `json:"conversation_id"`
 	AgentID            string    `json:"agent_id"`
+	WorkspaceID        string    `json:"workspace_id"`
+	AgentWorkspace     bool      `json:"agent_workspace,omitempty"`
 	Workspace          string    `json:"workspace"`
 	WorkspaceLock      string    `json:"-"`
 	Environment        string    `json:"environment,omitempty"`

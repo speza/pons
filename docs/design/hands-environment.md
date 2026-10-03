@@ -107,6 +107,17 @@ allow the process creation and executable lookup needed by the configured
 hands; otherwise `bash` would be unusable even though the workspace policy
 was correct.
 
+Under the `agent` workspace policy (ADR-0022) the workspace is the server-owned
+`<state_dir>/agents/<id>/workspace/`, shared by every conversation of the
+agent and serialized by its `agent-<id>` workspace lock. The run grants it and
+the agent's `memory/` read-write; the rest of the agent directory
+(`agent.json`, `PERSONA.md`, `revisions/`) stays outside the profile. The
+server chooses this path, so it is not subject to the `workspace_root` checks
+that apply to client-selected host paths; those checks reject any client path
+inside the state directory. The directory is created on first use, so a run
+that replaces it can fail later runs but not server startup. No checkpoints
+are taken: the directory is the durable copy.
+
 The local environment can be created for an active agent burst and torn down
 when the conversation becomes idle. Workspace changes remain on disk. Seatbelt
 is a baseline boundary and should not be described as a universal guarantee

@@ -53,7 +53,10 @@ const (
 var New = ponsruntime.New
 
 var (
-	testAgent    = ponsruntime.AgentDefinition{ID: ponsruntime.DefaultAgentID, Name: "Test", MaxTurns: 3}
+	testAgent = ponsruntime.AgentDefinition{
+		ID: ponsruntime.DefaultAgentID, Name: "Test", MaxTurns: 3,
+		WorkspacePolicy: ponsruntime.WorkspacePerConversation,
+	}
 	testRevision = testAgent.Revision()
 )
 
@@ -278,7 +281,7 @@ func TestManagerDoesNotEagerlyHydrateDormantConversations(t *testing.T) {
 	ctx := context.Background()
 	var first ponsruntime.Conversation
 	for range 50 {
-		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 		if err := base.CreateConversation(ctx, conversation); err != nil {
 			t.Fatal(err)
 		}
@@ -360,7 +363,7 @@ func TestSchedulerBoundsActiveRunGoroutines(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	for i := range 4 {
-		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 		if err := store.CreateConversation(ctx, conversation); err != nil {
 			t.Fatal(err)
 		}
@@ -420,7 +423,7 @@ func TestWorkspaceExclusionIsEnforcedByRunnableClaim(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()
 	for i := range 2 {
-		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: workspace, CreatedAt: time.Now().UTC().Add(time.Duration(i) * time.Nanosecond)}
+		conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: workspace, CreatedAt: time.Now().UTC().Add(time.Duration(i) * time.Nanosecond)}
 		if err := store.CreateConversation(ctx, conversation); err != nil {
 			t.Fatal(err)
 		}
@@ -469,7 +472,7 @@ func TestSubscribeDuringClaimReturnsOrderedDurableEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer base.Close()
-	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: t.TempDir(), CreatedAt: time.Now().UTC()}
 	if err := base.CreateConversation(context.Background(), conversation); err != nil {
 		t.Fatal(err)
 	}
@@ -995,7 +998,7 @@ func TestRestartMarksRequestedToolInterruptedWithoutRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: workspace, CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: workspace, CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(context.Background(), conversation); err != nil {
 		t.Fatal(err)
 	}
@@ -1047,7 +1050,7 @@ func TestRestartRunsDurablyQueuedSubmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, Workspace: workspace, CreatedAt: time.Now().UTC()}
+	conversation := ponsruntime.Conversation{ID: ponsruntime.NewID(), AgentID: testAgent.ID, WorkspaceID: "test-workspace", Workspace: workspace, CreatedAt: time.Now().UTC()}
 	if err := store.CreateConversation(context.Background(), conversation); err != nil {
 		t.Fatal(err)
 	}
@@ -1092,7 +1095,10 @@ func TestQueuedSubmissionKeepsAgentRevisionAcrossPersonaChange(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	original := ponsruntime.AgentDefinition{ID: ponsruntime.DefaultAgentID, Name: "Ada", Persona: "Be brief.", MaxTurns: 3}
+	original := ponsruntime.AgentDefinition{
+		ID: ponsruntime.DefaultAgentID, Name: "Ada", Persona: "Be brief.", MaxTurns: 3,
+		WorkspacePolicy: ponsruntime.WorkspacePerConversation,
+	}
 	if err := agents.Record(original); err != nil {
 		t.Fatal(err)
 	}
@@ -1165,7 +1171,7 @@ func TestQueuedSubmissionKeepsAgentRevisionAcrossPersonaChange(t *testing.T) {
 		view.Submissions[1].AgentRevision != edited.Revision() {
 		t.Fatalf("submission revisions = %+v", view.Submissions)
 	}
-	if view.Agent != (ponsruntime.AgentSummary{ID: "default", Name: "Grace"}) || second.Agent() != view.Agent {
+	if view.Agent != (ponsruntime.AgentSummary{ID: "default", Name: "Grace", WorkspacePolicy: ponsruntime.WorkspacePerConversation}) || second.Agent() != view.Agent {
 		t.Fatalf("view agent = %+v, manager agent = %+v", view.Agent, second.Agent())
 	}
 }

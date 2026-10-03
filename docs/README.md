@@ -33,7 +33,8 @@ Start with the [project README](../README.md), then use this index.
 - **Persistent agents:** a long-lived, owner-named agent that remembers its
   owner and starts private tasks. Read the [design](proposals/persistent-agents/design.md)
   for what and why, then the [plan](proposals/persistent-agents/plan.md) for
-  how and when.
+  how and when. The [agent workspaces spec](proposals/persistent-agents/agent-workspaces.md)
+  details the first slice of phase 6.
 
 When a proposal ships, its design moves into `design/` and the relevant ADRs
 update their implementation status.

@@ -21,8 +21,13 @@ workspace identity  independent mutable and durable line of work
 placement identity  replaceable VM currently hosting that workspace
 ```
 
-The runtime conversation ID currently supplies the workspace identity. Several
-workspaces may use the same source and base selector without sharing
+A conversation records its workspace identity, `workspace_id`, when it is
+created. Under the `per_conversation` workspace policy it is the conversation
+ID. Under the `agent` policy (ADR-0022) every conversation of the agent shares
+`agent-<id>`; E2B does not support that policy yet, pending the `empty` seed
+in the [agent workspaces spec](../proposals/persistent-agents/agent-workspaces.md),
+so an empty policy resolves to `per_conversation` there.
+Several workspaces may use the same source and base selector without sharing
 mutable state.
 
 ## Durable resources

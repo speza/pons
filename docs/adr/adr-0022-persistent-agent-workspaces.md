@@ -1,7 +1,7 @@
 # ADR-0022: Persistent agents keep durable workspaces without Git
 
 **Status:** Proposed
-**Implementation:** Not implemented; builds on implemented `archive/v1` checkpoints
+**Implementation:** Partial — `agent` and `per_conversation` policies, conversation `workspace_id`, and the Seatbelt agent workspace (agent workspaces spec, delivery step 1); E2B `empty` seed, templates, setup, history, restore, and off-host storage not implemented
 **Date:** 2026-09-24
 **Related:** ADR-0009, ADR-0015, ADR-0016, ADR-0017, ADR-0019, ADR-0020
 

@@ -3,6 +3,7 @@ package agentdir
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,11 +32,14 @@ func TestLoadCreatesDefaultsOnceAndNeverOverwrites(t *testing.T) {
 			t.Fatalf("%s = %v, %v", name, info, err)
 		}
 	}
+	if _, err := os.Stat(filepath.Join(dir, WorkspaceDir)); !os.IsNotExist(err) {
+		t.Fatalf("%s created before first use: %v", WorkspaceDir, err)
+	}
 	data, err := os.ReadFile(filepath.Join(dir, SettingsFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{`"name"`, `"provider"`, `"model"`, `"max_turns"`} {
+	for _, field := range []string{`"name"`, `"provider"`, `"model"`, `"max_turns"`, `"workspace"`} {
 		if !strings.Contains(string(data), field) {
 			t.Fatalf("default agent.json lacks %s:\n%s", field, data)
 		}
@@ -50,6 +54,57 @@ func TestLoadCreatesDefaultsOnceAndNeverOverwrites(t *testing.T) {
 	if settings != (Settings{Name: "Ada", Model: "m", MaxTurns: 5}) || persona != "# Not a name\n\nBe brief." {
 		t.Fatalf("edited agent = %+v, %q", settings, persona)
 	}
+
+	write(t, filepath.Join(dir, SettingsFile), `{"workspace":"per_conversation"}`)
+	if settings, _, err = store.Load(ponsruntime.DefaultAgentID); err != nil || settings.Workspace != ponsruntime.WorkspacePerConversation {
+		t.Fatalf("per_conversation settings = %+v, %v", settings, err)
+	}
+}
+
+func TestWorkspaceMustBeARealDirectory(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Load(ponsruntime.DefaultAgentID); err != nil {
+		t.Fatal(err)
+	}
+	path, err := store.Workspace(ponsruntime.DefaultAgentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved, _ := filepath.EvalSymlinks(filepath.Join(store.Dir(ponsruntime.DefaultAgentID), WorkspaceDir)); path != resolved {
+		t.Fatalf("workspace = %q, want %q", path, resolved)
+	}
+
+	// A link would widen the grant to the whole agent directory.
+	workspace := filepath.Join(store.Dir(ponsruntime.DefaultAgentID), WorkspaceDir)
+	if err := os.Remove(workspace); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(store.Dir(ponsruntime.DefaultAgentID), workspace); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Workspace(ponsruntime.DefaultAgentID); err == nil {
+		t.Fatal("linked workspace accepted")
+	}
+
+	// Hands may replace the workspace with anything; only runs fail, and
+	// the server still starts.
+	for _, replace := range []func() error{
+		func() error { return os.Symlink(filepath.Join(t.TempDir(), "missing"), workspace) },
+		func() error { return os.WriteFile(workspace, []byte("x"), 0o600) },
+	} {
+		if err := errors.Join(os.Remove(workspace), replace()); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.Load(ponsruntime.DefaultAgentID); err != nil {
+			t.Fatalf("load with a damaged workspace: %v", err)
+		}
+		if _, err := store.Workspace(ponsruntime.DefaultAgentID); err == nil {
+			t.Fatal("damaged workspace accepted")
+		}
+	}
 }
 
 func TestLoadRejectsMalformedSettings(t *testing.T) {
@@ -59,6 +114,7 @@ func TestLoadRejectsMalformedSettings(t *testing.T) {
 		"multi-line name": `{"name":"Ada\nGrace"}`,
 		"padded name":     `{"name":" Ada"}`,
 		"negative turns":  `{"max_turns":-1}`,
+		"unknown policy":  `{"workspace":"shared"}`,
 		"not JSON":        `name: Ada`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -80,7 +136,10 @@ func TestRevisionsAreWriteOnceAndFailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	definition := ponsruntime.AgentDefinition{ID: "default", Name: "Ada", Persona: "Be brief.", MaxTurns: 3}
+	definition := ponsruntime.AgentDefinition{
+		ID: "default", Name: "Ada", Persona: "Be brief.", MaxTurns: 3,
+		WorkspacePolicy: ponsruntime.WorkspaceAgent,
+	}
 	revision := definition.Revision()
 	if _, err := store.AgentRevision(ctx, "default", revision); err == nil {
 		t.Fatal("resolved an unrecorded revision")

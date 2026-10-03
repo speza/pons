@@ -39,7 +39,12 @@ func TestRuntimeBlackBox(t *testing.T) {
 	provider := newFakeOpenAI(t)
 	workspace := t.TempDir()
 	stateDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(workspace, fixtureName), []byte(fixtureContent), 0o600); err != nil {
+	// The default agent works in its own server-owned workspace.
+	agentWorkspace := filepath.Join(stateDir, "agents", "default", "workspace")
+	if err := os.MkdirAll(agentWorkspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentWorkspace, fixtureName), []byte(fixtureContent), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -51,7 +56,7 @@ func TestRuntimeBlackBox(t *testing.T) {
 		t.Fatalf("health body = %q", body)
 	}
 
-	conversation := createConversation(t, server.URL(), workspace)
+	conversation := createConversation(t, server.URL())
 	stream := openSSE(t, server.URL(), conversation.ID, 0)
 	accepted := submitMessage(t, server.URL(), conversation.ID, "first-attempt", "Read the fixture file and report what it contains.")
 	events, answer := waitForFinal(t, stream, accepted.InboundMessageID)
@@ -438,15 +443,11 @@ func getHealth(t *testing.T, baseURL string) string {
 	return strings.TrimSpace(string(body))
 }
 
-func createConversation(t *testing.T, baseURL, workspace string) ponsruntime.Conversation {
+func createConversation(t *testing.T, baseURL string) ponsruntime.Conversation {
 	t.Helper()
 	var conversation ponsruntime.Conversation
-	doJSON(t, http.MethodPost, baseURL+"/v1/conversations", []byte(fmt.Sprintf(`{"workspace":%q}`, workspace)), "", http.StatusCreated, &conversation)
-	canonical, err := filepath.EvalSymlinks(workspace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if conversation.ID == "" || conversation.Workspace != canonical {
+	doJSON(t, http.MethodPost, baseURL+"/v1/conversations", []byte(`{}`), "", http.StatusCreated, &conversation)
+	if conversation.ID == "" || !conversation.AgentWorkspace || conversation.WorkspaceID != "agent-default" || conversation.Workspace != "" {
 		t.Fatalf("created conversation = %+v", conversation)
 	}
 	return conversation

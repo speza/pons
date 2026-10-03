@@ -16,12 +16,22 @@ cd "$repo_root"
 mkdir -p .build
 go build -o .build/pons-hands ./cmd/pons-hands
 
+# The default agent works in its own workspace; seed the file it reads.
+agent_workspace="$state_dir/agents/default/workspace"
+mkdir -p "$agent_workspace"
+cp go.mod "$agent_workspace/"
+
 prompt='Use the read_file tool to read go.mod. If its module line is exactly "module github.com/samperrin/pons", reply with exactly SMOKE_OK and nothing else. Otherwise reply with exactly SMOKE_FAILED and nothing else.'
 
+# The run is local, so turn off any E2B-only GitHub App from the global
+# config; explicit flags override it.
 go run ./cmd/pons \
 	-provider codex \
 	-model "$model" \
 	-sandbox seatbelt \
+	-github-app-id 0 \
+	-github-app-installation-id 0 \
+	-github-app-private-key "" \
 	-hands-command "$repo_root/.build/pons-hands" \
 	-state-dir "$state_dir" \
 	-debug \

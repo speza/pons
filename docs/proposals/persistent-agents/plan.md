@@ -290,11 +290,13 @@ and stops at the budget.
 
 ## Phase 6: Agent workspaces and checkpoints
 
-**Use cases:** U9. **ADRs:** ADR-0022.
+**Use cases:** U9. **ADRs:** ADR-0022. **Spec:** [agent workspaces](agent-workspaces.md)
+(first slice: steps 1 and 2).
 
 Steps:
 
-1. **Workspace identity.** Add a workspace policy to the agent definition.
+1. **Workspace identity** (done for Seatbelt; E2B awaits the `empty` seed).
+   Add a workspace policy to the agent definition.
    The default agent uses `agent`: one workspace for all its conversations.
    Resolve `workspace_id` from policy and replace
    `spec.WorkspaceID = request.ConversationID` in
