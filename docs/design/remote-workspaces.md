@@ -67,10 +67,11 @@ Each workspace keeps a history of checkpoints in `workspace_checkpoints`.
 `seq` increases by one per workspace, and the highest `seq` is the current
 checkpoint:
 
-- `base` is the seed archive of an `archive/v1` or `empty` workspace. A
-  `git/v1` workspace has no base; its first entry is the `run` that checked
-  it out.
-- `run` is the checkpoint after a completed run, with its `run_id`.
+- `base` is the first archive of a workspace: the seed of an `archive/v1` or
+  `empty` workspace, or a `git/v1` workspace's initial checkout.
+- `run` is the checkpoint after a completed run, with its `run_id`. A run
+  whose archive equals the current checkpoint adds no entry, so runs that
+  change nothing cannot push earlier checkpoints out of retention.
 - `restore` is written by a restore. It points at the restored checkpoint's
   archive, and `restored_from` holds that checkpoint's `seq`.
 
@@ -99,6 +100,7 @@ validate the checkpoint
   -> 404 if seq is unknown; error if its archive fails digest verification
   -> 409 if the workspace has an unexpired active or recovery environment
 provider applies the restore
+  -> E2B refuses a checkpoint over its workspace size limit
   -> E2B deletes the retained idle sandbox and its state
 append a restore entry
 release the reservation and wake the scheduler

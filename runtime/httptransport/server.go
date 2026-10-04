@@ -223,10 +223,12 @@ func (s server) listCheckpoints(w http.ResponseWriter, r *http.Request) {
 // restoreWorkspace makes an earlier checkpoint the workspace's newest. It
 // never runs alongside a run in that workspace.
 func (s server) restoreWorkspace(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
 	var body restoreBody
-	decoder := json.NewDecoder(io.LimitReader(r.Body, 4<<10))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&body); err != nil || body.Seq <= 0 {
+	var extra any
+	dec := json.NewDecoder(io.LimitReader(r.Body, 4<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil || body.Seq <= 0 || !errors.Is(dec.Decode(&extra), io.EOF) {
 		writeAPIError(w, http.StatusBadRequest, "body must be {\"seq\": N} with a positive checkpoint sequence number")
 		return
 	}
@@ -246,6 +248,8 @@ func writeWorkspaceError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ponsruntime.ErrRestoreUnsupported):
 		writeAPIError(w, http.StatusNotImplemented, err.Error())
+	case errors.Is(err, ponsruntime.ErrClosed):
+		writeAPIError(w, http.StatusServiceUnavailable, err.Error())
 	default:
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
 	}

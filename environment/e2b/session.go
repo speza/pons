@@ -131,15 +131,20 @@ func (s *e2bSession) persistCheckpoint(ctx context.Context, archive io.ReadSeeke
 	if err != nil {
 		return err
 	}
-	if _, err := environment.RecordWorkspaceCheckpoint(ctx, s.store, s.checkpoints, environment.WorkspaceCheckpoint{
+	recorded, err := environment.RecordWorkspaceCheckpoint(ctx, s.store, s.checkpoints, environment.WorkspaceCheckpoint{
 		WorkspaceID: s.workspace.ID,
 		Ref:         ref,
 		Kind:        environment.CheckpointRun,
 		RunID:       s.runID,
 		SizeBytes:   size,
 		CreatedAt:   time.Now().UTC(),
-	}, s.onError); err != nil {
+	}, s.onError)
+	if err != nil {
 		return err
+	}
+	if recorded.RunID != s.runID {
+		s.debugf("checkpoint=%s unchanged", ref)
+		return nil
 	}
 	s.debugf("checkpoint=%s saved", ref)
 	return nil

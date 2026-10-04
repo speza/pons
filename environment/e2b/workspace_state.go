@@ -156,7 +156,6 @@ func placeWorkspace(
 	checkpoints environment.CheckpointStore,
 	state environment.WorkspaceState,
 	current environment.WorkspaceCheckpoint,
-	runID string,
 	env map[string]string,
 	credentials gitworkspace.Credentials,
 	limit int64,
@@ -166,7 +165,7 @@ func placeWorkspace(
 ) (environment.WorkspaceCheckpoint, error) {
 	if current.Ref == "" {
 		return provisionGitWorkspace(
-			ctx, client, sandbox, store, checkpoints, state, runID, env, credentials, limit, onError, onDebug, progress,
+			ctx, client, sandbox, store, checkpoints, state, env, credentials, limit, onError, onDebug, progress,
 		)
 	}
 	if err := progress("checkpoint.restore", "Restoring workspace checkpoint…"); err != nil {

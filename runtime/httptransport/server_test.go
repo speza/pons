@@ -103,7 +103,7 @@ func TestHandlerListsAndRestoresWorkspaceCheckpoints(t *testing.T) {
 	if restore.Code != http.StatusOK || runtime.restoredSeq != 1 || !strings.Contains(restore.Body.String(), `"restored_from":1`) {
 		t.Fatalf("restore = %d %s", restore.Code, restore.Body)
 	}
-	for _, body := range []string{``, `{"seq":0}`, `{"seq":"1"}`, `{"seq":1,"ref":"x"}`} {
+	for _, body := range []string{``, `{"seq":0}`, `{"seq":"1"}`, `{"seq":1,"ref":"x"}`, `{"seq":1}{"seq":2}`} {
 		if response := request(http.MethodPost, "/v1/workspaces/agent-default/restore", body); response.Code != http.StatusBadRequest {
 			t.Fatalf("restore %q = %d %s", body, response.Code, response.Body)
 		}
@@ -112,6 +112,7 @@ func TestHandlerListsAndRestoresWorkspaceCheckpoints(t *testing.T) {
 		ponsruntime.ErrCheckpointNotFound: http.StatusNotFound,
 		ponsruntime.ErrWorkspaceBusy:      http.StatusConflict,
 		ponsruntime.ErrRestoreUnsupported: http.StatusNotImplemented,
+		ponsruntime.ErrClosed:             http.StatusServiceUnavailable,
 	} {
 		runtime.restoreErr = err
 		if response := request(http.MethodPost, "/v1/workspaces/agent-default/restore", `{"seq":1}`); response.Code != want {

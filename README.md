@@ -381,7 +381,8 @@ make smoke-e2b
 
 Run `go run ./cmd/pons serve --debug` after configuring the server.
 
-Every completed E2B run adds a checkpoint to the workspace's history. pons
+Every completed E2B run that changes the workspace adds a checkpoint to its
+history. pons
 keeps the current checkpoint, the 10 newest, the newest of each UTC day for
 14 days, and the base. List them and restore one with the running server:
 

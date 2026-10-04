@@ -128,3 +128,48 @@ func TestRecordWorkspaceCheckpointPrunesRowsAndUnreferencedArchives(t *testing.T
 		t.Fatalf("unreferenced archive read = %v", err)
 	}
 }
+
+func TestRecordWorkspaceCheckpointSkipsUnchangedRun(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := runtimesqlite.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	archives := checkpoint.New(dir + "/workspaces")
+	now := time.Now().UTC()
+	if err := store.SaveWorkspaceState(ctx, environment.WorkspaceState{
+		ID: "workspace", Strategy: environment.WorkspaceStrategyEmpty, SetupGeneration: 1, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ref, size, err := archives.PutWorkspaceCheckpoint(ctx, "workspace", strings.NewReader("same"), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := func(kind environment.CheckpointKind, runID string) environment.WorkspaceCheckpoint {
+		t.Helper()
+		recorded, err := environment.RecordWorkspaceCheckpoint(ctx, store, archives, environment.WorkspaceCheckpoint{
+			WorkspaceID: "workspace", Ref: ref, Kind: kind, RunID: runID, SizeBytes: size, CreatedAt: now,
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return recorded
+	}
+	base := record(environment.CheckpointBase, "")
+	// Runs that leave the workspace as it was add no entry.
+	for range environment.RetainRecentCheckpoints + 1 {
+		if got := record(environment.CheckpointRun, "no-op"); got != base {
+			t.Fatalf("unchanged run recorded %+v, want current %+v", got, base)
+		}
+	}
+	if restored := record(environment.CheckpointRestore, ""); restored.Seq != 2 {
+		t.Fatalf("restore of the current archive = %+v; restores are always recorded", restored)
+	}
+	history, err := store.WorkspaceCheckpoints(ctx, "workspace")
+	if err != nil || len(history) != 2 {
+		t.Fatalf("history = %+v, %v", history, err)
+	}
+}

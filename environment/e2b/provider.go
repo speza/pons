@@ -187,7 +187,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 			p.debugf("workspace=%q sandbox=%q restoring checkpoint=%s", workspaceID, sandbox.ID, current.Ref)
 		}
 		current, err = placeWorkspace(
-			ctx, client, sandbox, store, checkpoints, workspaceState, current, runID,
+			ctx, client, sandbox, store, checkpoints, workspaceState, current,
 			env, credentials, cfg.maxWorkspaceBytes, cfg.onError, p.OnDebug, progress,
 		)
 		if err != nil {
@@ -445,10 +445,15 @@ var _ environment.WorkspaceRestorer = (*Provider)(nil)
 // RestoreWorkspace drops the workspace's retained idle sandbox, if any, so its
 // next placement starts a new sandbox from the current checkpoint, which the
 // caller then records as the restored one. Nothing is uploaded here.
-func (p *Provider) RestoreWorkspace(ctx context.Context, workspaceID string, _ environment.WorkspaceCheckpoint) error {
+func (p *Provider) RestoreWorkspace(ctx context.Context, workspaceID string, checkpoint environment.WorkspaceCheckpoint) error {
 	cfg, err := p.config()
 	if err != nil {
 		return err
+	}
+	// The next placement would refuse to load it.
+	if checkpoint.SizeBytes > cfg.maxWorkspaceBytes {
+		return fmt.Errorf("environment: checkpoint %d is %d bytes, over the %d-byte workspace limit",
+			checkpoint.Seq, checkpoint.SizeBytes, cfg.maxWorkspaceBytes)
 	}
 	workspaceLock := p.workspaceLock(workspaceID)
 	workspaceLock.Lock()

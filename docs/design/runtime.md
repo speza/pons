@@ -32,8 +32,9 @@ bundles both lifecycles but still communicates through the same loopback HTTP
 and SSE path.
 
 Runs are globally bounded and SQLite claims runnable work only when its
-conversation and workspace have no active run. This is transactional local
-exclusion, not a renewable distributed lease. Each run starts a fresh hands
+conversation and workspace have no active run and its workspace ID is not
+reserved by a restore. This is transactional local exclusion, not a
+renewable distributed lease. Each run starts a fresh hands
 session in the configured execution environment, registers only its
 discovered proxy tools, and closes the session before becoming idle. The
 Seatbelt and E2B providers both launch `pons-hands`; the server has no
@@ -352,7 +353,8 @@ low-frequency bounded repair scan uses the same atomic claim operation, so a
 lost hint cannot strand durable work and does not require enumerating every
 conversation. SQLite startup recovery assumes one exclusive manager and marks
 abandoned requested tools interrupted with an unknown outcome; it never
-silently repeats them. Multiple live processes require renewable leases,
+silently repeats them. It also clears workspace reservations, which do not
+survive the process that took them. Multiple live processes require renewable leases,
 fencing on every run mutation, and cross-process runnable/outbox notification.
 The SQLite store holds an exclusive advisory lock on the state directory for
 its lifetime. A second process cannot open the same state while the first is
@@ -568,6 +570,21 @@ contract.
 The server also serves the embedded browser client at `/` (with `/ui/` as an
 alias). It uses the same snapshot, submission, and SSE endpoints described
 above; it does not introduce a separate web-specific runtime model.
+
+### Workspace checkpoints
+
+```http
+GET  /v1/workspaces/{workspace_id}/checkpoints
+POST /v1/workspaces/{workspace_id}/restore      {"seq": 37}
+```
+
+List a workspace's checkpoint history, newest first, and restore one. A
+restore reserves the workspace ID in `workspace_reservations`, so no run of
+that workspace is claimed until it finishes; it returns `409 Conflict` while a
+run of the workspace is active and `501 Not Implemented` when the provider
+cannot restore. `pons workspace checkpoints|restore` wraps both. See
+[remote workspaces](remote-workspaces.md#checkpoint-history) for history,
+retention, and restore semantics.
 
 ## Future extension points
 

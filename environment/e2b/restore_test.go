@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,6 +77,13 @@ func TestRestoredCheckpointSeedsNextSandbox(t *testing.T) {
 	idle, err := store.EnvironmentState(ctx, "agent-default")
 	if err != nil || idle.Status != environment.StateIdle {
 		t.Fatalf("environment before restore = %+v, %v", idle, err)
+	}
+
+	oversized := recorded[1]
+	oversized.SizeBytes = defaultE2BWorkspaceBytes + 1
+	if err := provider.RestoreWorkspace(ctx, "agent-default", oversized); err == nil ||
+		!strings.Contains(err.Error(), "workspace limit") {
+		t.Fatalf("restore of an oversized checkpoint = %v", err)
 	}
 
 	restored, err := history.RestoreWorkspace(ctx, "agent-default", 2)

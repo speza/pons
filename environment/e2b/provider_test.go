@@ -313,7 +313,6 @@ func testProvisionGitWorkspace(t *testing.T, revision string) {
 			ID: "workspace", Strategy: environment.WorkspaceStrategyGit,
 			SourceRef: "https://github.com/example/project.git", BaseRevision: revision,
 		},
-		"run",
 		map[string]string{"GIT_CONFIG_VALUE_0": "secret-token"},
 		gitworkspace.HTTPSBasicCredentials("https://github.com/example/project.git", "x-access-token", "secret-token"),
 		1<<20,
@@ -332,8 +331,8 @@ func testProvisionGitWorkspace(t *testing.T, revision string) {
 		!strings.Contains(joined, "git -C "+defaultE2BWorkspace+" checkout -b "+gitworkspace.BranchName("workspace")+" FETCH_HEAD") {
 		t.Fatalf("Git commands:\n%s", joined)
 	}
-	// A git/v1 workspace has no base entry; its first is the run's checkout.
-	if checkpoint.Ref != "checkpoint" || checkpoint.Kind != environment.CheckpointRun || checkpoint.RunID != "run" ||
+	// The initial checkout is the git/v1 workspace's base.
+	if checkpoint.Ref != "checkpoint" || checkpoint.Kind != environment.CheckpointBase ||
 		store.currentRef() != "checkpoint" || store.workspaceLast.Load() == nil {
 		t.Fatalf("checkpoint = %+v, stored = %+v", checkpoint, store.workspaceLast.Load())
 	}
@@ -386,7 +385,6 @@ func TestProvisionGitWorkspaceRedactsAuthenticatedFetchFailure(t *testing.T) {
 		store,
 		environment.WorkspaceState{ID: "workspace", Strategy: environment.WorkspaceStrategyGit,
 			SourceRef: "https://github.com/example/project.git", BaseRevision: strings.Repeat("a", 40)},
-		"run",
 		credentials.Environment(),
 		credentials,
 		1<<20,

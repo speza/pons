@@ -18,7 +18,6 @@ func provisionGitWorkspace(
 	store environment.StateStore,
 	checkpoints environment.CheckpointStore,
 	state environment.WorkspaceState,
-	runID string,
 	env map[string]string,
 	credentials gitworkspace.Credentials,
 	limit int64,
@@ -103,13 +102,10 @@ func provisionGitWorkspace(
 	if err := store.SaveWorkspaceState(ctx, state); err != nil {
 		return environment.WorkspaceCheckpoint{}, err
 	}
-	// A git/v1 workspace has no base entry: its first checkpoint is this
-	// run's initial checkout.
 	checkpoint, err := environment.RecordWorkspaceCheckpoint(ctx, store, checkpoints, environment.WorkspaceCheckpoint{
 		WorkspaceID: state.ID,
 		Ref:         ref,
-		Kind:        environment.CheckpointRun,
-		RunID:       runID,
+		Kind:        environment.CheckpointBase,
 		SizeBytes:   size,
 		CreatedAt:   now,
 	}, onError)

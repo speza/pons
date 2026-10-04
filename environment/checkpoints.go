@@ -13,9 +13,10 @@ import (
 type CheckpointKind string
 
 const (
-	// CheckpointBase is the seed archive of an archive/v1 or empty workspace.
+	// CheckpointBase is the first archive of a workspace: the seed of an
+	// archive/v1 or empty workspace, or a git/v1 workspace's initial checkout.
 	CheckpointBase CheckpointKind = "base"
-	// CheckpointRun is the workspace after a completed run.
+	// CheckpointRun is the workspace after a completed run that changed it.
 	CheckpointRun CheckpointKind = "run"
 	// CheckpointRestore makes an earlier checkpoint's archive current again.
 	CheckpointRestore CheckpointKind = "restore"
@@ -93,9 +94,13 @@ func ExpiredCheckpoints(history []WorkspaceCheckpoint, now time.Time) []Workspac
 }
 
 // RecordWorkspaceCheckpoint appends a checkpoint whose archive is already
-// durable, then applies retention. Once the append succeeds the checkpoint is
-// recorded: retention failures go to onError, and an orphaned archive is
-// removed by a later prune.
+// durable, then applies retention. A run checkpoint whose archive is already
+// current is not appended, so runs that change no files cannot push earlier
+// checkpoints out of retention; the current entry is returned instead. Once
+// the append succeeds the checkpoint is recorded: retention failures go to
+// onError, and an orphaned archive is removed by a later prune. Callers must
+// not record checkpoints of one workspace concurrently: pruning removes any
+// archive not yet appended.
 func RecordWorkspaceCheckpoint(
 	ctx context.Context,
 	store StateStore,
@@ -103,6 +108,15 @@ func RecordWorkspaceCheckpoint(
 	checkpoint WorkspaceCheckpoint,
 	onError func(error),
 ) (WorkspaceCheckpoint, error) {
+	if checkpoint.Kind == CheckpointRun {
+		current, err := store.CurrentWorkspaceCheckpoint(ctx, checkpoint.WorkspaceID)
+		if err == nil && current.Ref == checkpoint.Ref {
+			return current, nil
+		}
+		if err != nil && !errors.Is(err, ErrStateNotFound) {
+			return WorkspaceCheckpoint{}, err
+		}
+	}
 	recorded, err := store.AppendWorkspaceCheckpoint(ctx, checkpoint)
 	if err != nil {
 		return WorkspaceCheckpoint{}, err

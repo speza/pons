@@ -66,7 +66,7 @@ func (m *Manager) WorkspaceCheckpoints(ctx context.Context, workspaceID string) 
 // RestoreWorkspace reserves the workspace so no run is claimed for it,
 // restores checkpoint seq, and releases the reservation. Submissions queued
 // meanwhile run afterwards against the restored workspace.
-func (m *Manager) RestoreWorkspace(ctx context.Context, workspaceID string, seq int64) (_ WorkspaceCheckpoint, err error) {
+func (m *Manager) RestoreWorkspace(ctx context.Context, workspaceID string, seq int64) (WorkspaceCheckpoint, error) {
 	if err := m.checkOpen(); err != nil {
 		return WorkspaceCheckpoint{}, err
 	}
@@ -77,10 +77,15 @@ func (m *Manager) RestoreWorkspace(ctx context.Context, workspaceID string, seq 
 		return WorkspaceCheckpoint{}, err
 	}
 	defer func() {
-		// The release outlives a canceled request; startup clears a
-		// reservation a crash leaves behind.
-		if releaseErr := m.store.ReleaseWorkspace(context.WithoutCancel(ctx), workspaceID); releaseErr != nil {
-			err = errors.Join(err, fmt.Errorf("runtime: release workspace %q: %w", workspaceID, releaseErr))
+		// The release outlives a canceled request. A failed release does not
+		// change the restore's outcome; it is reported, retried once, and
+		// otherwise cleared at the next startup.
+		releaseCtx := context.WithoutCancel(ctx)
+		if err := m.store.ReleaseWorkspace(releaseCtx, workspaceID); err != nil {
+			if retryErr := m.store.ReleaseWorkspace(releaseCtx, workspaceID); retryErr != nil {
+				m.report(fmt.Errorf("runtime: release workspace %q; its runs wait until restart: %w",
+					workspaceID, errors.Join(err, retryErr)))
+			}
 		}
 		m.notify()
 	}()

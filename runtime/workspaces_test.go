@@ -141,6 +141,54 @@ func TestRestoreExcludesRunsOfTheWorkspace(t *testing.T) {
 	}
 }
 
+// flakyReleaseStore fails the first workspace release.
+type flakyReleaseStore struct {
+	ponsruntime.Store
+	failed bool
+}
+
+func (s *flakyReleaseStore) ReleaseWorkspace(ctx context.Context, workspaceID string) error {
+	if !s.failed {
+		s.failed = true
+		return errors.New("database is locked")
+	}
+	return s.Store.ReleaseWorkspace(ctx, workspaceID)
+}
+
+type passRestorer struct{}
+
+func (passRestorer) RestoreWorkspace(context.Context, string, int64) (ponsruntime.WorkspaceCheckpoint, error) {
+	return ponsruntime.WorkspaceCheckpoint{Seq: 2, Kind: "restore", RestoredFrom: 1, Current: true}, nil
+}
+
+func TestRestoreSucceedsAndReleasesDespiteATransientReleaseFailure(t *testing.T) {
+	ctx := context.Background()
+	base, err := runtimesqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	store := &flakyReleaseStore{Store: base}
+	manager, err := New(Config{
+		Agent: testAgent, AgentRevisions: testRevisions, Store: store, WorkspaceRestorer: passRestorer{},
+		Runner:  RunnerFunc(func(context.Context, RunRequest) (RunResult, error) { return RunResult{}, nil }),
+		OnError: func(err error) { t.Errorf("reported: %v", err) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if restored, err := manager.RestoreWorkspace(ctx, "workspace", 1); err != nil || restored.Seq != 2 {
+		t.Fatalf("restore = %+v, %v", restored, err)
+	}
+	if !store.failed {
+		t.Fatal("release did not fail")
+	}
+	if err := base.ReserveWorkspace(ctx, "workspace"); err != nil {
+		t.Fatalf("workspace still reserved after restore: %v", err)
+	}
+}
+
 func TestRestoreWithoutProviderSupportIsUnsupported(t *testing.T) {
 	manager := testManager(t, RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
 		return RunResult{}, nil

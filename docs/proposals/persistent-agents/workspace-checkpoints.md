@@ -20,8 +20,8 @@ conversations. Nothing protects it from a bad change: if the agent deletes or
 mangles its files, the next checkpoint overwrites the last good one, and the
 store prunes everything except the base and the latest archive.
 
-After this slice, every completed run adds a checkpoint to the workspace's
-history. A retention policy keeps recent and daily checkpoints. The owner can
+After this slice, every completed run that changes the workspace adds a
+checkpoint to its history. A retention policy keeps recent and daily checkpoints. The owner can
 list them and restore one, which makes it the workspace's newest checkpoint
 without rewriting history. Agent-controlled hands can do none of this.
 
@@ -82,9 +82,12 @@ CREATE TABLE workspace_checkpoints (
 
 - `seq` increases by one per workspace. The current checkpoint is the row
   with the highest `seq`.
-- `base` is the seed archive of an `archive/v1` or `empty` workspace. `git/v1`
-  workspaces have no base row; their first row is a `run`.
-- `run` is the checkpoint after a completed run, with its `run_id`.
+- `base` is the first archive of a workspace: the seed of an `archive/v1` or
+  `empty` workspace, or the initial checkout of a `git/v1` workspace.
+- `run` is the checkpoint after a completed run, with its `run_id`. A run
+  whose archive equals the current checkpoint's `ref` appends nothing, so
+  runs that change no files cannot push earlier checkpoints out of
+  retention. A `restore` is always appended.
 - `restore` is written by a restore. Its `ref` is the restored checkpoint's
   `ref`, and `restored_from` is that checkpoint's `seq`.
 
@@ -178,9 +181,12 @@ submission of a conversation with that workspace ID is running or the row
 already exists. `RecoverRunning` deletes every reservation at startup, so a
 crash leaves none behind. Releasing the reservation wakes the scheduler.
 
-The response is `200` with the new `restore` entry. A malformed body or a
-non-positive `seq` is `400`, an unknown workspace or `seq` is `404`, and a
-corrupt archive is `500` with the verification error.
+The response is `200` with the new `restore` entry. A malformed body, trailing
+data, or a non-positive `seq` is `400`, an unknown workspace or `seq` is
+`404`, a server shutting down is `503`, and a corrupt archive is `500` with
+the verification error. A failure to release the reservation does not change
+the outcome: the release is retried once, then reported in the server log,
+and startup clears the reservation.
 
 `runtime.Manager` owns the reservation and calls a `runtime.WorkspaceRestorer`
 for steps 2 to 4. `runtime/checkpoint.History` implements it, and listing,
@@ -200,7 +206,9 @@ type WorkspaceRestorer interface {
   next placement creates a new sandbox and extracts the current checkpoint,
   which after step 4 is the restored one. Nothing is uploaded during restore.
   It returns `environment.ErrWorkspaceInUse` (mapped to `409`) if a session
-  of the workspace is live or its environment is unexpired and not idle.
+  of the workspace is live or its environment is unexpired and not idle, and
+  refuses a checkpoint larger than the current `MaxWorkspaceBytes`, which the
+  next placement could not load.
 - **Seatbelt (part 2):** extract the archive into a new sibling directory,
   then atomically swap it with the live workspace directory and remove the
   old one. A failed extraction leaves the live directory untouched.
@@ -250,7 +258,7 @@ Part 1:
 
 - **History:** each completed fake-envd run appends a `run` row with its run
   ID and size; the first placement of an `empty` workspace appends a `base`
-  row.
+  row; a run that changes nothing appends no row.
 - **Retention:** with a fake clock, retention keeps the current, the 10
   newest, the newest per day for 14 days, and the base; older rows are
   deleted; an archive shared by a retained row survives.
