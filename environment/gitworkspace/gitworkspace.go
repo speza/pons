@@ -93,12 +93,19 @@ func (c Credentials) Redact(value string) string {
 	return value
 }
 
-// ValidatePlan checks the provider-neutral git/v1 wire contract. Providers
-// separately enforce placement requirements such as network availability.
+// ValidatePlan checks the provider-neutral workspace plan contract: a zero
+// plan, a sourceless empty plan, or a git/v1 plan. Providers separately
+// enforce placement requirements such as network availability.
 func ValidatePlan(plan environment.WorkspacePlan) error {
-	if plan.Strategy == "" {
+	switch plan.Strategy {
+	case "":
 		if plan.SourceRef != "" || plan.BaseRevision != "" {
 			return errors.New("environment: workspace plan strategy is required")
+		}
+		return nil
+	case environment.WorkspaceStrategyEmpty:
+		if plan.SourceRef != "" || plan.BaseRevision != "" {
+			return errors.New("environment: empty workspace takes no source")
 		}
 		return nil
 	}

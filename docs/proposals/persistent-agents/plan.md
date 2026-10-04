@@ -295,14 +295,14 @@ and stops at the budget.
 
 Steps:
 
-1. **Workspace identity** (done for Seatbelt; E2B awaits the `empty` seed).
+1. **Workspace identity** (done).
    Add a workspace policy to the agent definition.
    The default agent uses `agent`: one workspace for all its conversations.
    Resolve `workspace_id` from policy and replace
    `spec.WorkspaceID = request.ConversationID` in
    `cmd/pons/runtime_mode.go` and the conversation `WorkspaceLock`.
    Per-conversation workspace options move to task profiles in phase 9.
-2. **Seeds.** Add `empty` and `template` seeds to `environment` alongside
+2. **Seeds** (`empty` done). Add `empty` and `template` seeds to `environment` alongside
    `archive/v1` and `git/v1`.
 3. **Setup and exclusions.** Add a setup script with a setup generation, and
    checkpoint exclusions for rebuildable paths.

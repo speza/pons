@@ -37,8 +37,9 @@ const (
 
 // Provider provisions or reconnects a workspace-affine E2B sandbox. The
 // selected template must contain a Linux pons-hands executable at HandsPath.
-// A local source seeds each logical workspace once; replacement sandboxes load
-// its latest durable checkpoint. Completed runs produce a new checkpoint.
+// A local source, or nothing under the empty strategy, seeds each logical
+// workspace once; replacement sandboxes load its latest durable checkpoint.
+// Completed runs produce a new checkpoint.
 type Provider struct {
 	APIKey            string
 	Template          string
@@ -582,8 +583,16 @@ func validateE2BSpec(spec environment.Spec) (string, []string, environment.Netwo
 	if strings.TrimSpace(spec.WorkspaceID) == "" || strings.ContainsRune(spec.WorkspaceID, '\x00') {
 		return "", nil, "", nil, errors.New("environment: workspace ID is required")
 	}
-	if spec.WorkspacePath == "" && spec.WorkspacePlan.Strategy != environment.WorkspaceStrategyGit {
-		return "", nil, "", nil, errors.New("environment: workspace is required")
+	switch spec.WorkspacePlan.Strategy {
+	case environment.WorkspaceStrategyGit:
+	case environment.WorkspaceStrategyEmpty:
+		if spec.WorkspacePath != "" {
+			return "", nil, "", nil, errors.New("environment: empty workspace takes no source")
+		}
+	default:
+		if spec.WorkspacePath == "" {
+			return "", nil, "", nil, errors.New("environment: workspace is required")
+		}
 	}
 	workspace := spec.WorkspacePath
 	if workspace != "" {

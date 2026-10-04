@@ -140,11 +140,11 @@ func (s *e2bSession) persistCheckpoint(ctx context.Context, archive io.ReadSeeke
 
 	s.workspace = workspace
 	s.debugf("checkpoint=%s saved", checkpointRef)
-	// The new reference is durable before pruning. archive/v1's BaseRevision is
-	// a checkpoint reference; git/v1's is a Git object ID and must not be passed
-	// to the checkpoint store.
+	// The new reference is durable before pruning. An archive/v1 or empty
+	// BaseRevision is a checkpoint reference; git/v1's is a Git object ID and
+	// must not be passed to the checkpoint store.
 	keep := []string{s.workspace.CheckpointRef}
-	if s.workspace.Strategy == environment.WorkspaceStrategyArchive {
+	if s.workspace.Strategy == environment.WorkspaceStrategyArchive || s.workspace.Strategy == environment.WorkspaceStrategyEmpty {
 		keep = append([]string{s.workspace.BaseRevision}, keep...)
 	}
 	if err := s.checkpoints.PruneWorkspaceCheckpoints(ctx, s.workspace.ID, keep); err != nil && s.onError != nil {

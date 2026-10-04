@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -97,66 +96,53 @@ func TestAgentWorkspaceRunGrantsOnlyWorkspaceAndMemory(t *testing.T) {
 	}
 }
 
-// durableEnvironment stands in for E2B: a provider that keeps its own
-// remote copy of the workspace.
-func durableEnvironment() *lifecycleEnvironment {
-	return &lifecycleEnvironment{closed: make(chan error, 1)}
-}
-
-func TestEmptyWorkspacePolicyFollowsSandbox(t *testing.T) {
-	for _, test := range []struct {
-		sandbox, setting, want string
-	}{
-		{"seatbelt", "", ponsruntime.WorkspaceAgent},
-		{"e2b", "", ponsruntime.WorkspacePerConversation},
-		{"seatbelt", "per_conversation", ponsruntime.WorkspacePerConversation},
-		{"e2b", "per_conversation", ponsruntime.WorkspacePerConversation},
+func TestWorkspacePolicyDefaultsToAgent(t *testing.T) {
+	for setting, want := range map[string]string{
+		"":                 ponsruntime.WorkspaceAgent,
+		"agent":            ponsruntime.WorkspaceAgent,
+		"per_conversation": ponsruntime.WorkspacePerConversation,
 	} {
-		var provider environment.Provider = &recordingEnvironment{}
-		if test.sandbox == "e2b" {
-			provider = durableEnvironment()
-		}
 		agents, err := agentdir.Open(t.TempDir())
 		if err != nil {
 			t.Fatal(err)
 		}
-		write(t, filepath.Join(agents.Dir(ponsruntime.DefaultAgentID), agentdir.SettingsFile), `{"workspace":"`+test.setting+`"}`)
-		agent, err := defaultAgent(serverOptions{Sandbox: test.sandbox, Environment: provider}, agents)
-		if err != nil || agent.WorkspacePolicy != test.want {
-			t.Errorf("%s with %q = %q, %v; want %q", test.sandbox, test.setting, agent.WorkspacePolicy, err, test.want)
+		write(t, filepath.Join(agents.Dir(ponsruntime.DefaultAgentID), agentdir.SettingsFile), `{"workspace":"`+setting+`"}`)
+		agent, err := defaultAgent(serverOptions{}, agents)
+		if err != nil || agent.WorkspacePolicy != want {
+			t.Errorf("%q = %q, %v; want %q", setting, agent.WorkspacePolicy, err, want)
 		}
 	}
 }
 
-func TestAgentWorkspaceIsNotYetSupportedOnE2B(t *testing.T) {
-	stateDir := t.TempDir()
-	agents, err := agentdir.Open(stateDir)
-	if err != nil {
+// durableMemoryEnvironment stands in for E2B: a provider that keeps its own
+// remote copy of the workspace.
+type durableMemoryEnvironment struct{ remoteMemoryEnvironment }
+
+func (durableMemoryEnvironment) SetStores(environment.StateStore, environment.CheckpointStore) error {
+	return nil
+}
+
+func TestDurableAgentWorkspaceRunSeedsEmptyWorkspace(t *testing.T) {
+	runner, execution, agents := agentWorkspaceRunner(t, "e2b")
+	runner.opts.Environment = durableMemoryEnvironment{execution}
+	request := agentWorkspaceRequest()
+	request.Environment = "e2b"
+	if _, err := runner.Run(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
-	write(t, filepath.Join(agents.Dir(ponsruntime.DefaultAgentID), agentdir.SettingsFile), `{"workspace":"agent"}`)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	started := make(chan string, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- runServerReady(ctx, newServerLogger(io.Discard, false), serverOptions{
-			Address: "127.0.0.1:0", StateDir: stateDir, WorkspaceRoot: t.TempDir(),
-			MaxConcurrent: 1, Sandbox: "e2b", Environment: durableEnvironment(),
-		}, started)
-	}()
-	select {
-	case err := <-done:
-		if !errors.Is(err, errAgentWorkspaceUnsupported) || !strings.Contains(err.Error(), `sandbox "e2b"`) {
-			t.Fatalf("startup err = %v", err)
-		}
-	case <-started:
-		t.Fatal("E2B server started with the agent workspace policy")
+	spec := <-execution.specs
+	if spec.WorkspaceID != "agent-default" || spec.WorkspacePath != "" ||
+		spec.WorkspacePlan != (environment.WorkspacePlan{Strategy: environment.WorkspaceStrategyEmpty}) {
+		t.Fatalf("workspace = %q at %q with plan %+v", spec.WorkspaceID, spec.WorkspacePath, spec.WorkspacePlan)
+	}
+	dir, _ := filepath.EvalSymlinks(agents.Dir(ponsruntime.DefaultAgentID))
+	if len(spec.ReadWrite) != 1 || spec.ReadWrite[0] != filepath.Join(dir, agentdir.MemoryDir) {
+		t.Fatalf("read-write grants = %v", spec.ReadWrite)
 	}
 }
 
-func TestAgentRunnerRejectsUnsupportedOrInconsistentAgentWorkspace(t *testing.T) {
+func TestAgentRunnerRejectsInconsistentAgentWorkspace(t *testing.T) {
 	runner, execution, _ := agentWorkspaceRunner(t, "seatbelt")
 	for name, change := range map[string]func(*ponsruntime.RunRequest){
 		"another agent's workspace": func(r *ponsruntime.RunRequest) { r.WorkspaceID = "agent-other" },
@@ -171,10 +157,6 @@ func TestAgentRunnerRejectsUnsupportedOrInconsistentAgentWorkspace(t *testing.T)
 		}
 	}
 
-	runner.opts.Sandbox, runner.opts.Environment = "e2b", durableEnvironment()
-	if _, err := runner.Run(context.Background(), agentWorkspaceRequest()); !errors.Is(err, errAgentWorkspaceUnsupported) {
-		t.Fatalf("durable provider err = %v", err)
-	}
 	if len(execution.specs) != 0 {
 		t.Fatal("environment started for a rejected run")
 	}

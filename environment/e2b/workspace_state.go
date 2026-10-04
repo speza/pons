@@ -1,6 +1,8 @@
 package e2b
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -57,6 +59,16 @@ func loadOrCreateWorkspace(
 		}, nil
 	}
 
+	if plan.Strategy == environment.WorkspaceStrategyEmpty {
+		var archive bytes.Buffer
+		if err := tar.NewWriter(&archive).Close(); err != nil {
+			return environment.WorkspaceState{}, err
+		}
+		return seedWorkspace(
+			ctx, store, checkpoints, workspaceID, environment.WorkspaceStrategyEmpty, "", &archive, limit, onError,
+		)
+	}
+
 	canonicalSource, err := filepath.EvalSymlinks(sourcePath)
 	if err != nil {
 		return environment.WorkspaceState{}, fmt.Errorf("environment: workspace source: %w", err)
@@ -77,15 +89,33 @@ func loadOrCreateWorkspace(
 
 	defer os.Remove(archive.Name())
 	defer archive.Close()
+	return seedWorkspace(
+		ctx, store, checkpoints, workspaceID, environment.WorkspaceStrategyArchive, canonicalSource, archive, limit, onError,
+	)
+}
+
+// seedWorkspace stores the first archive as both the base and the current
+// checkpoint, then records the logical workspace.
+func seedWorkspace(
+	ctx context.Context,
+	store environment.StateStore,
+	checkpoints environment.CheckpointStore,
+	workspaceID string,
+	strategy environment.WorkspaceStrategy,
+	sourceRef string,
+	archive io.Reader,
+	limit int64,
+	onError func(error),
+) (environment.WorkspaceState, error) {
 	checkpointRef, err := checkpoints.PutWorkspaceCheckpoint(ctx, workspaceID, archive, limit)
 	if err != nil {
 		return environment.WorkspaceState{}, err
 	}
 	now := time.Now().UTC()
-	state = environment.WorkspaceState{
+	state := environment.WorkspaceState{
 		ID:              workspaceID,
-		Strategy:        environment.WorkspaceStrategyArchive,
-		SourceRef:       canonicalSource,
+		Strategy:        strategy,
+		SourceRef:       sourceRef,
 		BaseRevision:    checkpointRef,
 		CheckpointRef:   checkpointRef,
 		SetupGeneration: e2bSetupGeneration,

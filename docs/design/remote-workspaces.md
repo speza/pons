@@ -1,7 +1,7 @@
 # Remote workspace provisioning design
 
-**Status:** `archive/v1`, `git/v1`, and bring-your-own `github_app/v1`
-implemented; App Manifest onboarding deferred
+**Status:** `archive/v1`, `empty`, `git/v1`, and bring-your-own
+`github_app/v1` implemented; App Manifest onboarding deferred
 **Date:** 2026-09-21
 **Related:** ADR-0009, ADR-0015, and
 [ADR-0022](../adr/adr-0022-persistent-agent-workspaces.md), which proposes
@@ -24,9 +24,8 @@ placement identity  replaceable VM currently hosting that workspace
 A conversation records its workspace identity, `workspace_id`, when it is
 created. Under the `per_conversation` workspace policy it is the conversation
 ID. Under the `agent` policy (ADR-0022) every conversation of the agent shares
-`agent-<id>`; E2B does not support that policy yet, pending the `empty` seed
-in the [agent workspaces spec](../proposals/persistent-agents/agent-workspaces.md),
-so an empty policy resolves to `per_conversation` there.
+`agent-<id>`, seeded by the [`empty` strategy](#empty-strategy-empty) (see the
+[agent workspaces spec](../proposals/persistent-agents/agent-workspaces.md)).
 Several workspaces may use the same source and base selector without sharing
 mutable state.
 
@@ -164,6 +163,23 @@ not be fully recorded or extended. There is no automatic checkpoint retry.
 isolated remote work. An explicit export operation may later materialize a
 checkpoint into a chosen destination; automatic source synchronization is not
 part of the strategy.
+
+## Empty strategy: `empty`
+
+The agent workspace has no host source. Its first placement seeds nothing:
+
+```text
+no workspace row for agent-<id>
+  -> store an empty archive as base and current checkpoint
+  -> create logical workspace row (strategy empty)
+  -> place as for archive/v1
+```
+
+After seeding, `empty` persists exactly like `archive/v1`: reused and
+replacement placements, run completion, recovery, and pruning (which keeps
+the empty base) are the same. Its plan takes no source reference, base
+revision, or `WorkspacePath`. The agent's memory directory is not part of the
+workspace checkpoint; it keeps its own copy-in, apply-back sync.
 
 ## Git strategy: `git/v1`
 

@@ -1,6 +1,6 @@
 # Agent workspaces spec
 
-**Status:** Delivery step 1 implemented; step 2 (E2B `empty` seed) open
+**Status:** Implemented (delivery steps 1 and 2)
 **Date:** 2026-09-29
 **Related:** [plan](plan.md) phase 6,
 [ADR-0022](../../adr/adr-0022-persistent-agent-workspaces.md),
@@ -76,7 +76,7 @@ in a new conversation, on a replaced E2B sandbox.
 | --- | --- |
 | `agent` | One workspace for every conversation the agent owns. |
 | `per_conversation` | Current behavior: the client picks a host directory or Git repository per conversation. |
-| empty or missing | `agent` where the sandbox supports it; until delivery step 2, `per_conversation` on E2B. |
+| empty or missing | `agent`. |
 
 Any other value fails startup with an error naming the file. The resolved
 policy becomes `AgentDefinition.WorkspacePolicy`, so it is part of the
@@ -208,8 +208,7 @@ In `cmd/pons/runtime_mode.go`:
 All deterministic, with no provider credentials or network:
 
 - **Policy parsing:** empty and missing `workspace` resolve to `agent` on
-  Seatbelt and `per_conversation` on E2B;
-  `per_conversation` is accepted; any other value fails startup; the policy
+  Seatbelt and E2B; `per_conversation` is accepted; any other value fails startup; the policy
   changes the revision.
 - **Identity:** two conversations under `agent` share `agent-<id>` and one
   lock; under `per_conversation` they keep today's IDs and locks.
@@ -241,7 +240,8 @@ All deterministic, with no provider credentials or network:
 
 ## Delivery
 
-1. **Policy, identity, Seatbelt, clients.** Everything except E2B seeding.
+1. **Policy, identity, Seatbelt, clients** (done). Everything except E2B
+   seeding.
    On E2B an empty policy resolves to `per_conversation`, so a fresh or
    upgraded E2B server keeps working; an explicit `agent` policy stops the
    server at startup with a clear "not yet supported" error naming the file.
@@ -250,8 +250,10 @@ All deterministic, with no provider credentials or network:
    the agent workspace in place. The server checks it at startup, and the
    runner checks it again, with the run's workspace fields, before starting
    hands.
-2. **E2B `empty` seed.** Removes that error and makes an empty policy
-   resolve to `agent` on E2B too.
+2. **E2B `empty` seed** (done). Removes that error and makes an empty policy
+   resolve to `agent` on E2B too. A durable provider runs the agent workspace
+   with no `spec.WorkspacePath` and an `empty` plan; others run in the agent's
+   `workspace/` in place.
 
 ## Later slices
 
