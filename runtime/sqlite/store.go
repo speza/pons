@@ -22,10 +22,10 @@ import (
 
 const (
 	runtimeDBName = "runtime.db"
-	// Version 12 records each conversation's logical workspace ID and
-	// whether it is the agent's own workspace, fixed at creation by the
-	// agent's workspace policy.
-	currentSchemaVersion = 12
+	// Version 13 replaces workspaces.checkpoint_ref with the
+	// workspace_checkpoints history and adds workspace_reservations for
+	// restores.
+	currentSchemaVersion = 13
 )
 
 // Store is the local, exclusive-manager runtime backend. Its transactions
@@ -178,10 +178,24 @@ CREATE TABLE IF NOT EXISTS workspaces (
   strategy TEXT NOT NULL CHECK (strategy <> ''),
   source_ref TEXT NOT NULL,
   base_revision TEXT NOT NULL,
-  checkpoint_ref TEXT NOT NULL,
   setup_generation INTEGER NOT NULL CHECK (setup_generation > 0),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workspace_checkpoints (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  seq INTEGER NOT NULL CHECK (seq > 0),
+  ref TEXT NOT NULL CHECK (ref <> ''),
+  kind TEXT NOT NULL CHECK (kind IN ('base', 'run', 'restore')),
+  run_id TEXT NOT NULL DEFAULT '',
+  restored_from INTEGER,
+  size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (workspace_id, seq)
+);
+CREATE TABLE IF NOT EXISTS workspace_reservations (
+  workspace_id TEXT PRIMARY KEY CHECK (workspace_id <> ''),
+  created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS execution_environments (
   workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id),
@@ -242,7 +256,6 @@ func scanWorkspaceState(row rowScanner) (environment.WorkspaceState, error) {
 		&state.Strategy,
 		&state.SourceRef,
 		&state.BaseRevision,
-		&state.CheckpointRef,
 		&state.SetupGeneration,
 		&createdAt,
 		&updatedAt,
@@ -256,7 +269,7 @@ func scanWorkspaceState(row rowScanner) (environment.WorkspaceState, error) {
 
 func (s *Store) WorkspaceState(ctx context.Context, id string) (environment.WorkspaceState, error) {
 	state, err := scanWorkspaceState(s.db.QueryRowContext(ctx, `
-SELECT id, strategy, source_ref, base_revision, checkpoint_ref,
+SELECT id, strategy, source_ref, base_revision,
        setup_generation, created_at, updated_at
 FROM workspaces WHERE id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -271,27 +284,142 @@ FROM workspaces WHERE id = ?`, id))
 func (s *Store) SaveWorkspaceState(ctx context.Context, state environment.WorkspaceState) error {
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO workspaces (
-  id, strategy, source_ref, base_revision, checkpoint_ref,
+  id, strategy, source_ref, base_revision,
   setup_generation, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   strategy = excluded.strategy,
   source_ref = excluded.source_ref,
   base_revision = excluded.base_revision,
-  checkpoint_ref = excluded.checkpoint_ref,
   setup_generation = excluded.setup_generation,
   updated_at = excluded.updated_at`,
 		state.ID,
 		state.Strategy,
 		state.SourceRef,
 		state.BaseRevision,
-		state.CheckpointRef,
 		state.SetupGeneration,
 		encodeTime(state.CreatedAt),
 		encodeTime(state.UpdatedAt),
 	)
 	if err != nil {
 		return fmt.Errorf("runtime: save workspace state: %w", err)
+	}
+	return nil
+}
+
+const checkpointColumns = `workspace_id, seq, ref, kind, run_id, restored_from, size_bytes, created_at`
+
+func scanWorkspaceCheckpoint(row rowScanner) (environment.WorkspaceCheckpoint, error) {
+	var checkpoint environment.WorkspaceCheckpoint
+	var restoredFrom sql.NullInt64
+	var createdAt int64
+	if err := row.Scan(
+		&checkpoint.WorkspaceID,
+		&checkpoint.Seq,
+		&checkpoint.Ref,
+		&checkpoint.Kind,
+		&checkpoint.RunID,
+		&restoredFrom,
+		&checkpoint.SizeBytes,
+		&createdAt,
+	); err != nil {
+		return environment.WorkspaceCheckpoint{}, err
+	}
+	checkpoint.RestoredFrom = restoredFrom.Int64
+	checkpoint.CreatedAt = decodeTime(createdAt)
+	return checkpoint, nil
+}
+
+func (s *Store) AppendWorkspaceCheckpoint(
+	ctx context.Context,
+	checkpoint environment.WorkspaceCheckpoint,
+) (environment.WorkspaceCheckpoint, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return environment.WorkspaceCheckpoint{}, err
+	}
+	defer tx.Rollback()
+	if err := tx.QueryRowContext(ctx, `
+SELECT COALESCE(MAX(seq), 0) + 1 FROM workspace_checkpoints WHERE workspace_id = ?`,
+		checkpoint.WorkspaceID,
+	).Scan(&checkpoint.Seq); err != nil {
+		return environment.WorkspaceCheckpoint{}, fmt.Errorf("runtime: assign workspace checkpoint: %w", err)
+	}
+	var restoredFrom any
+	if checkpoint.RestoredFrom != 0 {
+		restoredFrom = checkpoint.RestoredFrom
+	}
+	checkpoint.CreatedAt = canonicalTime(checkpoint.CreatedAt)
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO workspace_checkpoints (`+checkpointColumns+`)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		checkpoint.WorkspaceID,
+		checkpoint.Seq,
+		checkpoint.Ref,
+		checkpoint.Kind,
+		checkpoint.RunID,
+		restoredFrom,
+		checkpoint.SizeBytes,
+		encodeTime(checkpoint.CreatedAt),
+	); err != nil {
+		return environment.WorkspaceCheckpoint{}, fmt.Errorf("runtime: append workspace checkpoint: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return environment.WorkspaceCheckpoint{}, fmt.Errorf("runtime: commit workspace checkpoint: %w", err)
+	}
+	return checkpoint, nil
+}
+
+func (s *Store) WorkspaceCheckpoints(ctx context.Context, workspaceID string) ([]environment.WorkspaceCheckpoint, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT `+checkpointColumns+` FROM workspace_checkpoints
+WHERE workspace_id = ? ORDER BY seq`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("runtime: list workspace checkpoints: %w", err)
+	}
+	defer rows.Close()
+	var history []environment.WorkspaceCheckpoint
+	for rows.Next() {
+		checkpoint, err := scanWorkspaceCheckpoint(rows)
+		if err != nil {
+			return nil, err
+		}
+		history = append(history, checkpoint)
+	}
+	return history, rows.Err()
+}
+
+func (s *Store) CurrentWorkspaceCheckpoint(ctx context.Context, workspaceID string) (environment.WorkspaceCheckpoint, error) {
+	checkpoint, err := scanWorkspaceCheckpoint(s.db.QueryRowContext(ctx, `
+SELECT `+checkpointColumns+` FROM workspace_checkpoints
+WHERE workspace_id = ? ORDER BY seq DESC LIMIT 1`, workspaceID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return environment.WorkspaceCheckpoint{}, environment.ErrStateNotFound
+	}
+	if err != nil {
+		return environment.WorkspaceCheckpoint{}, fmt.Errorf("runtime: read current workspace checkpoint: %w", err)
+	}
+	return checkpoint, nil
+}
+
+func (s *Store) DeleteWorkspaceCheckpoints(ctx context.Context, workspaceID string, seqs []int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, seq := range seqs {
+		if _, err := tx.ExecContext(ctx, `
+DELETE FROM workspace_checkpoints
+WHERE workspace_id = ? AND seq = ?
+  AND seq < (SELECT MAX(seq) FROM workspace_checkpoints WHERE workspace_id = ?)`,
+			workspaceID, seq, workspaceID,
+		); err != nil {
+			return fmt.Errorf("runtime: delete workspace checkpoint: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("runtime: commit workspace checkpoint deletion: %w", err)
 	}
 	return nil
 }
@@ -714,6 +842,10 @@ WHERE queued.status = ?
     JOIN conversations AS active_conversation ON active_conversation.id = active.conversation_id
     WHERE active.status = ? AND active_conversation.workspace_lock = conversation.workspace_lock
   )
+  AND NOT EXISTS (
+    SELECT 1 FROM workspace_reservations AS reservation
+    WHERE reservation.workspace_id = conversation.workspace_id
+  )
 ORDER BY queued.accepted_at, queued.id
 LIMIT 1`, ponsruntime.RunQueued, ponsruntime.RunRunning, ponsruntime.RunRunning,
 	).Scan(&id, &conversationID, &key, &agentRevision, &accepted)
@@ -1089,7 +1221,45 @@ WHERE run_id = ? AND status = ? ORDER BY rowid`, run.ID, ponsruntime.ToolRequest
 	return events, nil
 }
 
+func (s *Store) ReserveWorkspace(ctx context.Context, workspaceID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var busy bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM submissions AS active
+  JOIN conversations AS conversation ON conversation.id = active.conversation_id
+  WHERE active.status = ? AND conversation.workspace_id = ?
+) OR EXISTS (
+  SELECT 1 FROM workspace_reservations WHERE workspace_id = ?
+)`, ponsruntime.RunRunning, workspaceID, workspaceID).Scan(&busy); err != nil {
+		return fmt.Errorf("runtime: check workspace activity: %w", err)
+	}
+	if busy {
+		return fmt.Errorf("%w: workspace %q has an active run or restore", ponsruntime.ErrWorkspaceBusy, workspaceID)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO workspace_reservations(workspace_id, created_at) VALUES(?, ?)`,
+		workspaceID, encodeTime(time.Now()),
+	); err != nil {
+		return fmt.Errorf("runtime: reserve workspace: %w", err)
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ReleaseWorkspace(ctx context.Context, workspaceID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM workspace_reservations WHERE workspace_id = ?`, workspaceID)
+	return err
+}
+
 func (s *Store) RecoverRunning(ctx context.Context) error {
+	// A restore does not survive its process, so neither does its reservation.
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM workspace_reservations`); err != nil {
+		return fmt.Errorf("runtime: clear workspace reservations: %w", err)
+	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, conversation_id, inbound_message_id, agent_revision, started_at FROM runs
 WHERE status = ? ORDER BY started_at`, ponsruntime.RunRunning)

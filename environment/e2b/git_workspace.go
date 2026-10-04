@@ -18,13 +18,14 @@ func provisionGitWorkspace(
 	store environment.StateStore,
 	checkpoints environment.CheckpointStore,
 	state environment.WorkspaceState,
+	runID string,
 	env map[string]string,
 	credentials gitworkspace.Credentials,
 	limit int64,
 	onError func(error),
 	onDebug func(string),
 	progress func(string, string) error,
-) (environment.WorkspaceState, error) {
+) (environment.WorkspaceCheckpoint, error) {
 	if progress == nil {
 		progress = func(string, string) error { return nil }
 	}
@@ -57,7 +58,7 @@ func provisionGitWorkspace(
 		}
 		if step != "" {
 			if err := progress(step, message); err != nil {
-				return environment.WorkspaceState{}, err
+				return environment.WorkspaceCheckpoint{}, err
 			}
 		}
 		if command.step == "git fetch" {
@@ -68,7 +69,7 @@ func provisionGitWorkspace(
 			commandEnv = env
 		}
 		if _, _, err := client.run(ctx, sandbox, command.command, command.args, command.cwd, commandEnv); err != nil {
-			return environment.WorkspaceState{}, fmt.Errorf("environment: provision E2B Git workspace step %q: %w", command.step, credentials.RedactError(err))
+			return environment.WorkspaceCheckpoint{}, fmt.Errorf("environment: provision E2B Git workspace step %q: %w", command.step, credentials.RedactError(err))
 		}
 		if command.command == "/usr/bin/git" {
 			debugE2B(onDebug, "workspace=%q sandbox=%q %s completed", state.ID, sandbox.ID, command.step)
@@ -76,36 +77,46 @@ func provisionGitWorkspace(
 	}
 
 	if err := progress("checkpoint.download", "Downloading initial checkout…"); err != nil {
-		return environment.WorkspaceState{}, err
+		return environment.WorkspaceCheckpoint{}, err
 	}
 	body, err := stageWorkspaceArchive(func(out io.Writer) error {
 		return client.download(ctx, sandbox, workspaceCheckpointPath, out, limit)
 	})
 	if err != nil {
-		return environment.WorkspaceState{}, err
+		return environment.WorkspaceCheckpoint{}, err
 	}
 	defer os.Remove(body.Name())
 	defer body.Close()
 	if err := validateWorkspaceArchive(&contextReader{ctx: ctx, reader: body}, limit); err != nil {
-		return environment.WorkspaceState{}, err
+		return environment.WorkspaceCheckpoint{}, err
 	}
 
 	if _, err := body.Seek(0, io.SeekStart); err != nil {
-		return environment.WorkspaceState{}, err
+		return environment.WorkspaceCheckpoint{}, err
 	}
-	checkpointRef, err := checkpoints.PutWorkspaceCheckpoint(ctx, state.ID, body, limit)
+	ref, size, err := checkpoints.PutWorkspaceCheckpoint(ctx, state.ID, body, limit)
 	if err != nil {
-		return environment.WorkspaceState{}, err
+		return environment.WorkspaceCheckpoint{}, err
 	}
-	state.CheckpointRef = checkpointRef
-	state.UpdatedAt = time.Now().UTC()
+	now := time.Now().UTC()
+	state.UpdatedAt = now
 	if err := store.SaveWorkspaceState(ctx, state); err != nil {
-		return environment.WorkspaceState{}, err
+		return environment.WorkspaceCheckpoint{}, err
+	}
+	// A git/v1 workspace has no base entry: its first checkpoint is this
+	// run's initial checkout.
+	checkpoint, err := environment.RecordWorkspaceCheckpoint(ctx, store, checkpoints, environment.WorkspaceCheckpoint{
+		WorkspaceID: state.ID,
+		Ref:         ref,
+		Kind:        environment.CheckpointRun,
+		RunID:       runID,
+		SizeBytes:   size,
+		CreatedAt:   now,
+	}, onError)
+	if err != nil {
+		return environment.WorkspaceCheckpoint{}, err
 	}
 
-	debugE2B(onDebug, "workspace=%q sandbox=%q initial checkpoint=%s saved", state.ID, sandbox.ID, checkpointRef)
-	if err := checkpoints.PruneWorkspaceCheckpoints(ctx, state.ID, []string{checkpointRef}); err != nil && onError != nil {
-		onError(fmt.Errorf("environment: prune initial Git workspace checkpoints: %w", err))
-	}
-	return state, nil
+	debugE2B(onDebug, "workspace=%q sandbox=%q initial checkpoint=%s saved", state.ID, sandbox.ID, ref)
+	return checkpoint, nil
 }

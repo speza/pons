@@ -102,9 +102,9 @@ func TestE2BWorkspaceCheckpointRecovery(t *testing.T) {
 		t.Fatalf("remote result was written back to source workspace: %v", err)
 	}
 	waitForEnvironmentDeletion(t, ctx, store, stateKey)
-	workspaceState, err := store.WorkspaceState(ctx, stateKey)
-	if err != nil || workspaceState.CheckpointRef == "" {
-		t.Fatalf("durable workspace = %+v, %v", workspaceState, err)
+	current, err := store.CurrentWorkspaceCheckpoint(ctx, stateKey)
+	if err != nil || current.Kind != environment.CheckpointRun || current.RunID != "second-run" {
+		t.Fatalf("current checkpoint = %+v, %v", current, err)
 	}
 	third, err := provider.Start(ctx, environment.Spec{
 		WorkspaceID:   spec.WorkspaceID,

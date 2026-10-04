@@ -40,18 +40,76 @@ id                  <────────────────── work
 strategy                               provider
 source_ref                             environment_id
 base_revision                          template
-checkpoint_ref                         network_policy
-setup_generation                       status / run_id
-created_at / updated_at                idle_until / expires_at
+setup_generation                       network_policy
+created_at / updated_at                status / run_id
+     ^                                 idle_until / expires_at
+     │
+workspace_checkpoints
+─────────────────────
+workspace_id, seq
+ref, kind (base | run | restore)
+run_id, restored_from
+size_bytes, created_at
 
 one logical workspace ───── 0 or 1 current retained environment
+                      ───── 1..n checkpoints; the highest seq is current
 ```
 
-Deleting an environment does not delete its workspace. A replacement VM can
-restore the latest checkpoint.
+Deleting an environment does not delete its workspace. A replacement VM
+restores the current checkpoint.
 
-`source_ref` and `checkpoint_ref` are non-secret identifiers. They must never
+`source_ref` and checkpoint `ref`s are non-secret identifiers. They must never
 contain embedded credentials.
+
+## Checkpoint history
+
+Each workspace keeps a history of checkpoints in `workspace_checkpoints`.
+`seq` increases by one per workspace, and the highest `seq` is the current
+checkpoint:
+
+- `base` is the seed archive of an `archive/v1` or `empty` workspace. A
+  `git/v1` workspace has no base; its first entry is the `run` that checked
+  it out.
+- `run` is the checkpoint after a completed run, with its `run_id`.
+- `restore` is written by a restore. It points at the restored checkpoint's
+  archive, and `restored_from` holds that checkpoint's `seq`.
+
+Archives are content-addressed, so entries may share a `ref` and a restore
+copies nothing.
+
+After each appended entry, retention keeps the current checkpoint, the 10
+highest `seq` values, the newest checkpoint of each UTC day for the last 14
+days, and the base. Other entries are deleted in one transaction, then
+archive files no entry references are removed. File pruning is best-effort:
+failures go to the server log, and an orphaned file is removed by a later
+prune. These defaults are fixed.
+
+### Restore
+
+The owner lists checkpoints with `GET /v1/workspaces/{id}/checkpoints`
+(newest first; `seq` is the handle and `ref` is not exposed) and restores one
+with `POST /v1/workspaces/{id}/restore` and `{"seq": N}`, or with
+`pons workspace checkpoints|restore`. Hands never receive this API, the
+stores, or the server address.
+
+```text
+reserve the workspace ID (workspace_reservations)
+  -> 409 if a run of the workspace is claimed or another restore holds it
+validate the checkpoint
+  -> 404 if seq is unknown; error if its archive fails digest verification
+  -> 409 if the workspace has an unexpired active or recovery environment
+provider applies the restore
+  -> E2B deletes the retained idle sandbox and its state
+append a restore entry
+release the reservation and wake the scheduler
+```
+
+`ClaimRunnable` claims no run whose conversation's workspace ID is reserved,
+so submissions queued during a restore run afterwards against the restored
+checkpoint. Reservations do not survive the process: startup clears them.
+A failure before the append leaves the history and the current checkpoint
+unchanged. Providers that do not implement `environment.WorkspaceRestorer`
+return `501 Not Implemented`; Seatbelt workspaces have no checkpoints yet.
 
 ## Checkpoint storage
 
@@ -59,7 +117,7 @@ Checkpoint bytes live outside SQLite behind `environment.CheckpointStore`:
 
 ```go
 type CheckpointStore interface {
-    PutWorkspaceCheckpoint(context.Context, string, io.Reader, int64) (string, error)
+    PutWorkspaceCheckpoint(context.Context, string, io.Reader, int64) (string, int64, error)
     WorkspaceCheckpoint(context.Context, string, string, int64) (io.ReadCloser, error)
     PruneWorkspaceCheckpoints(context.Context, string, []string) error
 }
@@ -88,9 +146,8 @@ from `runtime/sqlite`, which stores metadata and opaque checkpoint references:
 
 A future implementation may place the same bounded objects in S3 or another
 object store. Object-store credentials remain host-side; the host carries the
-archive through envd. The immutable base and current checkpoint are retained;
-after advancing workspace metadata, the provider prunes the superseded
-intermediate checkpoint on a best-effort basis.
+archive through envd. Retention (see [Checkpoint history](#checkpoint-history))
+decides which archives are kept.
 
 The client selects the archive source path when creating the conversation. It
 must exist on the server host within the server's allowed workspace root. The
@@ -104,8 +161,9 @@ seed cannot capture runtime history or recursively include checkpoint objects.
 ```text
 resolve canonical source path
   -> archive source once
-  -> store archive as base and current checkpoint
+  -> store archive
   -> create logical workspace row
+  -> append base checkpoint
   -> create E2B VM
   -> upload and extract checkpoint
   -> start fresh pons-hands
@@ -129,7 +187,7 @@ load logical workspace
 load logical workspace
   -> no retained VM exists
   -> create E2B VM
-  -> load latest checkpoint from CheckpointStore
+  -> load current checkpoint from CheckpointStore
   -> upload and extract checkpoint
   -> start fresh pons-hands
 ```
@@ -142,7 +200,7 @@ stop pons-hands cleanly
   -> create bounded remote archive
   -> download and validate archive
   -> persist content-addressed checkpoint
-  -> advance workspaces.checkpoint_ref
+  -> append run checkpoint and apply retention
   -> mark environment idle
 ```
 
@@ -170,14 +228,15 @@ The agent workspace has no host source. Its first placement seeds nothing:
 
 ```text
 no workspace row for agent-<id>
-  -> store an empty archive as base and current checkpoint
+  -> store an empty archive
   -> create logical workspace row (strategy empty)
+  -> append base checkpoint
   -> place as for archive/v1
 ```
 
 After seeding, `empty` persists exactly like `archive/v1`: reused and
-replacement placements, run completion, recovery, and pruning (which keeps
-the empty base) are the same. Its plan takes no source reference, base
+replacement placements, run completion, recovery, retention (which keeps
+the empty base), and restore are the same. Its plan takes no source reference, base
 revision, or `WorkspacePath`. The agent's memory directory is not part of the
 workspace checkpoint; it keeps its own copy-in, apply-back sync.
 
@@ -189,7 +248,7 @@ A Git workspace uses the same logical workspace and placement model:
 strategy        git/v1
 source_ref      trusted repository configuration ID
 base_revision   full initial commit ID or refs/heads/<branch>
-checkpoint_ref  latest durable recovery state
+checkpoints     history of durable recovery states
 ```
 
 Several independent workspaces may clone the same repository and base commit.
@@ -360,7 +419,7 @@ control-plane credentials remain host-only.
 - Source seeding or setup failure starts no hands session.
 - A failed checkpoint leaves the prior checkpoint authoritative.
 - Environment deletion leaves logical workspace state intact.
-- Provider expiry restores from the latest durable checkpoint; no tool action
+- Provider expiry restores from the current durable checkpoint; no tool action
   is retried automatically.
 - A rejected Git push is a normal bash result for the agent to resolve.
 - Credential acquisition never falls back to a broader credential.

@@ -53,6 +53,17 @@ func main() {
 		return
 	}
 
+	if mode == "bundled" && len(os.Args) > 1 && os.Args[1] == "workspace" {
+		if err := runWorkspace(rootCtx, os.Args[2:], os.Stdout, os.Stderr); err != nil {
+			if !errors.Is(err, flag.ErrHelp) {
+				logger.Printf("workspace: %v", err)
+			}
+			stop()
+			os.Exit(1)
+		}
+		return
+	}
+
 	provider := flag.String("provider", "anthropic", "LLM provider: anthropic | openai | codex | opencode-go | openrouter")
 	model := flag.String("model", "", "model id (default: provider default)")
 	baseURL := flag.String("base-url", "", "override provider endpoint (for OpenAI-compatible servers)")

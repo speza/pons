@@ -1,0 +1,149 @@
+package environment
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"maps"
+	"slices"
+	"time"
+)
+
+// CheckpointKind records why a workspace checkpoint was taken.
+type CheckpointKind string
+
+const (
+	// CheckpointBase is the seed archive of an archive/v1 or empty workspace.
+	CheckpointBase CheckpointKind = "base"
+	// CheckpointRun is the workspace after a completed run.
+	CheckpointRun CheckpointKind = "run"
+	// CheckpointRestore makes an earlier checkpoint's archive current again.
+	CheckpointRestore CheckpointKind = "restore"
+)
+
+// Fixed checkpoint retention. The current checkpoint and the base are always
+// kept as well.
+const (
+	RetainRecentCheckpoints = 10
+	RetainDailyCheckpoints  = 14
+)
+
+// WorkspaceCheckpoint is one entry in a workspace's checkpoint history. Seq
+// increases by one per workspace; the highest Seq is the current checkpoint.
+// Ref is a CheckpointStore reference, and several entries may share one.
+// RestoredFrom is the Seq a restore entry restored, and zero otherwise.
+type WorkspaceCheckpoint struct {
+	WorkspaceID  string
+	Seq          int64
+	Ref          string
+	Kind         CheckpointKind
+	RunID        string
+	RestoredFrom int64
+	SizeBytes    int64
+	CreatedAt    time.Time
+}
+
+// ErrWorkspaceInUse reports a restore refused because a run or a retained
+// active or recovery environment holds the workspace.
+var ErrWorkspaceInUse = errors.New("environment: workspace is in use")
+
+// WorkspaceRestorer is implemented by providers that can make an earlier
+// checkpoint the content of a workspace's next placement. The caller holds
+// the workspace exclusively and records the restore after it returns. A
+// workspace a provider cannot release fails with ErrWorkspaceInUse.
+type WorkspaceRestorer interface {
+	RestoreWorkspace(ctx context.Context, workspaceID string, checkpoint WorkspaceCheckpoint) error
+}
+
+// ExpiredCheckpoints returns the entries of an ascending history that fixed
+// retention no longer keeps: everything except the current checkpoint, the
+// RetainRecentCheckpoints newest, the newest of each UTC day for the last
+// RetainDailyCheckpoints days counting today, and the base.
+func ExpiredCheckpoints(history []WorkspaceCheckpoint, now time.Time) []WorkspaceCheckpoint {
+	keep := make(map[int64]bool, len(history))
+	for i := max(0, len(history)-RetainRecentCheckpoints); i < len(history); i++ {
+		keep[history[i].Seq] = true
+	}
+	today := now.UTC().Truncate(24 * time.Hour)
+	oldestDay := today.AddDate(0, 0, -(RetainDailyCheckpoints - 1))
+	newestOfDay := make(map[time.Time]WorkspaceCheckpoint)
+	for _, checkpoint := range history {
+		if checkpoint.Kind == CheckpointBase {
+			keep[checkpoint.Seq] = true
+		}
+		day := checkpoint.CreatedAt.UTC().Truncate(24 * time.Hour)
+		if day.Before(oldestDay) || day.After(today) {
+			continue
+		}
+		if newest, ok := newestOfDay[day]; !ok || checkpoint.Seq > newest.Seq {
+			newestOfDay[day] = checkpoint
+		}
+	}
+	for _, checkpoint := range newestOfDay {
+		keep[checkpoint.Seq] = true
+	}
+
+	var expired []WorkspaceCheckpoint
+	for _, checkpoint := range history {
+		if !keep[checkpoint.Seq] {
+			expired = append(expired, checkpoint)
+		}
+	}
+	return expired
+}
+
+// RecordWorkspaceCheckpoint appends a checkpoint whose archive is already
+// durable, then applies retention. Once the append succeeds the checkpoint is
+// recorded: retention failures go to onError, and an orphaned archive is
+// removed by a later prune.
+func RecordWorkspaceCheckpoint(
+	ctx context.Context,
+	store StateStore,
+	archives CheckpointStore,
+	checkpoint WorkspaceCheckpoint,
+	onError func(error),
+) (WorkspaceCheckpoint, error) {
+	recorded, err := store.AppendWorkspaceCheckpoint(ctx, checkpoint)
+	if err != nil {
+		return WorkspaceCheckpoint{}, err
+	}
+	if err := pruneWorkspaceCheckpoints(ctx, store, archives, recorded.WorkspaceID, recorded.CreatedAt); err != nil && onError != nil {
+		onError(fmt.Errorf("environment: prune workspace checkpoints: %w", err))
+	}
+	return recorded, nil
+}
+
+func pruneWorkspaceCheckpoints(
+	ctx context.Context,
+	store StateStore,
+	archives CheckpointStore,
+	workspaceID string,
+	now time.Time,
+) error {
+	history, err := store.WorkspaceCheckpoints(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	if len(history) == 0 {
+		return errors.New("environment: workspace has no checkpoints")
+	}
+	expired := make(map[int64]bool)
+	for _, checkpoint := range ExpiredCheckpoints(history, now) {
+		expired[checkpoint.Seq] = true
+	}
+	if len(expired) != 0 {
+		seqs := slices.Sorted(maps.Keys(expired))
+		if err := store.DeleteWorkspaceCheckpoints(ctx, workspaceID, seqs); err != nil {
+			return err
+		}
+	}
+
+	// An archive is kept while any retained entry still points at it.
+	var refs []string
+	for _, checkpoint := range history {
+		if !expired[checkpoint.Seq] && !slices.Contains(refs, checkpoint.Ref) {
+			refs = append(refs, checkpoint.Ref)
+		}
+	}
+	return archives.PruneWorkspaceCheckpoints(ctx, workspaceID, refs)
+}

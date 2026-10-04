@@ -381,6 +381,21 @@ make smoke-e2b
 
 Run `go run ./cmd/pons serve --debug` after configuring the server.
 
+Every completed E2B run adds a checkpoint to the workspace's history. pons
+keeps the current checkpoint, the 10 newest, the newest of each UTC day for
+14 days, and the base. List them and restore one with the running server:
+
+```sh
+go run ./cmd/pons workspace checkpoints
+go run ./cmd/pons workspace restore 37
+```
+
+Both default to the agent's workspace; pass `-workspace-id ID` for another
+and `-server URL` for a non-default server. A restore makes the chosen
+checkpoint the newest without rewriting history, and the next run starts from
+it. It is refused while a run in that workspace is active or the workspace
+has a sandbox held for recovery. Seatbelt workspaces have no checkpoints yet.
+
 With `"workspace": "per_conversation"` in the agent's `agent.json` (see
 [Agent](#agent)), each client can create an independent checkout from a
 repository and full commit ID:

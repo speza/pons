@@ -116,7 +116,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 			return nil, err
 		}
 	}
-	workspaceState, err := loadOrCreateWorkspace(
+	workspaceState, current, err := loadOrCreateWorkspace(
 		ctx,
 		store,
 		checkpoints,
@@ -130,7 +130,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 		return nil, err
 	}
 
-	p.debugf("workspace=%q strategy=%s checkpoint=%t", workspaceID, workspaceState.Strategy, workspaceState.CheckpointRef != "")
+	p.debugf("workspace=%q strategy=%s checkpoint=%t", workspaceID, workspaceState.Strategy, current.Ref != "")
 	var credentials gitworkspace.Credentials
 	defer func() { startErr = credentials.RedactError(startErr) }()
 	if spec.GitAllRepositories && p.GitCredentials == nil {
@@ -180,20 +180,21 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 				return nil, errors.Join(err, cleanup())
 			}
 		}
-		initialCheckout := workspaceState.CheckpointRef == ""
+		initialCheckout := current.Ref == ""
 		if initialCheckout {
 			p.debugf("workspace=%q sandbox=%q provisioning Git checkout repository=%q revision=%s", workspaceID, sandbox.ID, workspaceState.SourceRef, workspaceState.BaseRevision)
 		} else {
-			p.debugf("workspace=%q sandbox=%q restoring checkpoint=%s", workspaceID, sandbox.ID, workspaceState.CheckpointRef)
+			p.debugf("workspace=%q sandbox=%q restoring checkpoint=%s", workspaceID, sandbox.ID, current.Ref)
 		}
-		workspaceState, err = placeWorkspace(
-			ctx, client, sandbox, store, checkpoints, workspaceState, env, credentials, cfg.maxWorkspaceBytes, cfg.onError, p.OnDebug, progress,
+		current, err = placeWorkspace(
+			ctx, client, sandbox, store, checkpoints, workspaceState, current, runID,
+			env, credentials, cfg.maxWorkspaceBytes, cfg.onError, p.OnDebug, progress,
 		)
 		if err != nil {
 			return nil, errors.Join(err, cleanup())
 		}
 		if !initialCheckout {
-			p.debugf("workspace=%q sandbox=%q checkpoint=%s restored", workspaceID, sandbox.ID, workspaceState.CheckpointRef)
+			p.debugf("workspace=%q sandbox=%q checkpoint=%s restored", workspaceID, sandbox.ID, current.Ref)
 		}
 		now := time.Now().UTC()
 		if err := store.SaveEnvironmentState(ctx, environment.State{
@@ -436,6 +437,51 @@ func (p *Provider) Close() error {
 	cancel()
 	<-done
 	p.stopJanitor, p.janitorDone = nil, nil
+	return nil
+}
+
+var _ environment.WorkspaceRestorer = (*Provider)(nil)
+
+// RestoreWorkspace drops the workspace's retained idle sandbox, if any, so its
+// next placement starts a new sandbox from the current checkpoint, which the
+// caller then records as the restored one. Nothing is uploaded here.
+func (p *Provider) RestoreWorkspace(ctx context.Context, workspaceID string, _ environment.WorkspaceCheckpoint) error {
+	cfg, err := p.config()
+	if err != nil {
+		return err
+	}
+	workspaceLock := p.workspaceLock(workspaceID)
+	workspaceLock.Lock()
+	defer workspaceLock.Unlock()
+	p.lifecycleMu.Lock()
+	store, activeRun := p.stateStore, p.active[workspaceID]
+	p.lifecycleMu.Unlock()
+	if store == nil {
+		return errors.New("environment: E2B durable workspace stores are required")
+	}
+	if activeRun != "" {
+		return fmt.Errorf("%w: workspace %q has active E2B run %q", environment.ErrWorkspaceInUse, workspaceID, activeRun)
+	}
+
+	state, err := store.EnvironmentState(ctx, workspaceID)
+	if errors.Is(err, environment.ErrStateNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if state.Status != environment.StateIdle && time.Now().Before(state.ExpiresAt) {
+		return fmt.Errorf("%w: sandbox %q is %s until %s", environment.ErrWorkspaceInUse,
+			state.EnvironmentID, state.Status, state.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+	client := &e2bClient{apiKey: cfg.apiKey, apiURL: cfg.apiURL, envdURL: cfg.envdURL, http: cfg.http}
+	if err := client.killSandbox(ctx, state.EnvironmentID); err != nil {
+		return err
+	}
+	if err := store.DeleteEnvironmentState(ctx, workspaceID, state.EnvironmentID); err != nil {
+		return err
+	}
+	p.debugf("workspace=%q sandbox=%q deleted for restore", workspaceID, state.EnvironmentID)
 	return nil
 }
 

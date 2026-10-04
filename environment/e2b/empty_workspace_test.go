@@ -161,9 +161,13 @@ func TestEmptyWorkspaceSurvivesReplacementSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	base, err := store.CurrentWorkspaceCheckpoint(ctx, "agent-default")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if seeded.Strategy != environment.WorkspaceStrategyEmpty || seeded.SourceRef != "" ||
-		seeded.CheckpointRef == "" || seeded.BaseRevision != seeded.CheckpointRef {
-		t.Fatalf("seeded workspace = %+v", seeded)
+		base.Kind != environment.CheckpointBase || seeded.BaseRevision != base.Ref {
+		t.Fatalf("seeded workspace = %+v, base = %+v", seeded, base)
 	}
 	if entries, err := os.ReadDir(firstDir); err != nil || len(entries) != 0 {
 		t.Fatalf("first placement = %v, %v; want an empty workspace", entries, err)
@@ -194,11 +198,11 @@ func TestEmptyWorkspaceSurvivesReplacementSandbox(t *testing.T) {
 	if persisted.Strategy != environment.WorkspaceStrategyEmpty || persisted.BaseRevision != seeded.BaseRevision {
 		t.Fatalf("persisted workspace = %+v, seeded %+v", persisted, seeded)
 	}
-	base, err := checkpoints.WorkspaceCheckpoint(ctx, "agent-default", seeded.BaseRevision, 1<<20)
+	archive, err := checkpoints.WorkspaceCheckpoint(ctx, "agent-default", seeded.BaseRevision, 1<<20)
 	if err != nil {
 		t.Fatalf("empty base checkpoint pruned: %v", err)
 	}
-	if err := base.Close(); err != nil {
+	if err := archive.Close(); err != nil {
 		t.Fatal(err)
 	}
 }

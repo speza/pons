@@ -407,6 +407,61 @@ func completedAnswer(messages []ponsruntime.Message, inboundMessageID string) (a
 	return answerMessage{}, false
 }
 
+// WorkspaceCheckpoints lists a workspace's checkpoints, newest first.
+func (c Client) WorkspaceCheckpoints(ctx context.Context, workspaceID string) (ponsruntime.WorkspaceCheckpoints, error) {
+	endpoint, err := c.endpoint("/v1/workspaces/" + url.PathEscape(workspaceID) + "/checkpoints")
+	if err != nil {
+		return ponsruntime.WorkspaceCheckpoints{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return ponsruntime.WorkspaceCheckpoints{}, err
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return ponsruntime.WorkspaceCheckpoints{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ponsruntime.WorkspaceCheckpoints{}, responseError(resp)
+	}
+	var checkpoints ponsruntime.WorkspaceCheckpoints
+	if err := json.NewDecoder(resp.Body).Decode(&checkpoints); err != nil {
+		return ponsruntime.WorkspaceCheckpoints{}, err
+	}
+	return checkpoints, nil
+}
+
+// RestoreWorkspace makes checkpoint seq the workspace's newest checkpoint.
+func (c Client) RestoreWorkspace(ctx context.Context, workspaceID string, seq int64) (ponsruntime.WorkspaceCheckpoint, error) {
+	endpoint, err := c.endpoint("/v1/workspaces/" + url.PathEscape(workspaceID) + "/restore")
+	if err != nil {
+		return ponsruntime.WorkspaceCheckpoint{}, err
+	}
+	body, err := json.Marshal(restoreBody{Seq: seq})
+	if err != nil {
+		return ponsruntime.WorkspaceCheckpoint{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return ponsruntime.WorkspaceCheckpoint{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return ponsruntime.WorkspaceCheckpoint{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ponsruntime.WorkspaceCheckpoint{}, responseError(resp)
+	}
+	var checkpoint ponsruntime.WorkspaceCheckpoint
+	if err := json.NewDecoder(resp.Body).Decode(&checkpoint); err != nil {
+		return ponsruntime.WorkspaceCheckpoint{}, err
+	}
+	return checkpoint, nil
+}
+
 func responseError(resp *http.Response) error {
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	var body map[string]string

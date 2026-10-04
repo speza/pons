@@ -756,7 +756,7 @@ func TestEnvironmentStateRoundTripAndExpiry(t *testing.T) {
 	checkpointRef := "opaque-checkpoint-reference"
 	workspace := environment.WorkspaceState{
 		ID: "workspace", Strategy: environment.WorkspaceStrategyArchive, SourceRef: "/source",
-		BaseRevision: checkpointRef, CheckpointRef: checkpointRef, SetupGeneration: 2,
+		BaseRevision: checkpointRef, SetupGeneration: 2,
 		CreatedAt: now.Add(-time.Minute), UpdatedAt: now,
 	}
 	if err := store.SaveWorkspaceState(ctx, workspace); err != nil {
@@ -767,7 +767,7 @@ func TestEnvironmentStateRoundTripAndExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	if gotWorkspace.Strategy != workspace.Strategy || gotWorkspace.SourceRef != workspace.SourceRef ||
-		gotWorkspace.BaseRevision != workspace.BaseRevision || gotWorkspace.CheckpointRef != workspace.CheckpointRef ||
+		gotWorkspace.BaseRevision != workspace.BaseRevision ||
 		gotWorkspace.SetupGeneration != workspace.SetupGeneration || !gotWorkspace.CreatedAt.Equal(workspace.CreatedAt) {
 		t.Fatalf("workspace = %+v", gotWorkspace)
 	}
@@ -857,7 +857,7 @@ func TestRecoveryReservationSurvivesRestartAndExpiresAtDeadline(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	if err := store.SaveWorkspaceState(ctx, environment.WorkspaceState{
 		ID: "workspace", Strategy: environment.WorkspaceStrategyArchive, SetupGeneration: 1,
-		CheckpointRef: "previous", CreatedAt: now, UpdatedAt: now,
+		CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}

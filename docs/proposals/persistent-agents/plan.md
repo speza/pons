@@ -291,7 +291,8 @@ and stops at the budget.
 ## Phase 6: Agent workspaces and checkpoints
 
 **Use cases:** U9. **ADRs:** ADR-0022. **Spec:** [agent workspaces](agent-workspaces.md)
-(first slice: steps 1 and 2).
+(first slice: steps 1 and 2) and
+[workspace checkpoint history](workspace-checkpoints.md) (steps 4 and 5).
 
 Steps:
 
@@ -306,7 +307,7 @@ Steps:
    `archive/v1` and `git/v1`.
 3. **Setup and exclusions.** Add a setup script with a setup generation, and
    checkpoint exclusions for rebuildable paths.
-4. **History, retention, restore.** Replace the single `checkpoint_ref` with
+4. **History, retention, restore** (done for E2B). Replace the single `checkpoint_ref` with
    a checkpoint history table; apply the retention policy; add
    `pons workspace checkpoints|restore`.
 5. **Seatbelt checkpoints.** Optionally checkpoint the local workspace

@@ -33,6 +33,11 @@ type Config struct {
 	EnvironmentOptions  []string
 	DefaultEnvironment  string
 
+	// WorkspaceHistory lists workspace checkpoints. WorkspaceRestorer is nil
+	// when the server's provider cannot restore.
+	WorkspaceHistory  WorkspaceHistory
+	WorkspaceRestorer WorkspaceRestorer
+
 	// RepairInterval controls the low-frequency runnable-work reconciliation
 	// scan. Zero uses 30 seconds; wake signals remain the primary path.
 	RepairInterval time.Duration

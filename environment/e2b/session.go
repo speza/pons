@@ -127,29 +127,21 @@ func (s *e2bSession) persistCheckpoint(ctx context.Context, archive io.ReadSeeke
 	if _, err := archive.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	checkpointRef, err := s.checkpoints.PutWorkspaceCheckpoint(ctx, s.workspace.ID, archive, s.maxWorkspaceBytes)
+	ref, size, err := s.checkpoints.PutWorkspaceCheckpoint(ctx, s.workspace.ID, archive, s.maxWorkspaceBytes)
 	if err != nil {
 		return err
 	}
-	workspace := s.workspace
-	workspace.CheckpointRef = checkpointRef
-	workspace.UpdatedAt = time.Now().UTC()
-	if err := s.store.SaveWorkspaceState(ctx, workspace); err != nil {
+	if _, err := environment.RecordWorkspaceCheckpoint(ctx, s.store, s.checkpoints, environment.WorkspaceCheckpoint{
+		WorkspaceID: s.workspace.ID,
+		Ref:         ref,
+		Kind:        environment.CheckpointRun,
+		RunID:       s.runID,
+		SizeBytes:   size,
+		CreatedAt:   time.Now().UTC(),
+	}, s.onError); err != nil {
 		return err
 	}
-
-	s.workspace = workspace
-	s.debugf("checkpoint=%s saved", checkpointRef)
-	// The new reference is durable before pruning. An archive/v1 or empty
-	// BaseRevision is a checkpoint reference; git/v1's is a Git object ID and
-	// must not be passed to the checkpoint store.
-	keep := []string{s.workspace.CheckpointRef}
-	if s.workspace.Strategy == environment.WorkspaceStrategyArchive || s.workspace.Strategy == environment.WorkspaceStrategyEmpty {
-		keep = append([]string{s.workspace.BaseRevision}, keep...)
-	}
-	if err := s.checkpoints.PruneWorkspaceCheckpoints(ctx, s.workspace.ID, keep); err != nil && s.onError != nil {
-		s.onError(fmt.Errorf("environment: prune superseded workspace checkpoints: %w", err))
-	}
+	s.debugf("checkpoint=%s saved", ref)
 	return nil
 }
 
