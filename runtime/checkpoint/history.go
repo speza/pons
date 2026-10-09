@@ -82,7 +82,9 @@ func (h *History) RestoreWorkspace(ctx context.Context, workspaceID string, seq 
 		}
 		return ponsruntime.WorkspaceCheckpoint{}, err
 	}
-	restored, err := environment.RecordWorkspaceCheckpoint(ctx, h.State, h.Archives, environment.WorkspaceCheckpoint{
+	// Once the provider has applied it, the restore is recorded even if the
+	// request is canceled, so it is never left half done.
+	restored, err := environment.RecordWorkspaceCheckpoint(context.WithoutCancel(ctx), h.State, h.Archives, environment.WorkspaceCheckpoint{
 		WorkspaceID:  workspaceID,
 		Ref:          target.Ref,
 		Kind:         environment.CheckpointRestore,

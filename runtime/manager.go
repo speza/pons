@@ -110,8 +110,9 @@ func New(cfg Config) (*Manager, error) {
 		runs: make(map[string]*activeRun),
 	}
 	// The scheduler remains in the wait group for the Manager's whole open
-	// lifetime. Runs are added only by that scheduler, so Close cannot race a
-	// zero counter with a new Add.
+	// lifetime. Runs are added only by that scheduler, and restores only
+	// under mu while the Manager is open, so Close cannot race a zero counter
+	// with a new Add.
 	m.wg.Add(1)
 	go m.schedule()
 	m.notify()

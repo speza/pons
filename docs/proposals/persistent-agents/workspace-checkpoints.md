@@ -124,6 +124,7 @@ defaults:
 | Recent | the 10 highest `seq` values |
 | Daily | the newest checkpoint of each UTC day, for the last 14 days |
 | Base | the `base` row, always |
+| Restore sources | the `restored_from` row of every kept `restore` row |
 
 Rows outside that set are deleted in one transaction. Then archive files are
 pruned: any file under the workspace's checkpoint directory whose `ref` no
@@ -172,7 +173,9 @@ it.
 5. **Release** the reservation.
 
 A failure at any step before 4 leaves the history and the current checkpoint
-unchanged.
+unchanged. Once step 3 succeeds, step 4 runs even if the request is canceled,
+and the Manager's `Close` waits for a restore in progress, so shutdown cannot
+close the store between applying and recording a restore.
 
 The reservation must also be honored by `ClaimRunnable`. It is a
 `workspace_reservations` row keyed by workspace ID, which the claim query

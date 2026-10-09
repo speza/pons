@@ -55,6 +55,30 @@ func TestExpiredCheckpointsKeepsCurrentRecentDailyAndBase(t *testing.T) {
 	}
 }
 
+func TestExpiredCheckpointsKeepsSourcesOfKeptRestores(t *testing.T) {
+	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	old := now.AddDate(0, 0, -30)
+	history := []environment.WorkspaceCheckpoint{
+		{Seq: 1, Kind: environment.CheckpointBase, CreatedAt: old},
+		{Seq: 2, Kind: environment.CheckpointRun, CreatedAt: old},
+		{Seq: 3, Kind: environment.CheckpointRun, CreatedAt: old},
+		// Seq 4 restores 2 and is itself restored by the kept seq 5.
+		{Seq: 4, Kind: environment.CheckpointRestore, RestoredFrom: 2, CreatedAt: old},
+		{Seq: 5, Kind: environment.CheckpointRestore, RestoredFrom: 4, CreatedAt: now},
+	}
+	for seq := int64(6); seq < 6+environment.RetainRecentCheckpoints-1; seq++ {
+		history = append(history, environment.WorkspaceCheckpoint{Seq: seq, Kind: environment.CheckpointRun, CreatedAt: now})
+	}
+
+	var expired []int64
+	for _, checkpoint := range environment.ExpiredCheckpoints(history, now) {
+		expired = append(expired, checkpoint.Seq)
+	}
+	if !slices.Equal(expired, []int64{3}) {
+		t.Fatalf("expired = %v, want [3]", expired)
+	}
+}
+
 func TestRecordWorkspaceCheckpointPrunesRowsAndUnreferencedArchives(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

@@ -59,7 +59,8 @@ type WorkspaceRestorer interface {
 // ExpiredCheckpoints returns the entries of an ascending history that fixed
 // retention no longer keeps: everything except the current checkpoint, the
 // RetainRecentCheckpoints newest, the newest of each UTC day for the last
-// RetainDailyCheckpoints days counting today, and the base.
+// RetainDailyCheckpoints days counting today, and the base. The source of a
+// kept restore entry is kept too, so its RestoredFrom always resolves.
 func ExpiredCheckpoints(history []WorkspaceCheckpoint, now time.Time) []WorkspaceCheckpoint {
 	keep := make(map[int64]bool, len(history))
 	for i := max(0, len(history)-RetainRecentCheckpoints); i < len(history); i++ {
@@ -82,6 +83,13 @@ func ExpiredCheckpoints(history []WorkspaceCheckpoint, now time.Time) []Workspac
 	}
 	for _, checkpoint := range newestOfDay {
 		keep[checkpoint.Seq] = true
+	}
+	// A source precedes its restore, so walking newest first also keeps the
+	// sources of restores kept only as sources.
+	for _, checkpoint := range slices.Backward(history) {
+		if keep[checkpoint.Seq] && checkpoint.RestoredFrom != 0 {
+			keep[checkpoint.RestoredFrom] = true
+		}
 	}
 
 	var expired []WorkspaceCheckpoint

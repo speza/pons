@@ -80,7 +80,8 @@ copies nothing.
 
 After each appended entry, retention keeps the current checkpoint, the 10
 highest `seq` values, the newest checkpoint of each UTC day for the last 14
-days, and the base. Other entries are deleted in one transaction, then
+days, the base, and the source of every kept restore, so `restored_from`
+always resolves. Other entries are deleted in one transaction, then
 archive files no entry references are removed. File pruning is best-effort:
 failures go to the server log, and an orphaned file is removed by a later
 prune. These defaults are fixed.
@@ -110,7 +111,8 @@ release the reservation and wake the scheduler
 so submissions queued during a restore run afterwards against the restored
 checkpoint. Reservations do not survive the process: startup clears them.
 A failure before the append leaves the history and the current checkpoint
-unchanged. Providers that do not implement `environment.WorkspaceRestorer`
+unchanged. Once the provider has applied a restore, the append runs even if
+the request is canceled, and shutdown waits for a restore in progress. Providers that do not implement `environment.WorkspaceRestorer`
 return `501 Not Implemented`; Seatbelt workspaces have no checkpoints yet.
 
 ## Checkpoint storage

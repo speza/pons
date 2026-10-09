@@ -189,6 +189,59 @@ func TestRestoreSucceedsAndReleasesDespiteATransientReleaseFailure(t *testing.T)
 	}
 }
 
+// blockingRestorer holds each restore until released.
+type blockingRestorer struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r blockingRestorer) RestoreWorkspace(context.Context, string, int64) (ponsruntime.WorkspaceCheckpoint, error) {
+	r.entered <- struct{}{}
+	<-r.release
+	return ponsruntime.WorkspaceCheckpoint{Seq: 2, Kind: "restore", RestoredFrom: 1, Current: true}, nil
+}
+
+func TestCloseWaitsForRestoreInProgress(t *testing.T) {
+	ctx := context.Background()
+	store, err := runtimesqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	restorer := blockingRestorer{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	manager, err := New(Config{
+		Agent: testAgent, AgentRevisions: testRevisions, Store: store, WorkspaceRestorer: restorer,
+		Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) { return RunResult{}, nil }),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	restored := make(chan error, 1)
+	go func() {
+		_, err := manager.RestoreWorkspace(ctx, "workspace", 1)
+		restored <- err
+	}()
+	receive(t, restorer.entered, "restore")
+	closed := make(chan error, 1)
+	go func() { closed <- manager.Close() }()
+	select {
+	case <-closed:
+		t.Fatal("Close returned during a restore")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(restorer.release)
+	if err := receive(t, restored, "restore result"); err != nil {
+		t.Fatal(err)
+	}
+	if err := receive(t, closed, "Close"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.RestoreWorkspace(ctx, "workspace", 1); !errors.Is(err, ponsruntime.ErrClosed) {
+		t.Fatalf("restore after Close = %v", err)
+	}
+}
+
 func TestRestoreWithoutProviderSupportIsUnsupported(t *testing.T) {
 	manager := testManager(t, RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
 		return RunResult{}, nil

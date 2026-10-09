@@ -65,14 +65,26 @@ func (m *Manager) WorkspaceCheckpoints(ctx context.Context, workspaceID string) 
 
 // RestoreWorkspace reserves the workspace so no run is claimed for it,
 // restores checkpoint seq, and releases the reservation. Submissions queued
-// meanwhile run afterwards against the restored workspace.
+// meanwhile run afterwards against the restored workspace. Close waits for a
+// restore in progress, so the store outlives it.
 func (m *Manager) RestoreWorkspace(ctx context.Context, workspaceID string, seq int64) (WorkspaceCheckpoint, error) {
-	if err := m.checkOpen(); err != nil {
-		return WorkspaceCheckpoint{}, err
-	}
 	if m.cfg.WorkspaceRestorer == nil {
+		if err := m.checkOpen(); err != nil {
+			return WorkspaceCheckpoint{}, err
+		}
 		return WorkspaceCheckpoint{}, ErrRestoreUnsupported
 	}
+	// Adding under mu, before Close sets closed, orders this Add before
+	// Close's Wait.
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return WorkspaceCheckpoint{}, ErrClosed
+	}
+	m.wg.Add(1)
+	m.mu.Unlock()
+	defer m.wg.Done()
+
 	if err := m.store.ReserveWorkspace(ctx, workspaceID); err != nil {
 		return WorkspaceCheckpoint{}, err
 	}

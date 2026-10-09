@@ -160,3 +160,27 @@ func TestHistoryRestoreOfCorruptArchiveLeavesHistoryUnchanged(t *testing.T) {
 		t.Fatalf("current = %+v, %v; provider restored %+v", current, err, restorer.restored)
 	}
 }
+
+// cancelingRestorer cancels the request once the restore is applied, as a
+// client disconnecting at that moment would.
+type cancelingRestorer struct{ cancel context.CancelFunc }
+
+func (r cancelingRestorer) RestoreWorkspace(context.Context, string, environment.WorkspaceCheckpoint) error {
+	r.cancel()
+	return nil
+}
+
+func TestHistoryRecordsAppliedRestoreAfterCancellation(t *testing.T) {
+	history, store, _, _ := historyFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	history.Restorer = cancelingRestorer{cancel: cancel}
+	restored, err := history.RestoreWorkspace(ctx, "workspace", 1)
+	if err != nil || restored.Seq != 4 {
+		t.Fatalf("restore = %+v, %v", restored, err)
+	}
+	current, err := store.CurrentWorkspaceCheckpoint(context.Background(), "workspace")
+	if err != nil || current.Kind != environment.CheckpointRestore || current.RestoredFrom != 1 {
+		t.Fatalf("current = %+v, %v", current, err)
+	}
+}
