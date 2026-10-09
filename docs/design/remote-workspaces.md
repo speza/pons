@@ -81,7 +81,10 @@ copies nothing.
 After each appended entry, retention keeps the current checkpoint, the 10
 highest `seq` values, the newest checkpoint of each UTC day for the last 14
 days, the base, and the source of every kept restore, so `restored_from`
-always resolves. Other entries are deleted in one transaction, then
+always resolves. The distinct archives kept are bounded to 1 GiB per
+workspace, or four times the current checkpoint's size if larger; over
+budget, the oldest entries other than the current checkpoint and the base
+go first. Other entries are deleted in one transaction, then
 archive files no entry references are removed. File pruning is best-effort:
 failures go to the server log, and an orphaned file is removed by a later
 prune. These defaults are fixed.

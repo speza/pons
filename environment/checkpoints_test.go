@@ -3,6 +3,7 @@ package environment_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -52,6 +53,50 @@ func TestExpiredCheckpointsKeepsCurrentRecentDailyAndBase(t *testing.T) {
 	}
 	if expired := environment.ExpiredCheckpoints(history[:1], now); len(expired) != 0 {
 		t.Fatalf("a lone base expired: %+v", expired)
+	}
+}
+
+func TestExpiredCheckpointsFitsTheByteBudget(t *testing.T) {
+	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	const mib = 1 << 20
+	history := []environment.WorkspaceCheckpoint{
+		{Seq: 1, Ref: "base", Kind: environment.CheckpointBase, SizeBytes: 300 * mib, CreatedAt: now},
+	}
+	// Ten distinct 200 MiB runs today; the newest is current.
+	for seq := int64(2); seq <= 11; seq++ {
+		history = append(history, environment.WorkspaceCheckpoint{
+			Seq: seq, Ref: fmt.Sprintf("run-%d", seq), Kind: environment.CheckpointRun, SizeBytes: 200 * mib, CreatedAt: now,
+		})
+	}
+	// A restore of seq 9 shares its archive.
+	history = append(history, environment.WorkspaceCheckpoint{
+		Seq: 12, Ref: "run-9", Kind: environment.CheckpointRestore, RestoredFrom: 9, SizeBytes: 200 * mib, CreatedAt: now,
+	})
+
+	var expired []int64
+	for _, checkpoint := range environment.ExpiredCheckpoints(history, now) {
+		expired = append(expired, checkpoint.Seq)
+	}
+	// The 1 GiB budget (over 4 x 200 MiB) holds the base and three distinct
+	// run archives: run-9 (current, through the restore), run-10 and run-11.
+	// Seq 9 survives as the restore's source at no extra cost.
+	if want := []int64{2, 3, 4, 5, 6, 7, 8}; !slices.Equal(expired, want) {
+		t.Fatalf("expired = %v, want %v", expired, want)
+	}
+
+	// The current checkpoint and the base are kept even over budget.
+	huge := []environment.WorkspaceCheckpoint{
+		{Seq: 1, Ref: "base", Kind: environment.CheckpointBase, SizeBytes: 2 << 30, CreatedAt: now},
+		{Seq: 2, Ref: "old", Kind: environment.CheckpointRun, SizeBytes: 3 << 30, CreatedAt: now},
+		{Seq: 3, Ref: "current", Kind: environment.CheckpointRun, SizeBytes: 3 << 30, CreatedAt: now},
+	}
+	// The budget scales to four copies of the 3 GiB current workspace.
+	if expired := environment.ExpiredCheckpoints(huge, now); len(expired) != 0 {
+		t.Fatalf("expired within the scaled budget = %+v", expired)
+	}
+	huge[0].SizeBytes = 7 << 30
+	if expired := environment.ExpiredCheckpoints(huge, now); len(expired) != 1 || expired[0].Seq != 2 {
+		t.Fatalf("expired over the scaled budget = %+v", expired)
 	}
 }
 

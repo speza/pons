@@ -126,6 +126,13 @@ defaults:
 | Base | the `base` row, always |
 | Restore sources | the `restored_from` row of every kept `restore` row |
 
+The archives those rows keep are also bounded to 1 GiB per workspace, or four
+times the current checkpoint's size if that is larger. Over budget, the oldest
+rows other than the current checkpoint and the base are dropped until the
+distinct archives fit; rows sharing an archive count it once. Every checkpoint
+is a full archive, so without this a workspace near its size limit could keep
+about 25 full copies.
+
 Rows outside that set are deleted in one transaction. Then archive files are
 pruned: any file under the workspace's checkpoint directory whose `ref` no
 longer appears in any row is removed. File pruning is best-effort and

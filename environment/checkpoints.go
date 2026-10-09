@@ -23,10 +23,14 @@ const (
 )
 
 // Fixed checkpoint retention. The current checkpoint and the base are always
-// kept as well.
+// kept as well. The archives a workspace keeps are also bounded to
+// RetainCheckpointBytes, or RetainCheckpointCopies times the current
+// checkpoint's size if that is larger.
 const (
 	RetainRecentCheckpoints = 10
 	RetainDailyCheckpoints  = 14
+	RetainCheckpointBytes   = 1 << 30
+	RetainCheckpointCopies  = 4
 )
 
 // WorkspaceCheckpoint is one entry in a workspace's checkpoint history. Seq
@@ -59,8 +63,11 @@ type WorkspaceRestorer interface {
 // ExpiredCheckpoints returns the entries of an ascending history that fixed
 // retention no longer keeps: everything except the current checkpoint, the
 // RetainRecentCheckpoints newest, the newest of each UTC day for the last
-// RetainDailyCheckpoints days counting today, and the base. The source of a
-// kept restore entry is kept too, so its RestoredFrom always resolves.
+// RetainDailyCheckpoints days counting today, and the base. If the archives
+// those entries keep exceed the byte budget, the oldest entries other than the
+// current checkpoint and the base go first until they fit. The source of a
+// kept restore entry is kept too, so its RestoredFrom always resolves; it
+// shares the restore's archive, so it costs no bytes.
 func ExpiredCheckpoints(history []WorkspaceCheckpoint, now time.Time) []WorkspaceCheckpoint {
 	keep := make(map[int64]bool, len(history))
 	for i := max(0, len(history)-RetainRecentCheckpoints); i < len(history); i++ {
@@ -84,6 +91,7 @@ func ExpiredCheckpoints(history []WorkspaceCheckpoint, now time.Time) []Workspac
 	for _, checkpoint := range newestOfDay {
 		keep[checkpoint.Seq] = true
 	}
+	applyByteBudget(history, keep)
 	// A source precedes its restore, so walking newest first also keeps the
 	// sources of restores kept only as sources.
 	for _, checkpoint := range slices.Backward(history) {
@@ -99,6 +107,40 @@ func ExpiredCheckpoints(history []WorkspaceCheckpoint, now time.Time) []Workspac
 		}
 	}
 	return expired
+}
+
+// applyByteBudget drops the oldest kept entries, never the current checkpoint
+// or the base, until the distinct archives still kept fit the budget.
+// Entries sharing an archive count it once.
+func applyByteBudget(history []WorkspaceCheckpoint, keep map[int64]bool) {
+	if len(history) == 0 {
+		return
+	}
+	current := history[len(history)-1]
+	budget := max(int64(RetainCheckpointBytes), RetainCheckpointCopies*current.SizeBytes)
+	users := make(map[string]int)
+	var total int64
+	for _, checkpoint := range history {
+		if !keep[checkpoint.Seq] {
+			continue
+		}
+		if users[checkpoint.Ref] == 0 {
+			total += checkpoint.SizeBytes
+		}
+		users[checkpoint.Ref]++
+	}
+	for _, checkpoint := range history {
+		if total <= budget {
+			return
+		}
+		if !keep[checkpoint.Seq] || checkpoint.Seq == current.Seq || checkpoint.Kind == CheckpointBase {
+			continue
+		}
+		keep[checkpoint.Seq] = false
+		if users[checkpoint.Ref]--; users[checkpoint.Ref] == 0 {
+			total -= checkpoint.SizeBytes
+		}
+	}
 }
 
 // RecordWorkspaceCheckpoint appends a checkpoint whose archive is already

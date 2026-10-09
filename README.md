@@ -384,7 +384,8 @@ Run `go run ./cmd/pons serve --debug` after configuring the server.
 Every completed E2B run that changes the workspace adds a checkpoint to its
 history. pons
 keeps the current checkpoint, the 10 newest, the newest of each UTC day for
-14 days, and the base. List them and restore one with the running server:
+14 days, and the base, within 1 GiB per workspace (or four copies of the
+current workspace if larger). List them and restore one with the running server:
 
 ```sh
 go run ./cmd/pons workspace checkpoints
