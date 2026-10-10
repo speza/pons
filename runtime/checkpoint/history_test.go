@@ -3,7 +3,6 @@ package checkpoint
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -109,55 +108,6 @@ func TestHistoryListsNewestFirstAndRestoresByAppending(t *testing.T) {
 
 	if _, err := history.RestoreWorkspace(ctx, "workspace", 99); !errors.Is(err, ponsruntime.ErrCheckpointNotFound) {
 		t.Fatalf("unknown seq = %v", err)
-	}
-	history.Restorer = nil
-	if _, err := history.RestoreWorkspace(ctx, "workspace", 1); !errors.Is(err, ponsruntime.ErrRestoreUnsupported) {
-		t.Fatalf("restore without a provider restorer = %v", err)
-	}
-}
-
-func TestHistoryRestoreRefusesRecoveryEnvironment(t *testing.T) {
-	ctx := context.Background()
-	history, store, restorer, _ := historyFixture(t)
-	now := history.Now()
-	if err := store.SaveEnvironmentState(ctx, environment.State{
-		WorkspaceID: "workspace", Provider: "e2b", EnvironmentID: "sandbox", Template: "pons-hands",
-		Network: environment.NetworkDisabled, Status: environment.StateRecovery,
-		ExpiresAt: now.Add(time.Hour), UpdatedAt: now,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := history.RestoreWorkspace(ctx, "workspace", 1); !errors.Is(err, ponsruntime.ErrWorkspaceBusy) ||
-		!strings.Contains(err.Error(), "recovery") {
-		t.Fatalf("restore with a recovery environment = %v", err)
-	}
-	if len(restorer.restored) != 0 {
-		t.Fatal("provider restored despite a recovery environment")
-	}
-
-	// Once the recovery window passes, restore proceeds.
-	history.Now = func() time.Time { return now.Add(2 * time.Hour) }
-	if _, err := history.RestoreWorkspace(ctx, "workspace", 1); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestHistoryRestoreOfCorruptArchiveLeavesHistoryUnchanged(t *testing.T) {
-	ctx := context.Background()
-	history, store, restorer, recorded := historyFixture(t)
-	path, _, err := history.Archives.(*Store).workspaceCheckpointPath("workspace", recorded[1].Ref)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("zz"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := history.RestoreWorkspace(ctx, "workspace", 2); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
-		t.Fatalf("restore of a corrupt archive = %v", err)
-	}
-	current, err := store.CurrentWorkspaceCheckpoint(ctx, "workspace")
-	if err != nil || current != recorded[2] || len(restorer.restored) != 0 {
-		t.Fatalf("current = %+v, %v; provider restored %+v", current, err, restorer.restored)
 	}
 }
 

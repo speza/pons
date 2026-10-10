@@ -100,11 +100,13 @@ stores, or the server address.
 ```text
 reserve the workspace ID (workspace_reservations)
   -> 409 if a run of the workspace is claimed or another restore holds it
-validate the checkpoint
-  -> 404 if seq is unknown; error if its archive fails digest verification
-  -> 409 if the workspace has an unexpired active or recovery environment
-provider applies the restore
+find the checkpoint
+  -> 404 if seq is unknown
+provider validates and applies the restore, under its workspace lock
   -> E2B refuses a checkpoint over its workspace size limit
+  -> 409 if a session is live or the workspace has an unexpired active or
+     recovery environment
+  -> error if the archive fails digest verification
   -> E2B deletes the retained idle sandbox and its state
 append a restore entry
 release the reservation and wake the scheduler
@@ -115,8 +117,9 @@ so submissions queued during a restore run afterwards against the restored
 checkpoint. Reservations do not survive the process: startup clears them.
 A failure before the append leaves the history and the current checkpoint
 unchanged. Once the provider has applied a restore, the append runs even if
-the request is canceled, and shutdown waits for a restore in progress. Providers that do not implement `environment.WorkspaceRestorer`
-return `501 Not Implemented`; Seatbelt workspaces have no checkpoints yet.
+the request is canceled. Shutdown cancels a restore in progress and waits for
+it. Providers that do not implement `environment.WorkspaceRestorer` return
+`501 Not Implemented`; Seatbelt workspaces have no checkpoints yet.
 
 ## Checkpoint storage
 

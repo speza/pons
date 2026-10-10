@@ -100,6 +100,27 @@ func TestExpiredCheckpointsFitsTheByteBudget(t *testing.T) {
 	}
 }
 
+func TestByteBudgetDropsOnlyEntriesThatFreeBytes(t *testing.T) {
+	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	const mib = 1 << 20
+	history := []environment.WorkspaceCheckpoint{
+		{Seq: 1, Ref: "base", Kind: environment.CheckpointBase, SizeBytes: 100 * mib, CreatedAt: now},
+		{Seq: 2, Ref: "x", Kind: environment.CheckpointRun, SizeBytes: 300 * mib, CreatedAt: now},
+		{Seq: 3, Ref: "y", Kind: environment.CheckpointRun, SizeBytes: 500 * mib, CreatedAt: now},
+		// Reverts to seq 2's content, so x was used more recently than y.
+		{Seq: 4, Ref: "x", Kind: environment.CheckpointRun, SizeBytes: 300 * mib, CreatedAt: now},
+		{Seq: 5, Ref: "z", Kind: environment.CheckpointRun, SizeBytes: 200 * mib, CreatedAt: now},
+	}
+	var expired []int64
+	for _, checkpoint := range environment.ExpiredCheckpoints(history, now) {
+		expired = append(expired, checkpoint.Seq)
+	}
+	// 1100 MiB is over 1 GiB; dropping y alone fits, and seq 2 frees nothing.
+	if !slices.Equal(expired, []int64{3}) {
+		t.Fatalf("expired = %v, want [3]", expired)
+	}
+}
+
 func TestExpiredCheckpointsKeepsSourcesOfKeptRestores(t *testing.T) {
 	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 	old := now.AddDate(0, 0, -30)
@@ -195,6 +216,9 @@ func TestRecordWorkspaceCheckpointPrunesRowsAndUnreferencedArchives(t *testing.T
 			_ = reader.Close()
 		}
 		t.Fatalf("unreferenced archive read = %v", err)
+	}
+	if state, err := store.WorkspaceState(ctx, "workspace"); err != nil || !state.UpdatedAt.Equal(current.CreatedAt) {
+		t.Fatalf("workspace updated at %v, want the latest checkpoint's %v (%v)", state.UpdatedAt, current.CreatedAt, err)
 	}
 }
 

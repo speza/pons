@@ -259,6 +259,22 @@ func TestArchiveWorkspaceUsesSourceOnlyForInitialSeed(t *testing.T) {
 	if firstCheckpoint.Kind != environment.CheckpointBase || firstCheckpoint.Seq != 1 || firstCheckpoint.SizeBytes == 0 {
 		t.Fatalf("seed checkpoint = %+v", firstCheckpoint)
 	}
+
+	// A seed interrupted after saving the workspace but before recording its
+	// base recovers the base from the stored archive, not the removed source.
+	store.checkpointMu.Lock()
+	store.history = nil
+	store.checkpointMu.Unlock()
+	_, recovered, err := loadOrCreateWorkspace(
+		context.Background(), store, store, "workspace", source, environment.WorkspacePlan{}, 1<<20, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Kind != environment.CheckpointBase || recovered.Ref != first.BaseRevision ||
+		recovered.SizeBytes != firstCheckpoint.SizeBytes {
+		t.Fatalf("recovered base = %+v, want %+v", recovered, firstCheckpoint)
+	}
 }
 
 func TestProvisionGitWorkspaceUsesSelectedRevisionAndPersistsCheckpoint(t *testing.T) {
@@ -832,8 +848,13 @@ func (s *recordingStateStore) CurrentWorkspaceCheckpoint(context.Context, string
 func (s *recordingStateStore) DeleteWorkspaceCheckpoints(_ context.Context, _ string, seqs []int64) error {
 	s.checkpointMu.Lock()
 	defer s.checkpointMu.Unlock()
+	if len(s.history) == 0 {
+		return nil
+	}
+	// Like SQLite, never remove the current checkpoint.
+	current := s.history[len(s.history)-1].Seq
 	s.history = slices.DeleteFunc(s.history, func(checkpoint environment.WorkspaceCheckpoint) bool {
-		return slices.Contains(seqs, checkpoint.Seq)
+		return checkpoint.Seq != current && slices.Contains(seqs, checkpoint.Seq)
 	})
 	return nil
 }

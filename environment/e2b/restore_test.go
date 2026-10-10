@@ -1,8 +1,12 @@
 package e2b
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -107,5 +111,86 @@ func TestRestoredCheckpointSeedsNextSandbox(t *testing.T) {
 	}
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// restoreFixture opens durable stores and an E2B provider whose API refuses
+// every call, then records a base checkpoint for "workspace".
+func restoreFixture(t *testing.T) (*Provider, *runtimesqlite.Store, string, environment.WorkspaceCheckpoint) {
+	t.Helper()
+	ctx := context.Background()
+	stateDir := t.TempDir()
+	store, err := runtimesqlite.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected E2B request %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	provider := &Provider{APIKey: "key", APIURL: server.URL, EnvdURL: server.URL, HTTPClient: server.Client(), CleanupInterval: time.Hour}
+	archiveDir := filepath.Join(stateDir, "workspaces")
+	checkpoints := checkpointstore.New(archiveDir)
+	if err := provider.SetStores(store, checkpoints); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = provider.Close() })
+	_, base, err := loadOrCreateWorkspace(ctx, store, checkpoints, "workspace", "",
+		environment.WorkspacePlan{Strategy: environment.WorkspaceStrategyEmpty}, 1<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return provider, store, archiveDir, base
+}
+
+func TestRestoreRefusesRecoverySandboxBeforeReadingArchive(t *testing.T) {
+	ctx := context.Background()
+	provider, store, _, base := restoreFixture(t)
+	now := time.Now().UTC()
+	if err := store.SaveEnvironmentState(ctx, environment.State{
+		WorkspaceID: "workspace", Provider: "e2b", EnvironmentID: "sandbox", Template: defaultE2BTemplate,
+		Network: environment.NetworkDisabled, Status: environment.StateRecovery,
+		ExpiresAt: now.Add(time.Hour), UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	missing := base
+	missing.Ref = "sha256:" + strings.Repeat("0", 64)
+	if err := provider.RestoreWorkspace(ctx, "workspace", missing); !errors.Is(err, environment.ErrWorkspaceInUse) ||
+		!strings.Contains(err.Error(), "recovery") {
+		t.Fatalf("restore with a recovery sandbox = %v", err)
+	}
+}
+
+func TestRestoreOfCorruptArchiveKeepsSandboxAndHistory(t *testing.T) {
+	ctx := context.Background()
+	provider, store, archiveDir, base := restoreFixture(t)
+	now := time.Now().UTC()
+	idle := environment.State{
+		WorkspaceID: "workspace", Provider: "e2b", EnvironmentID: "sandbox", Template: defaultE2BTemplate,
+		Network: environment.NetworkDisabled, Status: environment.StateIdle,
+		IdleUntil: now.Add(time.Hour), ExpiresAt: now.Add(time.Hour), UpdatedAt: now,
+	}
+	if err := store.SaveEnvironmentState(ctx, idle); err != nil {
+		t.Fatal(err)
+	}
+	workspaceDir := sha256.Sum256([]byte("workspace"))
+	path := filepath.Join(archiveDir, hex.EncodeToString(workspaceDir[:]), strings.TrimPrefix(base.Ref, "sha256:")+".tar")
+	// An empty tar is all zero bytes, so corrupt it with other bytes.
+	if err := os.WriteFile(path, bytes.Repeat([]byte{0xff}, int(base.SizeBytes)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	history := &checkpointstore.History{State: store, Archives: provider.checkpointStore, Restorer: provider}
+	if _, err := history.RestoreWorkspace(ctx, "workspace", base.Seq); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+		t.Fatalf("restore of a corrupt archive = %v", err)
+	}
+	if current, err := store.CurrentWorkspaceCheckpoint(ctx, "workspace"); err != nil || current != base {
+		t.Fatalf("current = %+v, %v", current, err)
+	}
+	if state, err := store.EnvironmentState(ctx, "workspace"); err != nil || state.EnvironmentID != "sandbox" {
+		t.Fatalf("idle sandbox = %+v, %v; want it kept", state, err)
 	}
 }

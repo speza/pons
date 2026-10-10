@@ -1,6 +1,7 @@
 package environment
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -109,37 +110,52 @@ func ExpiredCheckpoints(history []WorkspaceCheckpoint, now time.Time) []Workspac
 	return expired
 }
 
-// applyByteBudget drops the oldest kept entries, never the current checkpoint
-// or the base, until the distinct archives still kept fit the budget.
-// Entries sharing an archive count it once.
+// applyByteBudget drops kept archives, least recently used first, until the
+// distinct archives still kept fit the budget. An archive used by the current
+// checkpoint or the base is never dropped, and dropping one drops every kept
+// entry that uses it, so no entry is dropped without freeing its bytes.
 func applyByteBudget(history []WorkspaceCheckpoint, keep map[int64]bool) {
 	if len(history) == 0 {
 		return
 	}
 	current := history[len(history)-1]
 	budget := max(int64(RetainCheckpointBytes), RetainCheckpointCopies*current.SizeBytes)
-	users := make(map[string]int)
+	type archive struct {
+		size      int64
+		lastUsed  int64
+		protected bool
+	}
+	archives := make(map[string]*archive)
 	var total int64
 	for _, checkpoint := range history {
 		if !keep[checkpoint.Seq] {
 			continue
 		}
-		if users[checkpoint.Ref] == 0 {
-			total += checkpoint.SizeBytes
+		a := archives[checkpoint.Ref]
+		if a == nil {
+			a = &archive{size: checkpoint.SizeBytes}
+			archives[checkpoint.Ref] = a
+			total += a.size
 		}
-		users[checkpoint.Ref]++
+		a.lastUsed = checkpoint.Seq
+		a.protected = a.protected || checkpoint.Seq == current.Seq || checkpoint.Kind == CheckpointBase
 	}
-	for _, checkpoint := range history {
+	refs := slices.SortedFunc(maps.Keys(archives), func(a, b string) int {
+		return cmp.Compare(archives[a].lastUsed, archives[b].lastUsed)
+	})
+	for _, ref := range refs {
 		if total <= budget {
 			return
 		}
-		if !keep[checkpoint.Seq] || checkpoint.Seq == current.Seq || checkpoint.Kind == CheckpointBase {
+		if archives[ref].protected {
 			continue
 		}
-		keep[checkpoint.Seq] = false
-		if users[checkpoint.Ref]--; users[checkpoint.Ref] == 0 {
-			total -= checkpoint.SizeBytes
+		for _, checkpoint := range history {
+			if checkpoint.Ref == ref {
+				keep[checkpoint.Seq] = false
+			}
 		}
+		total -= archives[ref].size
 	}
 }
 
@@ -171,10 +187,26 @@ func RecordWorkspaceCheckpoint(
 	if err != nil {
 		return WorkspaceCheckpoint{}, err
 	}
+	// UpdatedAt tracks the latest checkpoint; it is informational only.
+	if err := touchWorkspace(ctx, store, recorded); err != nil && onError != nil {
+		onError(fmt.Errorf("environment: update workspace time: %w", err))
+	}
 	if err := pruneWorkspaceCheckpoints(ctx, store, archives, recorded.WorkspaceID, recorded.CreatedAt); err != nil && onError != nil {
 		onError(fmt.Errorf("environment: prune workspace checkpoints: %w", err))
 	}
 	return recorded, nil
+}
+
+func touchWorkspace(ctx context.Context, store StateStore, checkpoint WorkspaceCheckpoint) error {
+	state, err := store.WorkspaceState(ctx, checkpoint.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	if !checkpoint.CreatedAt.After(state.UpdatedAt) {
+		return nil
+	}
+	state.UpdatedAt = checkpoint.CreatedAt
+	return store.SaveWorkspaceState(ctx, state)
 }
 
 func pruneWorkspaceCheckpoints(

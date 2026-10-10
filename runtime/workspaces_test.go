@@ -242,6 +242,76 @@ func TestCloseWaitsForRestoreInProgress(t *testing.T) {
 	}
 }
 
+// stuckRestorer waits until its request is canceled, as a stalled provider
+// call would.
+type stuckRestorer struct{ entered chan struct{} }
+
+func (r stuckRestorer) RestoreWorkspace(ctx context.Context, _ string, _ int64) (ponsruntime.WorkspaceCheckpoint, error) {
+	r.entered <- struct{}{}
+	<-ctx.Done()
+	return ponsruntime.WorkspaceCheckpoint{}, ctx.Err()
+}
+
+func TestCloseCancelsStalledRestore(t *testing.T) {
+	store, err := runtimesqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	restorer := stuckRestorer{entered: make(chan struct{}, 1)}
+	manager, err := New(Config{
+		Agent: testAgent, AgentRevisions: testRevisions, Store: store, WorkspaceRestorer: restorer,
+		Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) { return RunResult{}, nil }),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := make(chan error, 1)
+	go func() {
+		// The request itself is never canceled.
+		_, err := manager.RestoreWorkspace(context.Background(), "workspace", 1)
+		restored <- err
+	}()
+	receive(t, restorer.entered, "restore")
+	closed := make(chan error, 1)
+	go func() { closed <- manager.Close() }()
+	if err := receive(t, closed, "Close"); err != nil {
+		t.Fatal(err)
+	}
+	if err := receive(t, restored, "restore result"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("restore = %v, want canceled", err)
+	}
+}
+
+func TestWorkspaceRequestsRejectInvalidIDs(t *testing.T) {
+	restorer := stuckRestorer{entered: make(chan struct{}, 1)}
+	store, err := runtimesqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager, err := New(Config{
+		Agent: testAgent, AgentRevisions: testRevisions, Store: store, WorkspaceRestorer: restorer,
+		Runner: RunnerFunc(func(context.Context, RunRequest) (RunResult, error) { return RunResult{}, nil }),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	for _, id := range []string{"", " ", "a/b", `a\b`, "a\x00b"} {
+		if _, err := manager.RestoreWorkspace(context.Background(), id, 1); !errors.Is(err, ponsruntime.ErrWorkspaceNotFound) {
+			t.Fatalf("restore of %q = %v", id, err)
+		}
+		if _, err := manager.WorkspaceCheckpoints(context.Background(), id); !errors.Is(err, ponsruntime.ErrWorkspaceNotFound) {
+			t.Fatalf("checkpoints of %q = %v", id, err)
+		}
+	}
+	// Nothing was reserved.
+	if err := store.ReserveWorkspace(context.Background(), "a/b"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRestoreWithoutProviderSupportIsUnsupported(t *testing.T) {
 	manager := testManager(t, RunnerFunc(func(context.Context, RunRequest) (RunResult, error) {
 		return RunResult{}, nil

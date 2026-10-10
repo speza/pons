@@ -12,7 +12,8 @@ import (
 )
 
 // History lists and restores workspace checkpoints recorded in the state
-// store. Restorer is the provider's, and nil when it cannot restore.
+// store. Restorer is the provider's; configure History as the Manager's
+// WorkspaceRestorer only when the provider has one.
 type History struct {
 	State    environment.StateStore
 	Archives environment.CheckpointStore
@@ -39,14 +40,12 @@ func (h *History) WorkspaceCheckpoints(ctx context.Context, workspaceID string) 
 	return checkpoints, nil
 }
 
-// RestoreWorkspace validates checkpoint seq, has the provider apply it, and
-// appends a restore entry pointing at its archive. The caller holds the
-// workspace's reservation. A failure before the append leaves the history
-// and the current checkpoint unchanged.
+// RestoreWorkspace finds checkpoint seq, has the provider validate and apply
+// it, and appends a restore entry pointing at its archive. The provider owns
+// the busy, size, and archive checks, since it holds the workspace's
+// placement. The caller holds the workspace's reservation. A failure before
+// the append leaves the history and the current checkpoint unchanged.
 func (h *History) RestoreWorkspace(ctx context.Context, workspaceID string, seq int64) (ponsruntime.WorkspaceCheckpoint, error) {
-	if h.Restorer == nil {
-		return ponsruntime.WorkspaceCheckpoint{}, ponsruntime.ErrRestoreUnsupported
-	}
 	history, err := h.history(ctx, workspaceID)
 	if err != nil {
 		return ponsruntime.WorkspaceCheckpoint{}, err
@@ -58,23 +57,6 @@ func (h *History) RestoreWorkspace(ctx context.Context, workspaceID string, seq 
 		return ponsruntime.WorkspaceCheckpoint{}, fmt.Errorf("%w: %s has no checkpoint %d", ponsruntime.ErrCheckpointNotFound, workspaceID, seq)
 	}
 	target := history[index]
-
-	archive, err := h.Archives.WorkspaceCheckpoint(ctx, workspaceID, target.Ref, target.SizeBytes)
-	if err != nil {
-		return ponsruntime.WorkspaceCheckpoint{}, fmt.Errorf("runtime: checkpoint %d is unavailable: %w", seq, err)
-	}
-	if err := archive.Close(); err != nil {
-		return ponsruntime.WorkspaceCheckpoint{}, err
-	}
-	// A recovery sandbox holds edits that were never checkpointed.
-	placement, err := h.State.EnvironmentState(ctx, workspaceID)
-	if err != nil && !errors.Is(err, environment.ErrStateNotFound) {
-		return ponsruntime.WorkspaceCheckpoint{}, err
-	}
-	if err == nil && placement.Status != environment.StateIdle && h.now().Before(placement.ExpiresAt) {
-		return ponsruntime.WorkspaceCheckpoint{}, fmt.Errorf("%w: workspace %q has a %s environment until %s",
-			ponsruntime.ErrWorkspaceBusy, workspaceID, placement.Status, placement.ExpiresAt.UTC().Format(time.RFC3339))
-	}
 
 	if err := h.Restorer.RestoreWorkspace(ctx, workspaceID, target); err != nil {
 		if errors.Is(err, environment.ErrWorkspaceInUse) {

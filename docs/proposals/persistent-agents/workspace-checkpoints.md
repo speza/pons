@@ -106,7 +106,10 @@ DeleteWorkspaceCheckpoints(ctx, workspaceID string, seqs []int64) error
 
 `AppendWorkspaceCheckpoint` requires the workspace row, so a seed saves the
 workspace and then appends its base. A workspace row with no checkpoints, left
-by an interrupted seed, is seeded again on the next placement.
+by an interrupted seed, gets its base from the stored seed archive that
+`base_revision` names, without reading the source again; only if that archive
+is gone is it seeded again. A `git/v1` workspace is checked out again.
+Each append also sets the workspace's `updated_at` to the checkpoint's time.
 `CheckpointStore.PutWorkspaceCheckpoint` also returns the archive size, which
 becomes `size_bytes`.
 
@@ -169,9 +172,11 @@ it.
    claims no run for it. The request fails with `409 Conflict` if a run in
    that workspace is active or claimed. Queued submissions stay queued and
    run after the restore.
-2. **Validate.** The checkpoint exists, its archive verifies by digest and
-   size, and the workspace has no unexpired environment in `recovery` or
-   `active`. A recovery sandbox holds edits that were never checkpointed, so
+2. **Validate.** The checkpoint exists. The provider then checks, cheapest
+   first and under its workspace lock: the checkpoint fits its workspace size
+   limit, no session is live, the workspace has no unexpired environment in
+   `recovery` or `active`, and the archive verifies by digest and size. The
+   provider owns these checks because it owns placement. A recovery sandbox holds edits that were never checkpointed, so
    restore refuses with `409` until it expires or the owner resolves it. An
    unexpired `active` record without a claimed run is left by a crash and
    blocks new runs the same way, so it also refuses.
@@ -180,9 +185,11 @@ it.
 5. **Release** the reservation.
 
 A failure at any step before 4 leaves the history and the current checkpoint
-unchanged. Once step 3 succeeds, step 4 runs even if the request is canceled,
-and the Manager's `Close` waits for a restore in progress, so shutdown cannot
-close the store between applying and recording a restore.
+unchanged. Once step 3 succeeds, step 4 runs even if the request is canceled.
+The Manager's `Close` cancels a restore in progress and waits for it, so
+shutdown neither hangs on a stalled provider call nor closes the store
+between applying and recording a restore. Workspace IDs that are empty or
+contain `/`, `\`, or NUL are rejected as unknown before anything is reserved.
 
 The reservation must also be honored by `ClaimRunnable`. It is a
 `workspace_reservations` row keyed by workspace ID, which the claim query

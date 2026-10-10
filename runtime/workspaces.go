@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -53,6 +54,9 @@ func (m *Manager) WorkspaceCheckpoints(ctx context.Context, workspaceID string) 
 	if err := m.checkOpen(); err != nil {
 		return WorkspaceCheckpoints{}, err
 	}
+	if !validWorkspaceID(workspaceID) {
+		return WorkspaceCheckpoints{}, ErrWorkspaceNotFound
+	}
 	if m.cfg.WorkspaceHistory == nil {
 		return WorkspaceCheckpoints{}, ErrWorkspaceNotFound
 	}
@@ -65,9 +69,13 @@ func (m *Manager) WorkspaceCheckpoints(ctx context.Context, workspaceID string) 
 
 // RestoreWorkspace reserves the workspace so no run is claimed for it,
 // restores checkpoint seq, and releases the reservation. Submissions queued
-// meanwhile run afterwards against the restored workspace. Close waits for a
-// restore in progress, so the store outlives it.
+// meanwhile run afterwards against the restored workspace. Close cancels a
+// restore in progress and waits for it, so the store outlives it; a restore
+// the provider has already applied is still recorded.
 func (m *Manager) RestoreWorkspace(ctx context.Context, workspaceID string, seq int64) (WorkspaceCheckpoint, error) {
+	if !validWorkspaceID(workspaceID) {
+		return WorkspaceCheckpoint{}, ErrWorkspaceNotFound
+	}
 	if m.cfg.WorkspaceRestorer == nil {
 		if err := m.checkOpen(); err != nil {
 			return WorkspaceCheckpoint{}, err
@@ -84,6 +92,9 @@ func (m *Manager) RestoreWorkspace(ctx context.Context, workspaceID string, seq 
 	m.wg.Add(1)
 	m.mu.Unlock()
 	defer m.wg.Done()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer context.AfterFunc(m.ctx, cancel)()
 
 	if err := m.store.ReserveWorkspace(ctx, workspaceID); err != nil {
 		return WorkspaceCheckpoint{}, err
@@ -102,4 +113,9 @@ func (m *Manager) RestoreWorkspace(ctx context.Context, workspaceID string, seq 
 		m.notify()
 	}()
 	return m.cfg.WorkspaceRestorer.RestoreWorkspace(ctx, workspaceID, seq)
+}
+
+// validWorkspaceID rejects IDs no workspace can have, before any reservation.
+func validWorkspaceID(id string) bool {
+	return strings.TrimSpace(id) != "" && !strings.ContainsAny(id, "/\\\x00")
 }

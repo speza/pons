@@ -51,7 +51,17 @@ func loadOrCreateWorkspace(
 		case strategy == environment.WorkspaceStrategyGit:
 			return state, environment.WorkspaceCheckpoint{}, nil
 		}
-		// An interrupted seed saved the workspace but not its base; seed again.
+		// An interrupted seed saved the workspace, whose BaseRevision names the
+		// stored seed archive, but not its base entry. Record the base from
+		// that archive rather than reading the source again; seed again only
+		// if the archive is gone too.
+		base, err := recoverBase(ctx, store, checkpoints, state, limit, onError)
+		if err == nil {
+			return state, base, nil
+		}
+		if !errors.Is(err, environment.ErrStateNotFound) {
+			return environment.WorkspaceState{}, environment.WorkspaceCheckpoint{}, err
+		}
 	} else if !errors.Is(err, environment.ErrStateNotFound) {
 		return environment.WorkspaceState{}, environment.WorkspaceCheckpoint{}, err
 	}
@@ -146,6 +156,33 @@ func seedWorkspace(
 		return environment.WorkspaceState{}, environment.WorkspaceCheckpoint{}, err
 	}
 	return state, base, nil
+}
+
+// recoverBase records the base entry of a workspace whose seed archive is
+// stored but was never recorded.
+func recoverBase(
+	ctx context.Context,
+	store environment.StateStore,
+	checkpoints environment.CheckpointStore,
+	state environment.WorkspaceState,
+	limit int64,
+	onError func(error),
+) (environment.WorkspaceCheckpoint, error) {
+	archive, err := checkpoints.WorkspaceCheckpoint(ctx, state.ID, state.BaseRevision, limit)
+	if err != nil {
+		return environment.WorkspaceCheckpoint{}, err
+	}
+	size, copyErr := io.Copy(io.Discard, archive)
+	if err := errors.Join(copyErr, archive.Close()); err != nil {
+		return environment.WorkspaceCheckpoint{}, err
+	}
+	return environment.RecordWorkspaceCheckpoint(ctx, store, checkpoints, environment.WorkspaceCheckpoint{
+		WorkspaceID: state.ID,
+		Ref:         state.BaseRevision,
+		Kind:        environment.CheckpointBase,
+		SizeBytes:   size,
+		CreatedAt:   time.Now().UTC(),
+	}, onError)
 }
 
 func placeWorkspace(

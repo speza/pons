@@ -103,7 +103,8 @@ func TestE2BWorkspaceCheckpointRecovery(t *testing.T) {
 	}
 	waitForEnvironmentDeletion(t, ctx, store, stateKey)
 	current, err := store.CurrentWorkspaceCheckpoint(ctx, stateKey)
-	if err != nil || current.Kind != environment.CheckpointRun || current.RunID != "second-run" {
+	// The second run changed nothing, so it added no checkpoint.
+	if err != nil || current.Kind != environment.CheckpointRun || current.RunID != "first-run" {
 		t.Fatalf("current checkpoint = %+v, %v", current, err)
 	}
 	third, err := provider.Start(ctx, environment.Spec{

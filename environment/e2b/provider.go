@@ -444,13 +444,14 @@ var _ environment.WorkspaceRestorer = (*Provider)(nil)
 
 // RestoreWorkspace drops the workspace's retained idle sandbox, if any, so its
 // next placement starts a new sandbox from the current checkpoint, which the
-// caller then records as the restored one. Nothing is uploaded here.
+// caller then records as the restored one. It refuses a busy workspace and a
+// checkpoint the next placement could not load, checking cheapest first and
+// verifying the archive last. Nothing is uploaded here.
 func (p *Provider) RestoreWorkspace(ctx context.Context, workspaceID string, checkpoint environment.WorkspaceCheckpoint) error {
 	cfg, err := p.config()
 	if err != nil {
 		return err
 	}
-	// The next placement would refuse to load it.
 	if checkpoint.SizeBytes > cfg.maxWorkspaceBytes {
 		return fmt.Errorf("environment: checkpoint %d is %d bytes, over the %d-byte workspace limit",
 			checkpoint.Seq, checkpoint.SizeBytes, cfg.maxWorkspaceBytes)
@@ -459,26 +460,36 @@ func (p *Provider) RestoreWorkspace(ctx context.Context, workspaceID string, che
 	workspaceLock.Lock()
 	defer workspaceLock.Unlock()
 	p.lifecycleMu.Lock()
-	store, activeRun := p.stateStore, p.active[workspaceID]
+	store, checkpoints, activeRun := p.stateStore, p.checkpointStore, p.active[workspaceID]
 	p.lifecycleMu.Unlock()
-	if store == nil {
+	if store == nil || checkpoints == nil {
 		return errors.New("environment: E2B durable workspace stores are required")
 	}
 	if activeRun != "" {
 		return fmt.Errorf("%w: workspace %q has active E2B run %q", environment.ErrWorkspaceInUse, workspaceID, activeRun)
 	}
 
+	// A recovery sandbox holds edits that were never checkpointed.
 	state, err := store.EnvironmentState(ctx, workspaceID)
-	if errors.Is(err, environment.ErrStateNotFound) {
-		return nil
-	}
-	if err != nil {
+	retained := err == nil
+	if err != nil && !errors.Is(err, environment.ErrStateNotFound) {
 		return err
 	}
-	if state.Status != environment.StateIdle && time.Now().Before(state.ExpiresAt) {
+	if retained && state.Status != environment.StateIdle && time.Now().Before(state.ExpiresAt) {
 		return fmt.Errorf("%w: sandbox %q is %s until %s", environment.ErrWorkspaceInUse,
 			state.EnvironmentID, state.Status, state.ExpiresAt.UTC().Format(time.RFC3339))
 	}
+	archive, err := checkpoints.WorkspaceCheckpoint(ctx, workspaceID, checkpoint.Ref, checkpoint.SizeBytes)
+	if err != nil {
+		return fmt.Errorf("environment: checkpoint %d is unavailable: %w", checkpoint.Seq, err)
+	}
+	if err := archive.Close(); err != nil {
+		return err
+	}
+	if !retained {
+		return nil
+	}
+
 	client := &e2bClient{apiKey: cfg.apiKey, apiURL: cfg.apiURL, envdURL: cfg.envdURL, http: cfg.http}
 	if err := client.killSandbox(ctx, state.EnvironmentID); err != nil {
 		return err
