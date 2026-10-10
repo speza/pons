@@ -1,17 +1,16 @@
 # Workspace checkpoint history spec
 
-**Status:** Part 1 implemented; part 2 not started
+**Status:** Implemented for E2B; Seatbelt checkpoints dropped (2026-10-10)
 **Date:** 2026-10-04
-**Related:** [plan](plan.md) phase 6 steps 4 and 5,
+**Related:** [plan](plan.md) phase 6 step 4,
 [ADR-0022](../../adr/adr-0022-persistent-agent-workspaces.md) sections 4
 and 6, [agent workspaces spec](agent-workspaces.md),
 [remote workspaces](../../design/remote-workspaces.md)
 
 This spec covers the second slice of phase 6: a workspace keeps a history of
 checkpoints, old ones are pruned by a retention policy, and the owner can
-restore an earlier one. It is delivered in two parts: history and restore
-for checkpointed (E2B) workspaces, then checkpoints for Seatbelt agent
-workspaces so restore works locally.
+restore an earlier one. It applies to checkpointed (E2B) workspaces only;
+see [Seatbelt](#seatbelt).
 
 ## Summary
 
@@ -46,8 +45,6 @@ without rewriting history. Agent-controlled hands can do none of this.
 - The owner can list checkpoints and restore one through the server.
 - Restore never rewrites history and never runs alongside a run in that
   workspace.
-- Part 2: a Seatbelt agent workspace is checkpointed after each clean run and
-  can be restored the same way.
 
 ## Non-goals
 
@@ -57,8 +54,7 @@ without rewriting history. Agent-controlled hands can do none of this.
   checkpoint to a host directory.
 - Size warnings before a workspace reaches its limit (ADR-0022 section 7).
 - Setup scripts, exclusions, off-host storage, incremental checkpoints.
-- Checkpoints for `per_conversation` Seatbelt workspaces. They are the
-  owner's own directories.
+- Checkpoints for any Seatbelt workspace (see [Seatbelt](#seatbelt)).
 
 ## Design
 
@@ -162,7 +158,7 @@ it.
 ```
 
 `ref` is not exposed; `seq` is the handle. An unknown workspace (no
-`workspaces` row, including every Seatbelt workspace until part 2) returns
+`workspaces` row, including every Seatbelt workspace) returns
 `404`.
 
 ### Restore
@@ -227,10 +223,6 @@ type WorkspaceRestorer interface {
   of the workspace is live or its environment is unexpired and not idle, and
   refuses a checkpoint larger than the current `MaxWorkspaceBytes`, which the
   next placement could not load.
-- **Seatbelt (part 2):** extract the archive into a new sibling directory,
-  then atomically swap it with the live workspace directory and remove the
-  old one. A failed extraction leaves the live directory untouched.
-
 A server whose provider does not implement `WorkspaceRestorer` returns
 `501 Not Implemented`.
 
@@ -244,35 +236,27 @@ pons workspace restore     [-server URL] [-workspace-id ID] SEQ
 `-workspace-id` defaults to the server's agent workspace. Both are thin
 clients of the HTTP API; they never open the state directory directly.
 
+### Seatbelt
+
+Seatbelt workspaces are not checkpointed. A Seatbelt agent workspace is a
+plain host directory, so it already persists across conversations and
+restarts; checkpoints would only add undo. As with agent memory, pons keeps
+no host-side history of it, and the owner's own backups (such as Time
+Machine) cover it. A Seatbelt server returns `501` from restore and `404`
+from listing.
+
+An earlier draft added Seatbelt checkpoints as a second delivery part; it was
+dropped on 2026-10-10 as not worth the per-run archive cost.
+
 ### Who can restore
 
 Only the owner, through the loopback HTTP API and the CLI. Hands never
 receive the checkpoint store, state store, or server address, and no tool
 exposes listing or restore.
 
-### Part 2: Seatbelt checkpoints
-
-Seatbelt becomes a `DurableProvider` for agent workspaces:
-
-- On first use of `agent-<id>`, it records a workspace row with strategy
-  `local/v1` and stores an archive of the current directory as the base.
-- After each run whose hands stopped cleanly, it archives the live directory
-  with the existing bounded archive writer and appends a `run` checkpoint.
-  The live directory is the authoritative copy; a failed checkpoint is
-  reported and leaves both the directory and the previous checkpoint
-  unchanged. It does not block the next run.
-- An unclean hands stop skips the checkpoint.
-- `per_conversation` Seatbelt workspaces are not checkpointed.
-
-The archive limits (size, entry count, symlinks, paths) are the same as
-E2B's. A workspace that exceeds them fails to checkpoint and says so in the
-run's error notice.
-
 ## Tests
 
 All deterministic, with no provider credentials or network.
-
-Part 1:
 
 - **History:** each completed fake-envd run appends a `run` row with its run
   ID and size; the first placement of an `empty` workspace appends a `base`
@@ -294,29 +278,18 @@ Part 1:
 - **HTTP and CLI:** list returns newest first with `current` set; restore of
   an unknown `seq` returns 404.
 
-Part 2:
-
-- A clean Seatbelt run appends a checkpoint; an unclean stop does not.
-- A failed Seatbelt checkpoint leaves the live directory and the previous
-  checkpoint unchanged.
-- Restore swaps the live directory atomically; a failed extraction leaves it
-  untouched.
-- `per_conversation` workspaces get no rows.
-
 ## Documentation
 
 - `README.md`: `pons workspace checkpoints|restore`.
 - `docs/design/remote-workspaces.md`: history, retention, restore; remove
   "base and latest only".
-- `docs/design/hands-environment.md` (part 2): Seatbelt checkpoints.
 - ADR-0022: update implementation status.
-- `plan.md`: mark phase 6 steps 4 and 5 done as each part lands.
+- `plan.md`: mark phase 6 step 4 done.
 
 ## Delivery
 
-1. **History, retention, restore (E2B), HTTP and CLI.** Seatbelt servers
-   return 501 from restore.
-2. **Seatbelt checkpoints and restore.** Removes the 501.
+One part: history, retention, restore (E2B), HTTP and CLI. Delivered in
+PR #24.
 
 ## Open questions
 

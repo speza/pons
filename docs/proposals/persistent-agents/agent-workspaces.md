@@ -49,7 +49,8 @@ in a new conversation, on a replaced E2B sandbox.
 
 - Checkpoint history, retention, and restore (next slice).
 - Setup scripts, setup generations, and checkpoint exclusions.
-- Seatbelt checkpoints and off-host (S3) checkpoint storage.
+- Off-host (S3) checkpoint storage. Seatbelt workspaces are not checkpointed
+  at all (ADR-0022 section 4).
 - The `shared(<id>)` policy; it waits for a second agent (plan phase 12).
 - `template` seeds.
 - Choosing a repository or other workspace per conversation under the `agent`
@@ -260,8 +261,11 @@ All deterministic, with no provider credentials or network:
 Tracked separately, in roughly this order:
 
 1. Checkpoint history and restore: a checkpoint table replacing the single
-   `checkpoint_ref`, retention, and `pons workspace checkpoints|restore`.
-2. Seatbelt checkpoints after clean runs, so restore works locally.
-3. Setup scripts, setup generations, and checkpoint exclusions.
-4. S3-compatible `CheckpointStore`.
-5. `template` seeds and `shared(<id>)`, when a second agent needs them.
+   `checkpoint_ref`, retention, and `pons workspace checkpoints|restore`
+   (done for E2B; see the [workspace checkpoint history spec](workspace-checkpoints.md)).
+2. Setup scripts, setup generations, and checkpoint exclusions.
+3. S3-compatible `CheckpointStore`.
+4. `template` seeds and `shared(<id>)`, when a second agent needs them.
+
+Seatbelt checkpoints were dropped: Seatbelt workspaces are plain host
+directories (ADR-0022 section 4).

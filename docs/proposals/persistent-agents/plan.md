@@ -292,7 +292,7 @@ and stops at the budget.
 
 **Use cases:** U9. **ADRs:** ADR-0022. **Spec:** [agent workspaces](agent-workspaces.md)
 (first slice: steps 1 and 2) and
-[workspace checkpoint history](workspace-checkpoints.md) (steps 4 and 5).
+[workspace checkpoint history](workspace-checkpoints.md) (step 4).
 
 Steps:
 
@@ -310,9 +310,7 @@ Steps:
 4. **History, retention, restore** (done for E2B). Replace the single `checkpoint_ref` with
    a checkpoint history table; apply the retention policy; add
    `pons workspace checkpoints|restore`.
-5. **Seatbelt checkpoints.** Optionally checkpoint the local workspace
-   directory after each clean run.
-6. **Off-host storage.** Add an S3-compatible `CheckpointStore`. Decide
+5. **Off-host storage.** Add an S3-compatible `CheckpointStore`. Decide
    between a small SigV4 implementation and a dependency when this step
    starts.
 
@@ -323,7 +321,9 @@ Tests:
 - Retention never prunes a referenced checkpoint; restore creates a new one.
 
 **Done when:** files the agent creates survive a new conversation and a
-replaced sandbox, and the owner can restore yesterday's workspace.
+replaced sandbox, and the owner can restore yesterday's E2B workspace.
+Seatbelt workspaces are plain host directories and are not checkpointed
+(ADR-0022 section 4).
 
 ## Phase 7: Memory v1
 
