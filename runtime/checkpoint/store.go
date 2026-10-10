@@ -33,30 +33,30 @@ func (s *Store) PutWorkspaceCheckpoint(
 	workspaceID string,
 	archive io.Reader,
 	limit int64,
-) (string, error) {
+) (string, int64, error) {
 	if workspaceID == "" || archive == nil || limit < 0 || limit == math.MaxInt64 {
-		return "", errors.New("runtime: invalid workspace checkpoint request")
+		return "", 0, errors.New("runtime: invalid workspace checkpoint request")
 	}
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return "", 0, err
 	}
 
 	dir := s.workspaceCheckpointDir(workspaceID)
 	if err := mkdirAllDurable(dir, 0o700); err != nil {
-		return "", fmt.Errorf("runtime: create workspace checkpoint directory: %w", err)
+		return "", 0, fmt.Errorf("runtime: create workspace checkpoint directory: %w", err)
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {
-		return "", fmt.Errorf("runtime: secure workspace checkpoint directory: %w", err)
+		return "", 0, fmt.Errorf("runtime: secure workspace checkpoint directory: %w", err)
 	}
 	file, err := os.CreateTemp(dir, ".checkpoint-*")
 	if err != nil {
-		return "", fmt.Errorf("runtime: create workspace checkpoint: %w", err)
+		return "", 0, fmt.Errorf("runtime: create workspace checkpoint: %w", err)
 	}
 	temporary := file.Name()
 	defer os.Remove(temporary)
 	if err := file.Chmod(0o600); err != nil {
 		_ = file.Close()
-		return "", fmt.Errorf("runtime: secure workspace checkpoint: %w", err)
+		return "", 0, fmt.Errorf("runtime: secure workspace checkpoint: %w", err)
 	}
 
 	hash := sha256.New()
@@ -70,23 +70,23 @@ func (s *Store) PutWorkspaceCheckpoint(
 	syncErr := file.Sync()
 	closeErr := file.Close()
 	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
-		return "", fmt.Errorf("runtime: write workspace checkpoint: %w", err)
+		return "", 0, fmt.Errorf("runtime: write workspace checkpoint: %w", err)
 	}
 
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return "", 0, err
 	}
 	digest := hash.Sum(nil)
 	ref := "sha256:" + hex.EncodeToString(digest)
 	path := filepath.Join(dir, strings.TrimPrefix(ref, "sha256:")+".tar")
 	if err := os.Rename(temporary, path); err != nil {
-		return "", fmt.Errorf("runtime: install workspace checkpoint: %w", err)
+		return "", 0, fmt.Errorf("runtime: install workspace checkpoint: %w", err)
 	}
 
 	if err := syncDirectory(dir); err != nil {
-		return "", fmt.Errorf("runtime: sync workspace checkpoint directory: %w", err)
+		return "", 0, fmt.Errorf("runtime: sync workspace checkpoint directory: %w", err)
 	}
-	return ref, nil
+	return ref, written, nil
 }
 
 type contextReader struct {

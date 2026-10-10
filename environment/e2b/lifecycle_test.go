@@ -48,23 +48,26 @@ func (s *checkpointFailureStore) EnvironmentState(context.Context, string) (envi
 	return *state, nil
 }
 
-func (s *checkpointFailureStore) PutWorkspaceCheckpoint(ctx context.Context, id string, body io.Reader, limit int64) (string, error) {
+func (s *checkpointFailureStore) PutWorkspaceCheckpoint(ctx context.Context, id string, body io.Reader, limit int64) (string, int64, error) {
 	seed := s.workspaceLast.Load() == nil
 	if !seed && s.fault == "checkpoint" {
-		return "", errors.New("checkpoint disk full")
+		return "", 0, errors.New("checkpoint disk full")
 	}
-	_, err := s.recordingStateStore.PutWorkspaceCheckpoint(ctx, id, body, limit)
+	_, size, err := s.recordingStateStore.PutWorkspaceCheckpoint(ctx, id, body, limit)
 	if seed {
-		return "seed", err
+		return "seed", size, err
 	}
-	return "updated", err
+	return "updated", size, err
 }
 
-func (s *checkpointFailureStore) SaveWorkspaceState(ctx context.Context, state environment.WorkspaceState) error {
-	if s.workspaceLast.Load() != nil && s.fault == "metadata" {
-		return errors.New("workspace metadata unavailable")
+func (s *checkpointFailureStore) AppendWorkspaceCheckpoint(
+	ctx context.Context,
+	checkpoint environment.WorkspaceCheckpoint,
+) (environment.WorkspaceCheckpoint, error) {
+	if checkpoint.Kind != environment.CheckpointBase && s.fault == "metadata" {
+		return environment.WorkspaceCheckpoint{}, errors.New("workspace metadata unavailable")
 	}
-	return s.recordingStateStore.SaveWorkspaceState(ctx, state)
+	return s.recordingStateStore.AppendWorkspaceCheckpoint(ctx, checkpoint)
 }
 
 func (s *checkpointFailureStore) SaveEnvironmentState(ctx context.Context, state environment.State) error {
@@ -255,10 +258,10 @@ func testSessionCheckpoint(t *testing.T, fault string) {
 		if seconds := timeoutSeconds.Load(); seconds < 3600 || seconds > 3660 {
 			t.Fatalf("recovery TTL = %d", seconds)
 		}
-		if fault != "idle" && store.workspaceLast.Load().CheckpointRef != "seed" {
+		if fault != "idle" && store.currentRef() != "seed" {
 			t.Fatal("failed checkpoint advanced durable reference")
 		}
-		if fault == "idle" && store.workspaceLast.Load().CheckpointRef != "updated" {
+		if fault == "idle" && store.currentRef() != "updated" {
 			t.Fatal("idle failure lost the completed checkpoint reference")
 		}
 		// A fresh provider must block rather than reconnect OR delete the reserved sandbox.

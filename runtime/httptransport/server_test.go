@@ -22,6 +22,8 @@ type fakeRuntime struct {
 	createdOptions ponsruntime.ConversationOptions
 	conversations  []ponsruntime.Conversation
 	stopErr        error
+	restoreErr     error
+	restoredSeq    int64
 }
 
 func (f *fakeRuntime) CreateConversation(_ context.Context, options ponsruntime.ConversationOptions) (ponsruntime.Conversation, error) {
@@ -58,6 +60,65 @@ func (f *fakeRuntime) StopRun(_ context.Context, conversationID string) (ponsrun
 		return ponsruntime.Run{}, f.stopErr
 	}
 	return ponsruntime.Run{ID: "run", ConversationID: conversationID, Status: ponsruntime.RunRunning}, nil
+}
+
+func (f *fakeRuntime) WorkspaceCheckpoints(_ context.Context, workspaceID string) (ponsruntime.WorkspaceCheckpoints, error) {
+	if workspaceID != "agent-default" {
+		return ponsruntime.WorkspaceCheckpoints{}, ponsruntime.ErrWorkspaceNotFound
+	}
+	return ponsruntime.WorkspaceCheckpoints{WorkspaceID: workspaceID, Checkpoints: []ponsruntime.WorkspaceCheckpoint{
+		{Seq: 2, Kind: "run", RunID: "run", Current: true},
+		{Seq: 1, Kind: "base"},
+	}}, nil
+}
+
+func (f *fakeRuntime) RestoreWorkspace(_ context.Context, _ string, seq int64) (ponsruntime.WorkspaceCheckpoint, error) {
+	if f.restoreErr != nil {
+		return ponsruntime.WorkspaceCheckpoint{}, f.restoreErr
+	}
+	f.restoredSeq = seq
+	return ponsruntime.WorkspaceCheckpoint{Seq: 3, Kind: "restore", RestoredFrom: seq, Current: true}, nil
+}
+
+func TestHandlerListsAndRestoresWorkspaceCheckpoints(t *testing.T) {
+	runtime := &fakeRuntime{}
+	handler := Handler(runtime)
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(method, path, strings.NewReader(body)))
+		return recorder
+	}
+
+	list := request(http.MethodGet, "/v1/workspaces/agent-default/checkpoints", "")
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(),
+		`"workspace_id":"agent-default","checkpoints":[{"seq":2,"kind":"run","run_id":"run",`) ||
+		strings.Contains(list.Body.String(), "ref") {
+		t.Fatalf("list = %d %s", list.Code, list.Body)
+	}
+	if response := request(http.MethodGet, "/v1/workspaces/missing/checkpoints", ""); response.Code != http.StatusNotFound {
+		t.Fatalf("list of a missing workspace = %d %s", response.Code, response.Body)
+	}
+
+	restore := request(http.MethodPost, "/v1/workspaces/agent-default/restore", `{"seq":1}`)
+	if restore.Code != http.StatusOK || runtime.restoredSeq != 1 || !strings.Contains(restore.Body.String(), `"restored_from":1`) {
+		t.Fatalf("restore = %d %s", restore.Code, restore.Body)
+	}
+	for _, body := range []string{``, `{"seq":0}`, `{"seq":"1"}`, `{"seq":1,"ref":"x"}`, `{"seq":1}{"seq":2}`} {
+		if response := request(http.MethodPost, "/v1/workspaces/agent-default/restore", body); response.Code != http.StatusBadRequest {
+			t.Fatalf("restore %q = %d %s", body, response.Code, response.Body)
+		}
+	}
+	for err, want := range map[error]int{
+		ponsruntime.ErrCheckpointNotFound: http.StatusNotFound,
+		ponsruntime.ErrWorkspaceBusy:      http.StatusConflict,
+		ponsruntime.ErrRestoreUnsupported: http.StatusNotImplemented,
+		ponsruntime.ErrClosed:             http.StatusServiceUnavailable,
+	} {
+		runtime.restoreErr = err
+		if response := request(http.MethodPost, "/v1/workspaces/agent-default/restore", `{"seq":1}`); response.Code != want {
+			t.Fatalf("restore with %v = %d %s, want %d", err, response.Code, response.Body, want)
+		}
+	}
 }
 
 func TestHandlerStopsActiveRun(t *testing.T) {

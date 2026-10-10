@@ -33,9 +33,10 @@ type Store interface {
 	Conversations(context.Context) ([]Conversation, error)
 	Accept(context.Context, string, InputSubmission) (AcceptedMessage, []Event, error)
 	// ClaimRunnable atomically selects and claims the oldest queued submission
-	// whose conversation and workspace have no active run. It returns nil when
-	// no work is currently eligible. This transition is not, by itself, a
-	// renewable lease or distributed fencing contract.
+	// whose conversation and workspace have no active run and whose workspace
+	// ID is not reserved. It returns nil when no work is currently eligible.
+	// This transition is not, by itself, a renewable lease or distributed
+	// fencing contract.
 	ClaimRunnable(context.Context) (*ClaimedRun, error)
 	CommitAssistantTurn(context.Context, Run, []MessagePart) ([]Event, error)
 	AppendEnvironmentProgress(context.Context, Run, EnvironmentProgress) (Event, error)
@@ -50,9 +51,15 @@ type Store interface {
 	// StopRun is FailRun for a run the owner stopped: it records run.stopped
 	// rather than a failure.
 	StopRun(context.Context, Run) ([]Event, error)
+	// ReserveWorkspace excludes a workspace ID from ClaimRunnable until
+	// ReleaseWorkspace. It fails with ErrWorkspaceBusy if a run of that
+	// workspace is claimed or the workspace is already reserved.
+	ReserveWorkspace(context.Context, string) error
+	ReleaseWorkspace(context.Context, string) error
 	// RecoverRunning resolves work abandoned by the previous exclusive store
-	// owner. Distributed implementations must recover only expired fenced
-	// claims; SQLite supports one Manager and calls this during startup.
+	// owner, including workspace reservations. Distributed implementations
+	// must recover only expired fenced claims; SQLite supports one Manager
+	// and calls this during startup.
 	RecoverRunning(context.Context) error
 	Events(context.Context, string, uint64) ([]Event, error)
 	AgentEvents(context.Context, string, uint64) ([]Event, error)

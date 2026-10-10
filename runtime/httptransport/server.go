@@ -28,6 +28,8 @@ type Runtime interface {
 	View(context.Context, string) (ponsruntime.ConversationView, error)
 	Subscribe(context.Context, string, uint64) (<-chan ponsruntime.Event, error)
 	StopRun(context.Context, string) (ponsruntime.Run, error)
+	WorkspaceCheckpoints(context.Context, string) (ponsruntime.WorkspaceCheckpoints, error)
+	RestoreWorkspace(context.Context, string, int64) (ponsruntime.WorkspaceCheckpoint, error)
 }
 
 type HandlerOptions struct {
@@ -54,6 +56,8 @@ func HandlerWithOptions(runtime Runtime, options HandlerOptions) http.Handler {
 	mux.HandleFunc("POST /v1/conversations/{id}/messages", server.submitMessage)
 	mux.HandleFunc("GET /v1/conversations/{id}/events", server.events)
 	mux.HandleFunc("POST /v1/conversations/{id}/stop", server.stopRun)
+	mux.HandleFunc("GET /v1/workspaces/{id}/checkpoints", server.listCheckpoints)
+	mux.HandleFunc("POST /v1/workspaces/{id}/restore", server.restoreWorkspace)
 	mux.HandleFunc("GET /ui", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui/", http.StatusPermanentRedirect)
 	})
@@ -81,6 +85,10 @@ type server struct {
 
 type conversationBody struct {
 	Environment string `json:"environment,omitempty"`
+}
+
+type restoreBody struct {
+	Seq int64 `json:"seq"`
 }
 
 type messageBody struct {
@@ -200,6 +208,50 @@ func (s server) stopRun(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
 	default:
 		writeJSON(w, http.StatusAccepted, run)
+	}
+}
+
+func (s server) listCheckpoints(w http.ResponseWriter, r *http.Request) {
+	checkpoints, err := s.runtime.WorkspaceCheckpoints(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeWorkspaceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, checkpoints)
+}
+
+// restoreWorkspace makes an earlier checkpoint the workspace's newest. It
+// never runs alongside a run in that workspace.
+func (s server) restoreWorkspace(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	var body restoreBody
+	var extra any
+	dec := json.NewDecoder(io.LimitReader(r.Body, 4<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil || body.Seq <= 0 || !errors.Is(dec.Decode(&extra), io.EOF) {
+		writeAPIError(w, http.StatusBadRequest, "body must be {\"seq\": N} with a positive checkpoint sequence number")
+		return
+	}
+	checkpoint, err := s.runtime.RestoreWorkspace(r.Context(), r.PathValue("id"), body.Seq)
+	if err != nil {
+		writeWorkspaceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, checkpoint)
+}
+
+func writeWorkspaceError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ponsruntime.ErrWorkspaceNotFound), errors.Is(err, ponsruntime.ErrCheckpointNotFound):
+		writeAPIError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, ponsruntime.ErrWorkspaceBusy):
+		writeAPIError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ponsruntime.ErrRestoreUnsupported):
+		writeAPIError(w, http.StatusNotImplemented, err.Error())
+	case errors.Is(err, ponsruntime.ErrClosed):
+		writeAPIError(w, http.StatusServiceUnavailable, err.Error())
+	default:
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 	}
 }
 

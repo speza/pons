@@ -24,7 +24,6 @@ import (
 	"github.com/samperrin/pons/environment"
 	"github.com/samperrin/pons/environment/gitworkspace"
 	"github.com/samperrin/pons/plugins/external"
-	checkpointstore "github.com/samperrin/pons/runtime/checkpoint"
 )
 
 type gitCredentialSourceFunc func(context.Context, string, bool) (gitworkspace.Credentials, error)
@@ -239,7 +238,7 @@ func TestArchiveWorkspaceUsesSourceOnlyForInitialSeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := &recordingStateStore{}
-	first, err := loadOrCreateWorkspace(
+	first, firstCheckpoint, err := loadOrCreateWorkspace(
 		context.Background(), store, store, "workspace", source, environment.WorkspacePlan{}, 1<<20, nil,
 	)
 	if err != nil {
@@ -248,14 +247,33 @@ func TestArchiveWorkspaceUsesSourceOnlyForInitialSeed(t *testing.T) {
 	if err := os.RemoveAll(source); err != nil {
 		t.Fatal(err)
 	}
-	second, err := loadOrCreateWorkspace(
+	second, secondCheckpoint, err := loadOrCreateWorkspace(
 		context.Background(), store, store, "workspace", source, environment.WorkspacePlan{}, 1<<20, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.CheckpointRef != first.CheckpointRef || second.SourceRef != first.SourceRef {
-		t.Fatalf("workspace changed after source removal: first=%+v second=%+v", first, second)
+	if secondCheckpoint != firstCheckpoint || second.SourceRef != first.SourceRef {
+		t.Fatalf("workspace changed after source removal: first=%+v %+v second=%+v %+v", first, firstCheckpoint, second, secondCheckpoint)
+	}
+	if firstCheckpoint.Kind != environment.CheckpointBase || firstCheckpoint.Seq != 1 || firstCheckpoint.SizeBytes == 0 {
+		t.Fatalf("seed checkpoint = %+v", firstCheckpoint)
+	}
+
+	// A seed interrupted after saving the workspace but before recording its
+	// base recovers the base from the stored archive, not the removed source.
+	store.checkpointMu.Lock()
+	store.history = nil
+	store.checkpointMu.Unlock()
+	_, recovered, err := loadOrCreateWorkspace(
+		context.Background(), store, store, "workspace", source, environment.WorkspacePlan{}, 1<<20, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Kind != environment.CheckpointBase || recovered.Ref != first.BaseRevision ||
+		recovered.SizeBytes != firstCheckpoint.SizeBytes {
+		t.Fatalf("recovered base = %+v, want %+v", recovered, firstCheckpoint)
 	}
 }
 
@@ -301,7 +319,7 @@ func testProvisionGitWorkspace(t *testing.T, revision string) {
 	defer server.Close()
 	store := &recordingStateStore{}
 	var debugEvents, progressStages []string
-	state, err := provisionGitWorkspace(
+	checkpoint, err := provisionGitWorkspace(
 		context.Background(),
 		&e2bClient{envdURL: server.URL, http: server.Client()},
 		e2bSandbox{ID: "sandbox", AccessToken: "access"},
@@ -329,8 +347,10 @@ func testProvisionGitWorkspace(t *testing.T, revision string) {
 		!strings.Contains(joined, "git -C "+defaultE2BWorkspace+" checkout -b "+gitworkspace.BranchName("workspace")+" FETCH_HEAD") {
 		t.Fatalf("Git commands:\n%s", joined)
 	}
-	if state.CheckpointRef != "checkpoint" || store.workspaceLast.Load().CheckpointRef != "checkpoint" {
-		t.Fatalf("workspace state = %+v, stored = %+v", state, store.workspaceLast.Load())
+	// The initial checkout is the git/v1 workspace's base.
+	if checkpoint.Ref != "checkpoint" || checkpoint.Kind != environment.CheckpointBase ||
+		store.currentRef() != "checkpoint" || store.workspaceLast.Load() == nil {
+		t.Fatalf("checkpoint = %+v, stored = %+v", checkpoint, store.workspaceLast.Load())
 	}
 	debug := strings.Join(debugEvents, "\n")
 	for _, step := range []string{"git init", "git remote add", "git fetch", "git checkout", "initial checkpoint=checkpoint saved"} {
@@ -607,13 +627,15 @@ func TestSessionCheckpointDoesNotReplaceSourceWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := &recordingStateStore{}
+	store := &recordingStateStore{history: []environment.WorkspaceCheckpoint{
+		{WorkspaceID: "workspace", Seq: 1, Ref: "base", Kind: environment.CheckpointBase, CreatedAt: time.Now()},
+	}}
 	session := &e2bSession{
 		store:       store,
 		checkpoints: store,
+		runID:       "run",
 		workspace: environment.WorkspaceState{
-			ID: "workspace", Strategy: environment.WorkspaceStrategyArchive, SourceRef: source,
-			BaseRevision: "base", CheckpointRef: "old-checkpoint",
+			ID: "workspace", Strategy: environment.WorkspaceStrategyArchive, SourceRef: source, BaseRevision: "base",
 		},
 		maxWorkspaceBytes: 1 << 20,
 	}
@@ -626,77 +648,13 @@ func TestSessionCheckpointDoesNotReplaceSourceWorkspace(t *testing.T) {
 	if body, err := os.ReadFile(filepath.Join(source, "source.txt")); err != nil || string(body) != "source" {
 		t.Fatalf("source workspace = %q, %v", body, err)
 	}
-	if state := store.workspaceLast.Load(); state == nil || state.CheckpointRef != "checkpoint" {
-		t.Fatalf("workspace state = %+v", state)
+	current, err := store.CurrentWorkspaceCheckpoint(context.Background(), "workspace")
+	if err != nil || current.Seq != 2 || current.Kind != environment.CheckpointRun || current.RunID != "run" ||
+		current.SizeBytes != int64(len(archive)) {
+		t.Fatalf("current checkpoint = %+v, %v", current, err)
 	}
 	if pruned := store.prunedCheckpointRefs.Load(); pruned == nil || *pruned != "base,checkpoint" {
 		t.Fatalf("retained checkpoint refs = %v", pruned)
-	}
-}
-
-func TestGitCheckpointPruningKeepsOnlyLatestArchive(t *testing.T) {
-	ctx := context.Background()
-	checkpoints := checkpointstore.New(t.TempDir())
-	metadata := &recordingStateStore{}
-	workspaceID := "git-workspace"
-	putArchive := func(contents string) string {
-		t.Helper()
-		dir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(dir, "contents.txt"), []byte(contents), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		archive, err := archiveWorkspace(dir, 1<<20)
-		if err != nil {
-			t.Fatal(err)
-		}
-		ref, err := checkpoints.PutWorkspaceCheckpoint(ctx, workspaceID, bytes.NewReader(archive), 1<<20)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return ref
-	}
-	initialRef := putArchive("initial")
-	session := &e2bSession{
-		store: metadata, checkpoints: checkpoints,
-		workspace: environment.WorkspaceState{
-			ID: workspaceID, Strategy: environment.WorkspaceStrategyGit,
-			BaseRevision: strings.Repeat("a", 40), CheckpointRef: initialRef,
-		},
-		maxWorkspaceBytes: 1 << 20,
-		onError: func(err error) {
-			t.Errorf("checkpoint pruning: %v", err)
-		},
-	}
-	var refs []string
-	for _, contents := range []string{"first run", "second run"} {
-		dir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(dir, "contents.txt"), []byte(contents), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		archive, err := archiveWorkspace(dir, 1<<20)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := session.persistCheckpoint(ctx, bytes.NewReader(archive)); err != nil {
-			t.Fatal(err)
-		}
-		refs = append(refs, session.workspace.CheckpointRef)
-	}
-	for _, ref := range []string{initialRef, refs[0]} {
-		reader, err := checkpoints.WorkspaceCheckpoint(ctx, workspaceID, ref, 1<<20)
-		if reader != nil {
-			_ = reader.Close()
-		}
-		if !errors.Is(err, environment.ErrStateNotFound) {
-			t.Fatalf("superseded checkpoint %q remains: %v", ref, err)
-		}
-	}
-	reader, err := checkpoints.WorkspaceCheckpoint(ctx, workspaceID, refs[1], 1<<20)
-	if err != nil {
-		t.Fatalf("latest checkpoint: %v", err)
-	}
-	if err := reader.Close(); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -847,6 +805,7 @@ type recordingStateStore struct {
 	prunedCheckpointRefs atomic.Pointer[string]
 	checkpointMu         sync.Mutex
 	checkpoint           []byte
+	history              []environment.WorkspaceCheckpoint
 }
 
 func (s *recordingStateStore) WorkspaceState(context.Context, string) (environment.WorkspaceState, error) {
@@ -860,18 +819,63 @@ func (s *recordingStateStore) SaveWorkspaceState(_ context.Context, state enviro
 	s.workspaceLast.Store(&state)
 	return nil
 }
-func (s *recordingStateStore) PutWorkspaceCheckpoint(_ context.Context, _ string, archive io.Reader, limit int64) (string, error) {
+func (s *recordingStateStore) AppendWorkspaceCheckpoint(
+	_ context.Context,
+	checkpoint environment.WorkspaceCheckpoint,
+) (environment.WorkspaceCheckpoint, error) {
+	s.checkpointMu.Lock()
+	defer s.checkpointMu.Unlock()
+	checkpoint.Seq = int64(len(s.history)) + 1
+	if len(s.history) != 0 {
+		checkpoint.Seq = s.history[len(s.history)-1].Seq + 1
+	}
+	s.history = append(s.history, checkpoint)
+	return checkpoint, nil
+}
+func (s *recordingStateStore) WorkspaceCheckpoints(context.Context, string) ([]environment.WorkspaceCheckpoint, error) {
+	s.checkpointMu.Lock()
+	defer s.checkpointMu.Unlock()
+	return slices.Clone(s.history), nil
+}
+func (s *recordingStateStore) CurrentWorkspaceCheckpoint(context.Context, string) (environment.WorkspaceCheckpoint, error) {
+	s.checkpointMu.Lock()
+	defer s.checkpointMu.Unlock()
+	if len(s.history) == 0 {
+		return environment.WorkspaceCheckpoint{}, environment.ErrStateNotFound
+	}
+	return s.history[len(s.history)-1], nil
+}
+func (s *recordingStateStore) DeleteWorkspaceCheckpoints(_ context.Context, _ string, seqs []int64) error {
+	s.checkpointMu.Lock()
+	defer s.checkpointMu.Unlock()
+	if len(s.history) == 0 {
+		return nil
+	}
+	// Like SQLite, never remove the current checkpoint.
+	current := s.history[len(s.history)-1].Seq
+	s.history = slices.DeleteFunc(s.history, func(checkpoint environment.WorkspaceCheckpoint) bool {
+		return checkpoint.Seq != current && slices.Contains(seqs, checkpoint.Seq)
+	})
+	return nil
+}
+
+// currentRef is the current checkpoint's archive reference, or empty.
+func (s *recordingStateStore) currentRef() string {
+	current, _ := s.CurrentWorkspaceCheckpoint(context.Background(), "")
+	return current.Ref
+}
+func (s *recordingStateStore) PutWorkspaceCheckpoint(_ context.Context, _ string, archive io.Reader, limit int64) (string, int64, error) {
 	s.checkpointMu.Lock()
 	defer s.checkpointMu.Unlock()
 	body, err := io.ReadAll(io.LimitReader(archive, limit+1))
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	if int64(len(body)) > limit {
-		return "", errors.New("checkpoint exceeds limit")
+		return "", 0, errors.New("checkpoint exceeds limit")
 	}
 	s.checkpoint = body
-	return "checkpoint", nil
+	return "checkpoint", int64(len(body)), nil
 }
 func (s *recordingStateStore) WorkspaceCheckpoint(context.Context, string, string, int64) (io.ReadCloser, error) {
 	s.checkpointMu.Lock()

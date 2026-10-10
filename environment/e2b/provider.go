@@ -116,7 +116,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 			return nil, err
 		}
 	}
-	workspaceState, err := loadOrCreateWorkspace(
+	workspaceState, current, err := loadOrCreateWorkspace(
 		ctx,
 		store,
 		checkpoints,
@@ -130,7 +130,7 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 		return nil, err
 	}
 
-	p.debugf("workspace=%q strategy=%s checkpoint=%t", workspaceID, workspaceState.Strategy, workspaceState.CheckpointRef != "")
+	p.debugf("workspace=%q strategy=%s checkpoint=%t", workspaceID, workspaceState.Strategy, current.Ref != "")
 	var credentials gitworkspace.Credentials
 	defer func() { startErr = credentials.RedactError(startErr) }()
 	if spec.GitAllRepositories && p.GitCredentials == nil {
@@ -180,20 +180,21 @@ func (p *Provider) Start(ctx context.Context, spec environment.Spec) (handsSessi
 				return nil, errors.Join(err, cleanup())
 			}
 		}
-		initialCheckout := workspaceState.CheckpointRef == ""
+		initialCheckout := current.Ref == ""
 		if initialCheckout {
 			p.debugf("workspace=%q sandbox=%q provisioning Git checkout repository=%q revision=%s", workspaceID, sandbox.ID, workspaceState.SourceRef, workspaceState.BaseRevision)
 		} else {
-			p.debugf("workspace=%q sandbox=%q restoring checkpoint=%s", workspaceID, sandbox.ID, workspaceState.CheckpointRef)
+			p.debugf("workspace=%q sandbox=%q restoring checkpoint=%s", workspaceID, sandbox.ID, current.Ref)
 		}
-		workspaceState, err = placeWorkspace(
-			ctx, client, sandbox, store, checkpoints, workspaceState, env, credentials, cfg.maxWorkspaceBytes, cfg.onError, p.OnDebug, progress,
+		current, err = placeWorkspace(
+			ctx, client, sandbox, store, checkpoints, workspaceState, current,
+			env, credentials, cfg.maxWorkspaceBytes, cfg.onError, p.OnDebug, progress,
 		)
 		if err != nil {
 			return nil, errors.Join(err, cleanup())
 		}
 		if !initialCheckout {
-			p.debugf("workspace=%q sandbox=%q checkpoint=%s restored", workspaceID, sandbox.ID, workspaceState.CheckpointRef)
+			p.debugf("workspace=%q sandbox=%q checkpoint=%s restored", workspaceID, sandbox.ID, current.Ref)
 		}
 		now := time.Now().UTC()
 		if err := store.SaveEnvironmentState(ctx, environment.State{
@@ -436,6 +437,67 @@ func (p *Provider) Close() error {
 	cancel()
 	<-done
 	p.stopJanitor, p.janitorDone = nil, nil
+	return nil
+}
+
+var _ environment.WorkspaceRestorer = (*Provider)(nil)
+
+// RestoreWorkspace drops the workspace's retained idle sandbox, if any, so its
+// next placement starts a new sandbox from the current checkpoint, which the
+// caller then records as the restored one. It refuses a busy workspace and a
+// checkpoint the next placement could not load, checking cheapest first and
+// verifying the archive last. Nothing is uploaded here.
+func (p *Provider) RestoreWorkspace(ctx context.Context, workspaceID string, checkpoint environment.WorkspaceCheckpoint) error {
+	cfg, err := p.config()
+	if err != nil {
+		return err
+	}
+	if checkpoint.SizeBytes > cfg.maxWorkspaceBytes {
+		return fmt.Errorf("environment: checkpoint %d is %d bytes, over the %d-byte workspace limit",
+			checkpoint.Seq, checkpoint.SizeBytes, cfg.maxWorkspaceBytes)
+	}
+	workspaceLock := p.workspaceLock(workspaceID)
+	workspaceLock.Lock()
+	defer workspaceLock.Unlock()
+	p.lifecycleMu.Lock()
+	store, checkpoints, activeRun := p.stateStore, p.checkpointStore, p.active[workspaceID]
+	p.lifecycleMu.Unlock()
+	if store == nil || checkpoints == nil {
+		return errors.New("environment: E2B durable workspace stores are required")
+	}
+	if activeRun != "" {
+		return fmt.Errorf("%w: workspace %q has active E2B run %q", environment.ErrWorkspaceInUse, workspaceID, activeRun)
+	}
+
+	// A recovery sandbox holds edits that were never checkpointed.
+	state, err := store.EnvironmentState(ctx, workspaceID)
+	retained := err == nil
+	if err != nil && !errors.Is(err, environment.ErrStateNotFound) {
+		return err
+	}
+	if retained && state.Status != environment.StateIdle && time.Now().Before(state.ExpiresAt) {
+		return fmt.Errorf("%w: sandbox %q is %s until %s", environment.ErrWorkspaceInUse,
+			state.EnvironmentID, state.Status, state.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+	archive, err := checkpoints.WorkspaceCheckpoint(ctx, workspaceID, checkpoint.Ref, checkpoint.SizeBytes)
+	if err != nil {
+		return fmt.Errorf("environment: checkpoint %d is unavailable: %w", checkpoint.Seq, err)
+	}
+	if err := archive.Close(); err != nil {
+		return err
+	}
+	if !retained {
+		return nil
+	}
+
+	client := &e2bClient{apiKey: cfg.apiKey, apiURL: cfg.apiURL, envdURL: cfg.envdURL, http: cfg.http}
+	if err := client.killSandbox(ctx, state.EnvironmentID); err != nil {
+		return err
+	}
+	if err := store.DeleteEnvironmentState(ctx, workspaceID, state.EnvironmentID); err != nil {
+		return err
+	}
+	p.debugf("workspace=%q sandbox=%q deleted for restore", workspaceID, state.EnvironmentID)
 	return nil
 }
 

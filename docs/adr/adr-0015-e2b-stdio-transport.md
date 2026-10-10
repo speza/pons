@@ -47,11 +47,13 @@ operator enables the existing sandbox network policy.
 
 The local source workspace is a one-time seed, not a synchronization target.
 After each run, the provider downloads and validates a bounded checkpoint,
-stores it under the runtime state directory, and advances the logical
-workspace's content-addressed checkpoint reference. It never replaces the
-source checkout. The state directory must be outside that source; the provider
-retains the immutable base and latest checkpoint and prunes superseded
-intermediate archives after advancing durable metadata. If checkpoint
+stores it under the runtime state directory, and appends it to the logical
+workspace's checkpoint history unless it equals the current checkpoint. It
+never replaces the source checkout. The state directory must be outside that
+source. Retention after each append keeps recent, daily, and base
+checkpoints within a byte budget and prunes unreferenced archives; see
+[remote workspaces](../design/remote-workspaces.md#checkpoint-history) and
+ADR-0022. If checkpoint
 download, validation, or persistence fails,
 closing the session reports an error and the sandbox is reserved for manual
 recovery rather than reused or immediately deleted.

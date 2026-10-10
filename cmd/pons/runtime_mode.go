@@ -124,8 +124,8 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 		return err
 	}
 	defer store.Close()
+	checkpoints := checkpoint.New(filepath.Join(opts.StateDir, "workspaces"))
 	if durable, ok := opts.Environment.(environment.DurableProvider); ok {
-		checkpoints := checkpoint.New(filepath.Join(opts.StateDir, "workspaces"))
 		if err := durable.SetStores(store, checkpoints); err != nil {
 			return fmt.Errorf("configure environment state: %w", err)
 		}
@@ -158,10 +158,24 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 	}
 
 	runner := &agentRunner{opts: opts, logger: logger, agents: agents}
+	history := &checkpoint.History{
+		State:    store,
+		Archives: checkpoints,
+		OnError: func(err error) {
+			logger.Error("workspace checkpoint maintenance failed", "error", err)
+		},
+	}
+	var restorer ponsruntime.WorkspaceRestorer
+	if provider, ok := opts.Environment.(environment.WorkspaceRestorer); ok {
+		history.Restorer = provider
+		restorer = history
+	}
 	backgroundErrors := make(chan error, 1)
 	manager, err := ponsruntime.New(ponsruntime.Config{
 		Store:              store,
 		Runner:             runner,
+		WorkspaceHistory:   history,
+		WorkspaceRestorer:  restorer,
 		Agent:              agent,
 		AgentRevisions:     agents,
 		MaxConcurrent:      opts.MaxConcurrent,

@@ -21,9 +21,12 @@ func TestCheckpointStreamingRoundTripRepairAndPrune(t *testing.T) {
 	refs := make([]string, 3)
 	contents := []string{"base checkpoint", "intermediate checkpoint", "latest checkpoint"}
 	for i, body := range contents {
-		ref, err := store.PutWorkspaceCheckpoint(ctx, "workspace", strings.NewReader(body), int64(len(body)))
+		ref, size, err := store.PutWorkspaceCheckpoint(ctx, "workspace", strings.NewReader(body), int64(len(body)))
 		if err != nil {
 			t.Fatal(err)
+		}
+		if size != int64(len(body)) {
+			t.Fatalf("size = %d, want %d", size, len(body))
 		}
 		refs[i] = ref
 	}
@@ -65,7 +68,7 @@ func TestCheckpointStreamingRoundTripRepairAndPrune(t *testing.T) {
 		t.Fatalf("corrupt checkpoint open = %v", err)
 	}
 	// Put always replaces the digest path, repairing corrupt content.
-	repaired, err := store.PutWorkspaceCheckpoint(
+	repaired, _, err := store.PutWorkspaceCheckpoint(
 		ctx,
 		"workspace",
 		strings.NewReader(contents[0]),
@@ -112,7 +115,7 @@ func TestPutWorkspaceCheckpointLimitsAndCleanup(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "workspaces")
 			store := New(dir)
-			ref, err := store.PutWorkspaceCheckpoint(
+			ref, _, err := store.PutWorkspaceCheckpoint(
 				context.Background(),
 				"workspace",
 				strings.NewReader(test.body),
@@ -133,7 +136,7 @@ func TestPutWorkspaceCheckpointReaderFailureAndCancellationCleanup(t *testing.T)
 	t.Run("reader failure", func(t *testing.T) {
 		store := New(filepath.Join(t.TempDir(), "workspaces"))
 		want := errors.New("read failed")
-		_, err := store.PutWorkspaceCheckpoint(
+		_, _, err := store.PutWorkspaceCheckpoint(
 			context.Background(),
 			"workspace",
 			io.MultiReader(strings.NewReader("partial"), failingReader{err: want}),
@@ -149,7 +152,7 @@ func TestPutWorkspaceCheckpointReaderFailureAndCancellationCleanup(t *testing.T)
 		store := New(filepath.Join(t.TempDir(), "workspaces"))
 		ctx, cancel := context.WithCancel(context.Background())
 		reader := &cancelingReader{cancel: cancel}
-		_, err := store.PutWorkspaceCheckpoint(ctx, "workspace", reader, 1<<20)
+		_, _, err := store.PutWorkspaceCheckpoint(ctx, "workspace", reader, 1<<20)
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("put error = %v, want context cancellation", err)
 		}
@@ -166,7 +169,7 @@ func TestPutWorkspaceCheckpointRejectsInvalidDirectoryHierarchy(t *testing.T) {
 	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ref, err := store.PutWorkspaceCheckpoint(
+	ref, _, err := store.PutWorkspaceCheckpoint(
 		context.Background(),
 		"workspace",
 		strings.NewReader("checkpoint"),
@@ -217,7 +220,7 @@ func (r failingReader) Read([]byte) (int, error) { return 0, r.err }
 func TestLargeCheckpointUsesBoundedReads(t *testing.T) {
 	store := New(t.TempDir())
 	const size = 8 << 20
-	ref, err := store.PutWorkspaceCheckpoint(context.Background(), "workspace", &chunkReader{remaining: size}, size)
+	ref, _, err := store.PutWorkspaceCheckpoint(context.Background(), "workspace", &chunkReader{remaining: size}, size)
 	if err != nil {
 		t.Fatal(err)
 	}

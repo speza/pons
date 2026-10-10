@@ -34,7 +34,9 @@ Start with the [project README](../README.md), then use this index.
   owner and starts private tasks. Read the [design](proposals/persistent-agents/design.md)
   for what and why, then the [plan](proposals/persistent-agents/plan.md) for
   how and when. The [agent workspaces spec](proposals/persistent-agents/agent-workspaces.md)
-  details the first slice of phase 6.
+  details the first slice of phase 6, and the
+  [workspace checkpoint history spec](proposals/persistent-agents/workspace-checkpoints.md)
+  the second.
 
 When a proposal ships, its design moves into `design/` and the relevant ADRs
 update their implementation status.

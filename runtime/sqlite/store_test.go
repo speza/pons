@@ -30,7 +30,8 @@ func acceptInput(store *Store, ctx context.Context, conversationID, key string, 
 
 func TestOpenRejectsOlderExistingDatabase(t *testing.T) {
 	// Every older version takes the same rejection path; check both ends.
-	for _, version := range []int{0, currentSchemaVersion - 1} {
+	// Version 12 was the last schema before the numbering restarted at 1.
+	for _, version := range []int{0, 12} {
 		statement := fmt.Sprintf("PRAGMA user_version = %d", version)
 		t.Run(statement, func(t *testing.T) {
 			stateDir := t.TempDir()
@@ -756,7 +757,7 @@ func TestEnvironmentStateRoundTripAndExpiry(t *testing.T) {
 	checkpointRef := "opaque-checkpoint-reference"
 	workspace := environment.WorkspaceState{
 		ID: "workspace", Strategy: environment.WorkspaceStrategyArchive, SourceRef: "/source",
-		BaseRevision: checkpointRef, CheckpointRef: checkpointRef, SetupGeneration: 2,
+		BaseRevision: checkpointRef, SetupGeneration: 2,
 		CreatedAt: now.Add(-time.Minute), UpdatedAt: now,
 	}
 	if err := store.SaveWorkspaceState(ctx, workspace); err != nil {
@@ -767,7 +768,7 @@ func TestEnvironmentStateRoundTripAndExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	if gotWorkspace.Strategy != workspace.Strategy || gotWorkspace.SourceRef != workspace.SourceRef ||
-		gotWorkspace.BaseRevision != workspace.BaseRevision || gotWorkspace.CheckpointRef != workspace.CheckpointRef ||
+		gotWorkspace.BaseRevision != workspace.BaseRevision ||
 		gotWorkspace.SetupGeneration != workspace.SetupGeneration || !gotWorkspace.CreatedAt.Equal(workspace.CreatedAt) {
 		t.Fatalf("workspace = %+v", gotWorkspace)
 	}
@@ -857,7 +858,7 @@ func TestRecoveryReservationSurvivesRestartAndExpiresAtDeadline(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	if err := store.SaveWorkspaceState(ctx, environment.WorkspaceState{
 		ID: "workspace", Strategy: environment.WorkspaceStrategyArchive, SetupGeneration: 1,
-		CheckpointRef: "previous", CreatedAt: now, UpdatedAt: now,
+		CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
