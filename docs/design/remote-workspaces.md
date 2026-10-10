@@ -119,7 +119,8 @@ A failure before the append leaves the history and the current checkpoint
 unchanged. Once the provider has applied a restore, the append runs even if
 the request is canceled. Shutdown cancels a restore in progress and waits for
 it. Providers that do not implement `environment.WorkspaceRestorer` return
-`501 Not Implemented`; Seatbelt workspaces have no checkpoints yet.
+`501 Not Implemented`. Seatbelt workspaces are plain host directories and
+are not checkpointed (ADR-0022 section 4).
 
 ## Checkpoint storage
 

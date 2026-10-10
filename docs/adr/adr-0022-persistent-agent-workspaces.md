@@ -1,7 +1,7 @@
 # ADR-0022: Persistent agents keep durable workspaces without Git
 
 **Status:** Proposed
-**Implementation:** Partial — `agent` and `per_conversation` policies, conversation `workspace_id`, the Seatbelt agent workspace, and the E2B `empty` seed (agent workspaces spec, delivery steps 1 and 2); E2B checkpoint history with fixed retention, and restore through the loopback API and `pons workspace checkpoints|restore` (workspace checkpoint history spec, delivery part 1); Seatbelt checkpoints, configurable retention, templates, setup, and off-host storage not implemented
+**Implementation:** Partial — `agent` and `per_conversation` policies, conversation `workspace_id`, the Seatbelt agent workspace, and the E2B `empty` seed (agent workspaces spec, delivery steps 1 and 2); E2B checkpoint history with fixed retention, and restore through the loopback API and `pons workspace checkpoints|restore` (workspace checkpoint history spec); configurable retention, templates, setup, and off-host storage not implemented
 **Date:** 2026-09-24
 **Related:** ADR-0009, ADR-0015, ADR-0016, ADR-0017, ADR-0019, ADR-0020
 
@@ -75,17 +75,20 @@ Setup outputs outside the workspace are never checkpointed. Excluded paths are
 rebuilt by setup or by the agent. This keeps checkpoints small and makes a
 replacement VM converge to the same capabilities without archiving them.
 
-### 4. Every provider can checkpoint
+### 4. Remote providers checkpoint; Seatbelt does not
 
-E2B keeps its implemented per-run checkpoint. Seatbelt gains an optional
-checkpoint after each run whose hands stopped cleanly. Its workspace is
-already a persistent host directory, so the checkpoint is for history and
-off-host backup, not recovery of the live copy.
+E2B keeps its implemented per-run checkpoint: the sandbox is disposable, so
+the checkpoint is the durable copy. A failed checkpoint leaves the prior one
+authoritative, and an unclean hands stop skips checkpointing. Checkpoints
+follow the archive size, entry-count, symlink, and path limits.
 
-The existing failure rules apply to all providers: a failed checkpoint leaves
-the prior one authoritative, and an unclean hands stop skips checkpointing.
-Checkpoints follow the same archive size, entry-count, symlink, and path
-limits.
+Seatbelt workspaces are not checkpointed. A Seatbelt workspace is already a
+persistent host directory, so a checkpoint would add only history and undo,
+at the cost of archiving the workspace after every run. Consistent with
+agent memory, pons keeps no host-side history of it; the owner's own backups
+cover the host. Restore is therefore available only for checkpointed
+workspaces. (Amended 2026-10-10; this section first proposed optional
+Seatbelt checkpoints.)
 
 ### 5. Checkpoint storage may be off-host
 
@@ -143,9 +146,7 @@ Deterministic tests without provider credentials or network prove:
 - retention keeps the configured set, never prunes a referenced checkpoint,
   and keeps the base while needed;
 - restore requires an idle workspace, creates a new checkpoint, and does not
-  alter older ones;
-- a Seatbelt checkpoint failure leaves the prior checkpoint authoritative and
-  the live directory untouched; and
+  alter older ones; and
 - an object-store fake verifies digest and size on read and never exposes its
   credentials to hands.
 
