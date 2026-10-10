@@ -22,10 +22,10 @@ import (
 
 const (
 	runtimeDBName = "runtime.db"
-	// Version 13 replaces workspaces.checkpoint_ref with the
-	// workspace_checkpoints history and adds workspace_reservations for
-	// restores.
-	currentSchemaVersion = 13
+	// The project is pre-compatibility: the schema changes in place and this
+	// version only rejects databases written by a different schema. Version
+	// 1 restarted the numbering after version 12.
+	currentSchemaVersion = 1
 )
 
 // Store is the local, exclusive-manager runtime backend. Its transactions

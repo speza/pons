@@ -30,7 +30,8 @@ func acceptInput(store *Store, ctx context.Context, conversationID, key string, 
 
 func TestOpenRejectsOlderExistingDatabase(t *testing.T) {
 	// Every older version takes the same rejection path; check both ends.
-	for _, version := range []int{0, currentSchemaVersion - 1} {
+	// Version 12 was the last schema before the numbering restarted at 1.
+	for _, version := range []int{0, 12} {
 		statement := fmt.Sprintf("PRAGMA user_version = %d", version)
 		t.Run(statement, func(t *testing.T) {
 			stateDir := t.TempDir()

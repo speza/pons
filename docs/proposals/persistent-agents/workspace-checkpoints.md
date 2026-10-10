@@ -113,8 +113,9 @@ Each append also sets the workspace's `updated_at` to the checkpoint's time.
 `CheckpointStore.PutWorkspaceCheckpoint` also returns the archive size, which
 becomes `size_bytes`.
 
-The SQLite schema version is bumped and older state directories are
-rejected, per the pre-compatibility rule.
+The SQLite schema changes in place. Its version restarts at 1, and any
+database written under another version, including every earlier one up to
+12, is rejected per the pre-compatibility rule.
 
 ### Retention
 
