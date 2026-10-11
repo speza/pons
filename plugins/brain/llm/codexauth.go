@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/samperrin/pons/internal/advisorylock"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -165,7 +166,7 @@ func saveAuthEntry(storePath, id string, cred ponsAuthFile) error {
 		return err
 	}
 	defer f.Close()
-	unlock := lockFileExclusive(f)
+	unlock := advisorylock.Exclusive(f)
 	defer unlock()
 
 	var store authStore

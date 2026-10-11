@@ -64,6 +64,18 @@ func main() {
 		return
 	}
 
+	if mode == "bundled" && len(os.Args) > 1 && os.Args[1] == "mcp" {
+		home, _ := os.UserHomeDir()
+		if err := runMCP(rootCtx, os.Args[2:], os.Stdin, os.Stdout, os.Stderr, home); err != nil {
+			if !errors.Is(err, flag.ErrHelp) {
+				logger.Printf("mcp: %v", err)
+			}
+			stop()
+			os.Exit(1)
+		}
+		return
+	}
+
 	provider := flag.String("provider", "anthropic", "LLM provider: anthropic | openai | codex | opencode-go | openrouter")
 	model := flag.String("model", "", "model id (default: provider default)")
 	baseURL := flag.String("base-url", "", "override provider endpoint (for OpenAI-compatible servers)")
@@ -325,6 +337,12 @@ func main() {
 		}
 	}
 
+	mcpManager, err := newMCPManager(home, globalCfg.MCPServers, *pluginMaxResultBytes)
+	if err != nil {
+		logger.Printf("%v", err)
+		os.Exit(1)
+	}
+
 	serverLogger := newServerLogger(os.Stderr, *debug)
 	serverLogger.Info("runtime state selected", "state_dir", statePath)
 	serverOpts := serverOptions{
@@ -332,7 +350,7 @@ func main() {
 		MaxConcurrent: *runtimeConcurrency, MaxTurns: *maxTurns, Brain: brainConfig, ProviderSlot: primary.ID,
 		FSReadBytes: *fsReadBytes, BashTimeout: *bashTimeout, BashMaxLines: *bashMaxLines, BashMaxBytes: *bashMaxBytes,
 		PluginPaths: handsPluginPaths, HostSources: hostSources,
-		PluginPath: *pluginPath, PluginMaxResultBytes: *pluginMaxResultBytes, Debug: *debug,
+		PluginPath: *pluginPath, PluginMaxResultBytes: *pluginMaxResultBytes, Debug: *debug, MCP: mcpManager,
 		Sandbox: *sandbox, E2BTemplate: *e2bTemplate, E2BHandsPath: *e2bHandsPath,
 		GitRepository: *gitRepository, GitRevision: selectedGitRevision,
 		GitAllRepositories: *gitAllRepositories,

@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/samperrin/pons/plugins/hostconfig"
+	"github.com/samperrin/pons/plugins/mcp"
 )
 
 // fallbackSettings is one fallback provider slot in a config file.
@@ -79,6 +80,9 @@ type settings struct {
 	Fallbacks            []fallbackSettings   `json:"fallbacks,omitempty"`
 	DefaultProviderID    *string              `json:"default_provider_id,omitempty"`
 	Providers            []providerSettings   `json:"providers,omitempty"`
+	// MCPServers keeps the camelCase shape other MCP clients use, so an
+	// existing snippet can be pasted in.
+	MCPServers map[string]mcp.ServerConfig `json:"mcpServers,omitempty"`
 }
 
 // orderedProviders validates the providers list and returns it
@@ -138,6 +142,9 @@ func (s settings) validate() error {
 	if err := hostconfig.Decode(s.Plugins); err != nil {
 		return err
 	}
+	if err := mcp.ValidateServers(s.MCPServers); err != nil {
+		return fmt.Errorf("config %w", err)
+	}
 	return nil
 }
 
@@ -167,8 +174,10 @@ func loadSettings(home, workspace string) (settings, error) {
 			return settings{}, err
 		}
 		if workspace != "" && path == filepath.Join(workspace, ".pons.json") {
-			if _, ok := m["plugins"]; ok {
-				return settings{}, fmt.Errorf("config %q: plugins is allowed only in ~/.pons/config.json", path)
+			for _, key := range []string{"plugins", "mcpServers"} {
+				if _, ok := m[key]; ok {
+					return settings{}, fmt.Errorf("config %q: %s is allowed only in ~/.pons/config.json", path, key)
+				}
 			}
 		}
 		if hasE2BAPIKey(m["environment"]) {

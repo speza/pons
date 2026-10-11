@@ -175,6 +175,7 @@ func TestActionPolicyRulesAndGeneratedConfidence(t *testing.T) {
 		`{"rules":[{"action":"maybe","tools":["bash"]}]}`,
 		`{"rules":[{"action":"ask","tools":[]}]}`,
 		`{"rules":[{"action":"ask","tools":[""]}]}`,
+		`{"rules":[{"action":"deny","tools":["mcp__github__["]}]}`,
 	} {
 		if err := Decode(Settings{pluginEntryForTest("action_policy", true, config)}); err == nil {
 			t.Fatalf("accepted invalid action_policy config %s", config)

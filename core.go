@@ -206,6 +206,8 @@ type ToolSource struct {
 	CapabilityVersion int    `json:"capability_version,omitempty"`
 	Executable        string `json:"executable,omitempty"`
 	External          bool   `json:"external,omitempty"`
+	// Server names the remote server behind a tool that an adapter proxies.
+	Server string `json:"server,omitempty"`
 }
 
 // ToolDef is what a tool plugin registers: the executor plus its schema.

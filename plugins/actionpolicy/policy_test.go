@@ -126,9 +126,12 @@ func TestToolRulesWithoutClassifier(t *testing.T) {
 	policy := Policy{Rules: []Rule{
 		ToolRule(pons.PermissionAllow, "rule_allow", "*"),
 		ToolRule(pons.PermissionAsk, "shell_review", "bash"),
+		ToolRule(pons.PermissionDeny, "no_deletes", "mcp__github__delete_*"),
 	}}
 	for kind, want := range map[protocol.ActionKind]pons.Permission{
 		"bash": pons.PermissionAsk, "read": pons.PermissionAllow,
+		"mcp__github__delete_repo": pons.PermissionDeny, "mcp__github__get_issue": pons.PermissionAllow,
+		"mcp__gitlab__delete_repo": pons.PermissionAllow,
 	} {
 		decision, err := policy.decide(context.Background(), pons.ToolCallStartInput{Action: protocol.Action{Kind: kind}})
 		if err != nil || decision.Permission != want {

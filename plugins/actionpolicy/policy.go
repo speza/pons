@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"path"
 	"slices"
 
 	"github.com/samperrin/pons"
@@ -33,13 +34,22 @@ func (f ClassifierFunc) Assess(ctx context.Context, req pons.ToolCallStartInput)
 	return f(ctx, req)
 }
 
-// ToolRule matches calls to the named tool kinds; "*" matches every tool.
+// ToolRule matches calls to tool kinds by name or glob pattern, such as
+// "mcp__github__*"; "*" matches every tool. Patterns use path.Match syntax,
+// and a malformed one matches nothing: check them with ValidToolPattern.
 func ToolRule(action pons.Permission, reasonCode string, kinds ...string) Rule {
 	return Rule{Action: action, ReasonCode: reasonCode, Match: func(req pons.ToolCallStartInput) bool {
 		return slices.ContainsFunc(kinds, func(kind string) bool {
-			return kind == "*" || kind == string(req.Action.Kind)
+			matched, err := path.Match(kind, string(req.Action.Kind))
+			return err == nil && matched
 		})
 	}}
+}
+
+// ValidToolPattern reports whether ToolRule can match with this pattern.
+func ValidToolPattern(pattern string) bool {
+	_, err := path.Match(pattern, "")
+	return pattern != "" && err == nil
 }
 
 // Policy applies Deny, Ask, then Allow rules, independent of declaration

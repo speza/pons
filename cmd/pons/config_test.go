@@ -138,12 +138,12 @@ func TestLoadSettingsGlobalPlugins(t *testing.T) {
 }
 
 func TestLoadSettingsRejectsProjectPlugins(t *testing.T) {
-	for _, key := range []string{"plugins", "action_policy"} {
+	for _, key := range []string{"plugins", "mcpServers", "action_policy"} {
 		t.Run(key, func(t *testing.T) {
 			ws := t.TempDir()
 			write(t, filepath.Join(ws, ".pons.json"), `{"`+key+`":null}`)
 			_, err := loadSettings(t.TempDir(), ws)
-			if err == nil || (key == "plugins" && !strings.Contains(err.Error(), "allowed only")) {
+			if err == nil || (key != "action_policy" && !strings.Contains(err.Error(), "allowed only")) {
 				t.Fatalf("expected project config to reject %s, got %v", key, err)
 			}
 		})
