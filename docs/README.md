@@ -37,6 +37,10 @@ Start with the [project README](../README.md), then use this index.
   details the first slice of phase 6, and the
   [workspace checkpoint history spec](proposals/persistent-agents/workspace-checkpoints.md)
   the second.
+- **MCP integrations:** integrations are MCP servers, added through a
+  built-in MCP plugin (ADR-0025). The
+  [remote servers spec](proposals/mcp-integrations/remote-servers.md) details
+  the first slice: remote servers with token auth.
 
 When a proposal ships, its design moves into `design/` and the relevant ADRs
 update their implementation status.
