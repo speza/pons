@@ -471,14 +471,7 @@ func TestResultMapping(t *testing.T) {
 
 	t.Run("payload names the server and tool", func(t *testing.T) {
 		result := call(t, core, "mcp__github__run", `{"case":"structured"}`)
-		var payload struct {
-			Server, Tool string
-			Structured   json.RawMessage
-		}
-		if err := json.Unmarshal(result.Payload, &payload); err != nil {
-			t.Fatal(err)
-		}
-		if payload.Server != "github" || payload.Tool != "run" || string(payload.Structured) != `{"count":3}` {
+		if string(result.Payload) != `{"server":"github","tool":"run"}` {
 			t.Fatalf("payload = %s", result.Payload)
 		}
 	})

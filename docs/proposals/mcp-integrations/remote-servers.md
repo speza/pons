@@ -316,10 +316,11 @@ A handler maps `protocol.Action` to `tools/call` and back:
   either cancels the request.
 - Text content blocks are joined into `ToolResult.Output`. Other blocks
   become a placeholder line such as `[image content omitted]`. With no text
-  content, `structuredContent` is rendered as JSON.
+  content, `structuredContent` is rendered as JSON. A result carries one
+  form, never both: servers repeat structured content as text.
 - A result with `isError` is `OK: false` with the server's text as `Error`.
   A transport or protocol failure is `OK: false` with a pons-written error.
-- `Payload` is `{"server": ..., "tool": ..., "structured": ...}`.
+- `Payload` is `{"server": ..., "tool": ...}`.
 - A response over the result limit (`plugin_max_result_bytes`, 1 MiB by
   default) fails the call rather than being truncated, as external plugins
   do.

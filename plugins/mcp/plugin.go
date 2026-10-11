@@ -120,11 +120,10 @@ func (p *runPlugin) Setup(core *pons.Core) error {
 	return core.AddHooks(hooks)
 }
 
-// payload is the structured result of an MCP tool call.
+// payload names where an MCP tool result came from.
 type payload struct {
-	Server     string          `json:"server"`
-	Tool       string          `json:"tool"`
-	Structured json.RawMessage `json:"structured,omitempty"`
+	Server string `json:"server"`
+	Tool   string `json:"tool"`
 }
 
 func (p *runPlugin) handler(entry *server, toolName string) pons.ToolHandler {
@@ -134,16 +133,16 @@ func (p *runPlugin) handler(entry *server, toolName string) pons.ToolHandler {
 			return protocol.ToolResult{Error: entry.failure(ctx, err).Error()}, nil
 		}
 
+		// A server sends structured content alongside the same data as text,
+		// so the result carries one form: the text, or the JSON without it.
 		text := entry.redact.text(result.Text)
-		// The redactor knows each secret's JSON-escaped forms too.
-		structured := json.RawMessage(entry.redact.text(string(result.Structured)))
-		if !json.Valid(structured) {
-			structured = nil
-		}
 		if text == "" {
-			text = string(structured)
+			// The redactor knows each secret's JSON-escaped forms too.
+			if structured := entry.redact.text(string(result.Structured)); json.Valid([]byte(structured)) {
+				text = structured
+			}
 		}
-		encoded, err := json.Marshal(payload{Server: entry.name, Tool: toolName, Structured: structured})
+		encoded, err := json.Marshal(payload{Server: entry.name, Tool: toolName})
 		if err != nil {
 			return protocol.ToolResult{}, err
 		}
