@@ -1,6 +1,6 @@
 # MCP remote servers spec
 
-**Status:** Proposed
+**Status:** Implemented
 **Date:** 2026-10-11
 **Related:** [ADR-0025](../../adr/adr-0025-mcp-integrations.md) delivery
 step 1 (in review, PR #26),
@@ -124,8 +124,9 @@ type session interface {
 }
 ```
 
-This review read SDK v1.6.0. The first implementation step confirms the same
-options exist in v1.8.0.
+The implementation uses v1.8.0. That version first tries the 2026-07-28
+protocol's stateless `server/discover` and falls back to the `initialize`
+handshake, so pons works with servers on either.
 
 ## Design
 
@@ -170,8 +171,9 @@ login is not supported yet.
 
 Named secrets live in `~/.pons/secrets.json`, beside `auth.json`: a JSON
 object of name to value, mode 0600 in a 0700 directory. Writes take the same
-advisory file lock as the auth store and replace the file atomically. A file
-that is not a regular file, or is readable by anyone else, is refused.
+advisory file lock as the auth store and rewrite the file in place under it.
+A file that is not a regular file, or is readable by anyone else, is
+refused.
 
 `auth.json` is not reused, because its single-entry fallback treats every
 entry as a Codex credential. Step 2 stores OAuth tokens in the same new
@@ -310,10 +312,14 @@ A handler maps `protocol.Action` to `tools/call` and back:
 - A response over the result limit (`plugin_max_result_bytes`, 1 MiB by
   default) fails the call rather than being truncated, as external plugins
   do.
+- A server that answers a call by asking for more input is treated as a
+  failed call.
 
 When a call fails with `ErrSessionMissing`, the server did not run it. The
 manager opens a new session and retries once. Any other failure is returned
-without a retry, because the call may have run.
+without a retry, because the call may have run. A session whose connection
+broke is dropped, and the tool listing at the start of the next run opens a
+new one.
 
 ### Untrusted results
 
@@ -410,8 +416,9 @@ the SDK, that records the requests it receives and can be told to misbehave.
 - **Late tools:** a tool the server adds between two runs appears in the
   second run only if it passes the filters.
 - **Secret isolation:** the fake server receives the header. The secret
-  value appears in no event, log line, tool result, classifier input, or
-  environment spec, including when the server echoes it back. A redirect to
+  value appears in no event, log line, tool result, tool description, or
+  classifier input, including when the server echoes it back. Hands are
+  covered by construction: the plugin has no path to the environment spec. A redirect to
   a second fake server is refused and that server receives nothing.
 - **Approval:** each row of the approval table; a deny rule for
   `mcp__<server>__*` wins under `allow`; an unresolved `ask` is denied with
