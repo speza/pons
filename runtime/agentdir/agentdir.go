@@ -55,7 +55,29 @@ type Settings struct {
 	Workspace string `json:"workspace"`
 	// MCPServers names the MCP servers the agent may use, in the mcpServers
 	// shape of the host configuration. It is nil when no server is granted.
-	MCPServers map[string]ponsruntime.MCPGrant `json:"mcpServers"`
+	MCPServers map[string]MCPGrant `json:"mcpServers"`
+}
+
+// MCPGrant is one mcpServers entry of agent.json, with the key spelling of
+// the host configuration.
+type MCPGrant struct {
+	EnabledTools  []string `json:"enabledTools,omitempty"`
+	DisabledTools []string `json:"disabledTools,omitempty"`
+}
+
+// Grants returns the settings' MCP grants in the agent definition's shape.
+func (s Settings) Grants() map[string]ponsruntime.MCPGrant {
+	if len(s.MCPServers) == 0 {
+		return nil
+	}
+	grants := make(map[string]ponsruntime.MCPGrant, len(s.MCPServers))
+	for server, grant := range s.MCPServers {
+		grants[server] = ponsruntime.MCPGrant{
+			EnabledTools:  grant.EnabledTools,
+			DisabledTools: grant.DisabledTools,
+		}
+	}
+	return grants
 }
 
 // Store reads agent directories and records their revisions.
@@ -92,7 +114,7 @@ func (s *Store) Load(agentID string) (Settings, string, error) {
 		return Settings{}, "", fmt.Errorf("agents: create %s: %w", dir, err)
 	}
 
-	defaults, err := json.MarshalIndent(Settings{MCPServers: map[string]ponsruntime.MCPGrant{}}, "", "  ")
+	defaults, err := json.MarshalIndent(Settings{MCPServers: map[string]MCPGrant{}}, "", "  ")
 	if err != nil {
 		return Settings{}, "", err
 	}

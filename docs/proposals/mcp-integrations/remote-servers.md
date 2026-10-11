@@ -247,8 +247,8 @@ filter passes a tool when `enabledTools` is empty or matches it, and
 `disabledTools` does not match it. Because the two are intersected, a grant
 can narrow but never widen.
 
-The grant becomes `AgentDefinition.MCPServers` (JSON `mcp_servers`, with the
-grant's own keys spelled as in `agent.json`), so it is part of the revision. The field is omitted when empty, so no grants
+The grant becomes `AgentDefinition.MCPServers` (JSON `mcp_servers`, with
+`enabled_tools` and `disabled_tools` per grant), so it is part of the revision. The field is omitted when empty, so no grants
 and an empty `mcpServers` object have the same revision.
 
 Host server settings (URL, host filters, approval mode) are not in the

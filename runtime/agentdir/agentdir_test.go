@@ -62,12 +62,19 @@ func TestLoadCreatesDefaultsOnceAndNeverOverwrites(t *testing.T) {
 	}
 
 	write(t, filepath.Join(dir, SettingsFile), `{"mcpServers":{"github":{"enabledTools":["get_*"],"disabledTools":["get_secret"]},"linear":{}}}`)
-	want := map[string]ponsruntime.MCPGrant{
+	want := map[string]MCPGrant{
 		"github": {EnabledTools: []string{"get_*"}, DisabledTools: []string{"get_secret"}},
 		"linear": {},
 	}
 	if settings, _, err = store.Load(ponsruntime.DefaultAgentID); err != nil || !reflect.DeepEqual(settings.MCPServers, want) {
 		t.Fatalf("mcpServers = %+v, %v", settings.MCPServers, err)
+	}
+
+	// The agent definition records the same grants in its own key spelling.
+	definition, err := json.Marshal(ponsruntime.AgentDefinition{MCPServers: settings.Grants()})
+	if err != nil || !strings.Contains(string(definition),
+		`"mcp_servers":{"github":{"enabled_tools":["get_*"],"disabled_tools":["get_secret"]},"linear":{}}`) {
+		t.Fatalf("definition = %s, %v", definition, err)
 	}
 }
 

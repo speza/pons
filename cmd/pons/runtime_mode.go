@@ -348,7 +348,7 @@ func defaultAgent(opts serverOptions, agents *agentdir.Store) (ponsruntime.Agent
 				filepath.Join(agents.Dir(ponsruntime.DefaultAgentID), agentdir.SettingsFile), server)
 		}
 	}
-	agent.MCPServers = settings.MCPServers
+	agent.MCPServers = settings.Grants()
 	if err := agents.Record(agent); err != nil {
 		return ponsruntime.AgentDefinition{}, err
 	}
