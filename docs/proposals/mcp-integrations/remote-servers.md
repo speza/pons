@@ -159,7 +159,8 @@ Validation happens at startup and names the server:
 - A project `.pons.json` that sets `mcpServers` is rejected, like `plugins`.
 
 `approvalMode` is the name this spec gives ADR-0025's per-server approval
-mode; the ADR does not name the key.
+mode; the ADR does not name the key. It is Codex's
+`default_tools_approval_mode` in the camelCase of its neighbours.
 
 An `http` server with no `Authorization` header is used without
 authentication. If it answers 401, its tools fail with an error saying OAuth
@@ -185,6 +186,16 @@ pons mcp set-secret github_token
   the value in. It is never an argument.
 - Names match `[A-Za-z0-9_-]{1,64}`. An empty value is rejected.
 - The command prints only the name it stored.
+
+```sh
+pons mcp tools github
+```
+
+`pons mcp tools <server>` connects to one configured server with its stored
+secrets and prints each tool's name, whether it is annotated read-only, and
+whether the host filters keep it. It lets the owner check a token and write
+filters without starting a conversation. It needs no running pons server and
+prints no header or secret. A disabled server is still checked.
 
 Reading without echo uses `golang.org/x/term`, a small new dependency on top
 of `golang.org/x/sys`, which pons already has.
@@ -347,17 +358,18 @@ Two small changes outside the plugin make this work as ADR-0025 describes:
    approvals will fill. `OnPermissionRequest` hooks still run first and can
    allow the call.
 
-**Consequence to decide on.** The runtime has no approval UI, so today every
+**Consequence.** The runtime has no approval UI, so today every
 run is one with no one to ask. Under the default mode `ask`, every call to a
 new server is denied until the owner sets `approvalMode` to `writes` or
 `allow`. This spec keeps `ask` as the default, as the ADR says, and has the
-server log a warning at startup for each granted server left on `ask`. The
-alternative is to default to `writes` until approvals exist.
+server log a warning at startup for each granted server left on `ask`. Defaulting to `writes` until approvals exist was considered and rejected: a
+new server should not act without the owner choosing that.
 
 ### Runner and startup
 
 - `cmd/pons/config.go`: `settings.MCPServers`; reject it in `.pons.json`.
-- `cmd/pons/main.go`: route `pons mcp ...` like `pons workspace ...`; build
+- `cmd/pons/main.go`: route `pons mcp set-secret|tools` like
+  `pons workspace ...`; build
   the `mcp.Manager` from global settings and pass it in `serverOptions`.
 - `defaultAgent`: validate the grant against the configured servers and set
   `AgentDefinition.MCPServers`.
@@ -388,6 +400,9 @@ the SDK, that records the requests it receives and can be told to misbehave.
 - **Secrets:** `set-secret` stores a piped value with mode 0600 and never
   prints it; a missing secret stops startup naming the command to run; a
   store readable by others is refused.
+- **`pons mcp tools`:** lists the fake server's tools with their read-only
+  and filter status, and prints no secret; a failed connection exits
+  non-zero with the server's error.
 - **Grants:** an agent sees only the servers it names and the tools that
   pass both filters; a grant cannot widen a host filter; an unknown server
   fails startup; a grant change changes the revision; a definition with no
@@ -415,7 +430,7 @@ the SDK, that records the requests it receives and can be told to misbehave.
 ## Documentation
 
 - `README.md`: a "MCP servers" section covering host config, `pons mcp
-  set-secret`, the `agent.json` grant, approval modes, and what `ask` does
+  set-secret`, `pons mcp tools`, the `agent.json` grant, approval modes, and what `ask` does
   today; the `mcpServers` field in the agent section; pattern support in
   action policy rules; `approval_unavailable`; the revision now includes the
   grant; the new dependencies.
@@ -430,22 +445,24 @@ One task, in four steps that each leave `make check` passing:
 1. **Config and secrets.** `mcpServers` parsing and validation, the secret
    store, and `pons mcp set-secret`.
 2. **Plugin.** The SDK-backed client, `Manager`, tool registration, result
-   mapping, limits, and the fake server.
+   mapping, limits, the fake server, and `pons mcp tools`.
 3. **Grants and approval.** `agent.json` grants, the revision, runner
    wiring, the approval hook, rule patterns, and `approval_unavailable`.
 4. **Documentation.**
 
-## Open questions
+## Decisions
 
-- **Client library.** Official SDK, as recommended, or a minimal client?
-- **Default approval mode.** Keep `ask` although it denies every call today,
-  or default to `writes` until approvals exist?
-- **Config key.** Is `approvalMode` the right name?
-- **Secret store.** A new `~/.pons/secrets.json`, or restructure `auth.json`
-  to hold both?
-- **`pons mcp tools <server>`.** A command that connects and prints a
-  server's tool names would let the owner check a token and write filters
-  without starting a conversation. It is small; should it join this slice?
+Settled in review on 2026-10-11:
+
+- **Client library:** the official SDK. Go has no OAuth support in the
+  standard library. `golang.org/x/oauth2` covers the token exchange and
+  refresh but not MCP's server discovery or client registration, which a
+  minimal client would have to add by hand in step 2.
+- **Default approval mode:** `ask`, with the startup warning.
+- **Config key:** `approvalMode`.
+- **Secret store:** a new `~/.pons/secrets.json`. Restructuring `auth.json`
+  would change the Codex login and refresh path for no gain.
+- **`pons mcp tools <server>`:** included in this slice.
 
 ## Later slices
 
