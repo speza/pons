@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -16,12 +17,12 @@ import (
 // maxListedTools bounds how many tools one server may report before filters.
 const maxListedTools = 1024
 
-// errSessionGone reports that the server no longer knows the session, so the
-// request that discovered it did not run.
+// errSessionGone reports that the server no longer knows the session. Every
+// call in flight on the session fails with it, including ones the server had
+// already accepted.
 var errSessionGone = errors.New("mcp: server ended the session")
 
-// errSessionBroken reports a session that can no longer be used. Unlike
-// errSessionGone, the request that discovered it may have run.
+// errSessionBroken reports a session whose connection can no longer be used.
 var errSessionBroken = errors.New("mcp: connection lost")
 
 // tool is one entry of a server's tool list, as the server reported it.
@@ -158,6 +159,23 @@ func sessionError(err error) error {
 	}
 }
 
+// callState is what the transport learned about one tool call's request. It
+// travels in the call's context, so a failure that reaches several calls at
+// once can still be told apart per call.
+type callState struct {
+	// sent is set once the request was handed to the network.
+	sent atomic.Bool
+	// refused is set when the server answered this request by rejecting its
+	// session, which means it did not run the tool.
+	refused atomic.Bool
+}
+
+type callStateKey struct{}
+
+func withCallState(ctx context.Context, state *callState) context.Context {
+	return context.WithValue(ctx, callStateKey{}, state)
+}
+
 // errUnauthorized is the error for an HTTP 401 from a server.
 type errUnauthorized struct{ hasAuthorization bool }
 
@@ -182,10 +200,17 @@ func (t headerTransport) RoundTrip(request *http.Request) (*http.Response, error
 	for name, value := range t.headers {
 		request.Header.Set(name, value)
 	}
+	state, _ := request.Context().Value(callStateKey{}).(*callState)
+	if state != nil {
+		state.sent.Store(true)
+	}
 
 	response, err := t.base.RoundTrip(request)
 	if err != nil {
 		return nil, err
+	}
+	if state != nil && response.StatusCode == http.StatusNotFound && request.Header.Get("Mcp-Session-Id") != "" {
+		state.refused.Store(true)
 	}
 	if response.StatusCode == http.StatusUnauthorized {
 		_ = response.Body.Close()

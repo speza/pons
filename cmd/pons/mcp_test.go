@@ -98,6 +98,25 @@ func TestMCPToolsListsAServersToolsWithStoredSecrets(t *testing.T) {
 	}
 }
 
+func TestMCPToolsFailsWhenARunWouldGetNoTools(t *testing.T) {
+	server := mcptest.New(t)
+	tools := make([]mcptest.Tool, mcp.MaxToolsPerServer+1)
+	for i := range tools {
+		tools[i].Name = fmt.Sprintf("tool_%d", i)
+	}
+	server.SetTools(tools...)
+	home := mcpHome(t, fmt.Sprintf(`{"type":"http","url":%q}`, server.URL))
+
+	var stdout bytes.Buffer
+	err := runMCP(t.Context(), []string{"tools", "github"}, strings.NewReader(""), &stdout, io.Discard, home)
+	if err == nil || !strings.Contains(err.Error(), "more than the limit of 128") {
+		t.Fatalf("error = %v, want the tool limit", err)
+	}
+	if !strings.Contains(stdout.String(), "tool_128") {
+		t.Fatalf("the listing was not printed before the error:\n%s", stdout.String())
+	}
+}
+
 func TestMCPCommandFailures(t *testing.T) {
 	server := mcptest.New(t)
 	server.FailWith(http.StatusUnauthorized)

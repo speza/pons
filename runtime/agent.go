@@ -56,10 +56,11 @@ type AgentDefinition struct {
 }
 
 // MCPGrant narrows the tools of one granted MCP server by glob pattern. An
-// empty grant takes every tool the host configuration allows.
+// empty grant takes every tool the host configuration allows. Its fields keep
+// the mcpServers spelling, because agent.json shares this type.
 type MCPGrant struct {
-	EnabledTools  []string `json:"enabled_tools,omitempty"`
-	DisabledTools []string `json:"disabled_tools,omitempty"`
+	EnabledTools  []string `json:"enabledTools,omitempty"`
+	DisabledTools []string `json:"disabledTools,omitempty"`
 }
 
 // AgentSummary is the read-only agent identity shown to clients.

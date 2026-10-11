@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -56,11 +55,15 @@ func decodeSecrets(data []byte, path string) (map[string]string, error) {
 		// A decode error can quote the file, so it is not passed on.
 		return nil, fmt.Errorf("secret store %q is not a JSON object of names to values", path)
 	}
+	if secrets == nil {
+		secrets = map[string]string{}
+	}
 	return secrets, nil
 }
 
 // SetSecret stores one named secret, keeping every other entry. Concurrent
-// pons processes serialize on an advisory lock of the store file.
+// pons processes serialize on an advisory lock beside the store, and the
+// store is replaced in one step so a reader never sees it half written.
 func SetSecret(path, name, value string) error {
 	if !ValidSecretName(name) {
 		return fmt.Errorf("secret name %q must match %s", name, secretNamePattern)
@@ -72,24 +75,18 @@ func SetSecret(path, name, value string) error {
 		return errors.New("secret value must be a single line")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("secret store: %w", err)
 	}
-	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
-		return fmt.Errorf("secret store %q must be a regular file", path)
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("secret store: %w", err)
 	}
-	defer file.Close()
-	defer advisorylock.Exclusive(file)()
+	defer lock.Close()
+	defer advisorylock.Exclusive(lock)()
 
-	data, err := io.ReadAll(file)
-	if err != nil {
-		return fmt.Errorf("secret store: %w", err)
-	}
-	secrets, err := decodeSecrets(data, path)
+	secrets, err := LoadSecrets(path)
 	if err != nil {
 		return err
 	}
@@ -99,13 +96,20 @@ func SetSecret(path, name, value string) error {
 		return fmt.Errorf("secret store: %w", err)
 	}
 
-	if err := errors.Join(file.Truncate(0), file.Chmod(0o600)); err != nil {
+	// CreateTemp makes the file readable only by its owner.
+	temp, err := os.CreateTemp(dir, ".secrets-*")
+	if err != nil {
 		return fmt.Errorf("secret store: %w", err)
 	}
-	if _, err := file.WriteAt(append(encoded, '\n'), 0); err != nil {
+	defer os.Remove(temp.Name())
+	_, writeErr := temp.Write(append(encoded, '\n'))
+	if err := errors.Join(writeErr, temp.Sync(), temp.Close()); err != nil {
 		return fmt.Errorf("secret store: %w", err)
 	}
-	return file.Sync()
+	if err := os.Rename(temp.Name(), path); err != nil {
+		return fmt.Errorf("secret store: %w", err)
+	}
+	return nil
 }
 
 // validateHeaderValue accepts ${secret:<name>} references and rejects every
@@ -149,17 +153,34 @@ func resolveHeaders(headers, secrets map[string]string) (resolved map[string]str
 // redactor replaces secret values in text a server returned.
 type redactor struct{ replacer *strings.Replacer }
 
+// newRedactor also covers each secret as it appears inside a JSON string,
+// where characters such as & and " are escaped.
 func newRedactor(secrets []string) redactor {
 	var pairs []string
 	for _, secret := range secrets {
-		if len(secret) >= minRedactedSecret {
-			pairs = append(pairs, secret, "[secret]")
+		if len(secret) < minRedactedSecret {
+			continue
+		}
+		for _, form := range []string{jsonString(secret, true), jsonString(secret, false), secret} {
+			pairs = append(pairs, form, "[secret]")
 		}
 	}
 	if len(pairs) == 0 {
 		return redactor{}
 	}
 	return redactor{replacer: strings.NewReplacer(pairs...)}
+}
+
+// jsonString returns value as the contents of a JSON string literal.
+func jsonString(value string, escapeHTML bool) string {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(escapeHTML)
+	if err := encoder.Encode(value); err != nil {
+		return value
+	}
+	quoted := strings.TrimSpace(buffer.String())
+	return strings.TrimSuffix(strings.TrimPrefix(quoted, `"`), `"`)
 }
 
 func (r redactor) text(value string) string {

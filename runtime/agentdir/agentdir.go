@@ -23,12 +23,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	pathpkg "path"
 	"path/filepath"
 	"slices"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/samperrin/pons/internal/toolpattern"
 	ponsruntime "github.com/samperrin/pons/runtime"
 )
 
@@ -55,13 +55,7 @@ type Settings struct {
 	Workspace string `json:"workspace"`
 	// MCPServers names the MCP servers the agent may use, in the mcpServers
 	// shape of the host configuration. It is nil when no server is granted.
-	MCPServers map[string]MCPGrant `json:"mcpServers"`
-}
-
-// MCPGrant narrows one granted server's tools by glob pattern.
-type MCPGrant struct {
-	EnabledTools  []string `json:"enabledTools,omitempty"`
-	DisabledTools []string `json:"disabledTools,omitempty"`
+	MCPServers map[string]ponsruntime.MCPGrant `json:"mcpServers"`
 }
 
 // Store reads agent directories and records their revisions.
@@ -98,7 +92,7 @@ func (s *Store) Load(agentID string) (Settings, string, error) {
 		return Settings{}, "", fmt.Errorf("agents: create %s: %w", dir, err)
 	}
 
-	defaults, err := json.MarshalIndent(Settings{MCPServers: map[string]MCPGrant{}}, "", "  ")
+	defaults, err := json.MarshalIndent(Settings{MCPServers: map[string]ponsruntime.MCPGrant{}}, "", "  ")
 	if err != nil {
 		return Settings{}, "", err
 	}
@@ -286,7 +280,7 @@ func readSettings(path string) (Settings, error) {
 	}
 	for server, grant := range settings.MCPServers {
 		for _, pattern := range slices.Concat(grant.EnabledTools, grant.DisabledTools) {
-			if _, err := pathpkg.Match(pattern, ""); err != nil || pattern == "" {
+			if !toolpattern.Valid(pattern) {
 				return Settings{}, fmt.Errorf("agents: %s: mcpServers.%s: tool pattern %q is malformed", path, server, pattern)
 			}
 		}

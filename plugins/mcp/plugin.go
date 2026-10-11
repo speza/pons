@@ -63,17 +63,29 @@ func (p *runPlugin) Setup(core *pons.Core) error {
 	}
 
 	registered := make(map[protocol.ActionKind]registeredTool)
-	var unavailable []string
+	// The owner is told why a server is unavailable. The brain is told only
+	// that it is: the reason can be text the server chose, and host context
+	// is not labeled as untrusted the way a tool result is.
+	var reasons, missing []string
+	unavailable := func(entry *server, reason string) {
+		reasons = append(reasons, reason)
+		missing = append(missing, fmt.Sprintf("MCP server %q is unavailable in this run, so its tools are missing.", entry.name))
+	}
 	for i, entry := range granted {
 		if failures[i] != nil {
-			unavailable = append(unavailable, entry.failure(p.ctx, failures[i]).Error())
+			unavailable(entry, entry.failure(p.ctx, failures[i]).Error())
 			continue
 		}
-		selected := p.selectTools(entry, listed[i])
-		if len(selected) > maxToolsPerServer {
-			unavailable = append(unavailable, fmt.Sprintf(
+		selected, infos := entry.selectTools(listed[i], p.grants[entry.name])
+		for _, info := range infos {
+			if strings.HasPrefix(info.Status, "skipped") {
+				p.logger.Debug("mcp tool skipped", "server", entry.name, "status", info.Status)
+			}
+		}
+		if len(selected) > MaxToolsPerServer {
+			unavailable(entry, fmt.Sprintf(
 				"MCP server %q offers %d tools, more than the limit of %d; narrow enabledTools",
-				entry.name, len(selected), maxToolsPerServer))
+				entry.name, len(selected), MaxToolsPerServer))
 			continue
 		}
 
@@ -95,41 +107,17 @@ func (p *runPlugin) Setup(core *pons.Core) error {
 	}
 
 	hooks := pons.Hooks{OnToolCallStart: approvalHook(registered)}
-	if len(unavailable) > 0 {
-		notice := strings.Join(unavailable, "\n")
+	if len(reasons) > 0 {
+		notice := strings.Join(reasons, "\n")
 		p.logger.Warn("mcp servers unavailable", "detail", notice)
 		hooks.OnAgentStart = func(context.Context, pons.AgentStartInput) (pons.AgentStartOutput, error) {
 			return pons.AgentStartOutput{
 				SystemMessage:     notice,
-				AdditionalContext: "These tools are unavailable in this run. " + notice,
+				AdditionalContext: strings.Join(missing, "\n"),
 			}, nil
 		}
 	}
 	return core.AddHooks(hooks)
-}
-
-// selectTools applies the host filter, the grant filter, and the limits on
-// what a server may report, keeping the server's order.
-func (p *runPlugin) selectTools(entry *server, tools []tool) []preparedTool {
-	host, grant := entry.config.filter(), p.grants[entry.name]
-	seen := make(map[string]bool, len(tools))
-	var selected []preparedTool
-	for _, reported := range tools {
-		if !host.allows(reported.Name) || !grant.allows(reported.Name) {
-			continue
-		}
-		prepared, reason := entry.prepare(reported)
-		if reason == "" && seen[reported.Name] {
-			reason = "tool is listed twice"
-		}
-		if reason != "" {
-			p.logger.Debug("mcp tool skipped", "server", entry.name, "reason", reason)
-			continue
-		}
-		seen[reported.Name] = true
-		selected = append(selected, prepared)
-	}
-	return selected
 }
 
 // payload is the structured result of an MCP tool call.
@@ -147,6 +135,7 @@ func (p *runPlugin) handler(entry *server, toolName string) pons.ToolHandler {
 		}
 
 		text := entry.redact.text(result.Text)
+		// The redactor knows each secret's JSON-escaped forms too.
 		structured := json.RawMessage(entry.redact.text(string(result.Structured)))
 		if !json.Valid(structured) {
 			structured = nil

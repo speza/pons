@@ -149,10 +149,12 @@ in.
 
 Validation happens at startup and names the server:
 
-- The name matches `[a-z0-9][a-z0-9_-]*`, is at most 32 characters, and does
-  not contain `__`, so tool names split unambiguously.
+- The name is lowercase letters, digits, `_`, and `-`, at most 32
+  characters, starts and ends with a letter or digit, and does not contain
+  `__`, so a tool name always splits at the first `__` after the prefix.
 - `url` uses `https`, or `http` when the host is `localhost` or a loopback
-  IP literal. It has no user info and no fragment.
+  IP literal. It has no user info, no fragment, and no `${...}` reference:
+  secrets go in `headers`.
 - A header value that contains `${` in any form other than
   `${secret:<name>}` is an error. Environment expansion is not supported.
 - Patterns use `path.Match` syntax; a malformed pattern is an error.
@@ -170,10 +172,10 @@ login is not supported yet.
 ### Secrets
 
 Named secrets live in `~/.pons/secrets.json`, beside `auth.json`: a JSON
-object of name to value, mode 0600 in a 0700 directory. Writes take the same
-advisory file lock as the auth store and rewrite the file in place under it.
-A file that is not a regular file, or is readable by anyone else, is
-refused.
+object of name to value, mode 0600 in a 0700 directory. A write takes an
+advisory lock on `secrets.json.lock` and replaces the file in one step, so a
+reader never sees it half written. A file that is not a regular file, or is
+readable by anyone else, is refused.
 
 `auth.json` is not reused, because its single-entry fallback treats every
 entry as a Codex credential. Step 2 stores OAuth tokens in the same new
@@ -213,8 +215,11 @@ there:
 - The transport refuses redirects, so a header cannot follow one to another
   host.
 - Any resolved secret value of eight bytes or more is replaced with
-  `[secret]` in tool results and error text before they leave the plugin.
-  This covers a server that echoes its request.
+  `[secret]` in tool results, tool descriptions, input schemas, and error
+  text before they leave the plugin, including where JSON encoding has
+  escaped it. This covers a server that echoes its request.
+- Values in the URL's query string are redacted the same way, because
+  transport errors quote the URL.
 
 ### Agent grants
 
@@ -242,8 +247,8 @@ filter passes a tool when `enabledTools` is empty or matches it, and
 `disabledTools` does not match it. Because the two are intersected, a grant
 can narrow but never widen.
 
-The grant becomes `AgentDefinition.MCPServers` (JSON `mcp_servers`), so it is
-part of the revision. The field is omitted when empty, which keeps the
+The grant becomes `AgentDefinition.MCPServers` (JSON `mcp_servers`, with the
+grant's own keys spelled as in `agent.json`), so it is part of the revision. The field is omitted when empty, which keeps the
 fingerprint of every existing revision unchanged.
 
 Host server settings (URL, host filters, approval mode) are not in the
@@ -276,8 +281,10 @@ tool that was not registered gets the core's usual "no plugin provides"
 result.
 
 A server that cannot be reached at run start does not fail the run. Its
-tools are absent, and an `OnAgentStart` hook tells the owner and the brain
-which server is unavailable and why.
+tools are absent, and an `OnAgentStart` hook tells the owner which server is
+unavailable and why, in at most 512 bytes of the server's error. The brain is
+told only that the server is unavailable: host context is not labeled as
+untrusted the way a tool result is, so text a server chose never goes there.
 
 A name conflict with an already registered tool fails `Setup`, as `AddTool`
 does today.
@@ -290,11 +297,15 @@ The tool list is untrusted input that ends up in the brain's prompt.
 | --- | --- | --- |
 | Tool name | `[A-Za-z0-9_-]+`, full name at most 64 characters | Tool skipped, logged |
 | Description | 2 KiB | Truncated |
-| Input schema | 64 KiB, must be a JSON object | Tool skipped, logged |
+| Input schema | 64 KiB; an object schema with no top-level `anyOf`, `oneOf`, `allOf`, `not`, or `enum` | Tool skipped, logged |
 | Tools per server, after filters | 128 | Server unavailable for the run, with an error asking for a narrower filter |
 
 The 64-character limit is the strictest tool-name limit among the supported
-providers.
+providers. A schema is normalized to `"type": "object"` with a `properties`
+member, because one schema a provider rejects would fail every model request
+of the run. A response from a server is capped at four times the result
+limit and at least 8 MiB, so a small result limit does not cut off a large
+tool list.
 
 ### Calls and results
 
@@ -315,11 +326,17 @@ A handler maps `protocol.Action` to `tools/call` and back:
 - A server that answers a call by asking for more input is treated as a
   failed call.
 
-When a call fails with `ErrSessionMissing`, the server did not run it. The
-manager opens a new session and retries once. Any other failure is returned
-without a retry, because the call may have run. A session whose connection
-broke is dropped, and the tool listing at the start of the next run opens a
-new one.
+A lost session is replaced, but a call is sent again only when it provably
+did not run. A session ending fails every call in flight on it, including
+ones the server already accepted, so the SDK's error alone is not proof. The
+plugin's HTTP transport records, per call, whether the request was sent and
+whether the server answered that request with 404 for its session. The call
+is retried once on a new session when its own request was refused that way or
+was never sent; otherwise the failure is returned.
+
+Listing tools changes nothing, so any failed listing is retried once on a new
+session. That also recovers, at the start of the next run, a session a server
+lost without the 404 the specification describes.
 
 ### Untrusted results
 
@@ -355,7 +372,8 @@ Two small changes outside the plugin make this work as ADR-0025 describes:
 
 1. **Patterns in action policy rules.** `actionpolicy.ToolRule` matches
    tool kinds with `path.Match`, so `mcp__github__*` works. `"*"` still
-   matches every tool, and existing exact names behave as before. A
+   matches every tool and a name always matches itself, whatever characters
+   they contain. Rules, host filters, and grants share one matcher. A
    malformed pattern fails startup.
 2. **`approval_unavailable`.** The runtime installs an approval handler that
    reports that no one can answer. The core then denies an unresolved `ask`
@@ -426,7 +444,9 @@ the SDK, that records the requests it receives and can be told to misbehave.
 - **Results:** text, non-text, structured, and `isError` results map as
   described; an oversized result fails; an MCP result is a `tool_result`
   item with its server's kind in classifier context.
-- **Resilience:** an expired session is reopened and the call retried once;
+- **Resilience:** an expired session is reopened and a refused call retried
+  once, while a call in flight when the session ends is never sent twice; a
+  session lost in a non-standard way is recovered;
   a hung call honors its deadline and cancellation; an unreachable server
   leaves the run working, with a notice.
 - **Sampling:** the `initialize` request advertises no sampling, and a

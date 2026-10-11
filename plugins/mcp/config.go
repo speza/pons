@@ -13,11 +13,12 @@ import (
 	"maps"
 	"net"
 	"net/url"
-	"path"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/samperrin/pons/internal/toolpattern"
 )
 
 // Approval modes are a server's default answer for its tools.
@@ -36,7 +37,9 @@ const (
 	maxServerNameLength   = 32
 )
 
-var serverNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+// A name cannot end in an underscore or contain two in a row, so
+// mcp__<server>__<tool> always splits at the first "__" after the prefix.
+var serverNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$`)
 
 // ServerConfig is one entry of the host configuration's mcpServers map, in
 // the shape other MCP clients use. Command, Args, Env, and OAuth are decoded
@@ -68,10 +71,7 @@ type Filter struct {
 // Validate rejects malformed patterns.
 func (f Filter) Validate() error {
 	for _, pattern := range slices.Concat(f.Enabled, f.Disabled) {
-		if pattern == "" {
-			return errors.New("tool pattern must not be empty")
-		}
-		if _, err := path.Match(pattern, ""); err != nil {
+		if !toolpattern.Valid(pattern) {
 			return fmt.Errorf("tool pattern %q is malformed", pattern)
 		}
 	}
@@ -79,10 +79,7 @@ func (f Filter) Validate() error {
 }
 
 func (f Filter) allows(tool string) bool {
-	matches := func(pattern string) bool {
-		ok, _ := path.Match(pattern, tool)
-		return ok
-	}
+	matches := func(pattern string) bool { return toolpattern.Match(pattern, tool) }
 	if len(f.Enabled) > 0 && !slices.ContainsFunc(f.Enabled, matches) {
 		return false
 	}
@@ -179,6 +176,9 @@ func validateServer(name string, config ServerConfig) error {
 func validateURL(raw string) error {
 	if raw == "" {
 		return errors.New("url is required")
+	}
+	if strings.Contains(raw, "${") {
+		return errors.New("secret references are supported only in headers, not in url")
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {

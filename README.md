@@ -572,7 +572,7 @@ Restart the server after changing configuration, a secret, or a grant.
 | Field | Meaning | Default |
 | --- | --- | --- |
 | `type` | `http`; `stdio` servers are not supported yet | required |
-| `url` | HTTPS endpoint, or HTTP on `localhost` or a loopback address | required |
+| `url` | HTTPS endpoint, or HTTP on `localhost` or a loopback address; put keys in `headers`, not here | required |
 | `headers` | Sent on every request; values may contain `${secret:<name>}` | none |
 | `enabled` | `false` keeps the entry without using it | `true` |
 | `approvalMode` | `ask`, `writes`, or `allow` | `ask` |
@@ -589,7 +589,8 @@ Restart the server after changing configuration, a secret, or a grant.
 - **Grants.** An agent sees only the servers its `agent.json` names. A tool
   must pass the host's filters and the grant's, so a grant can narrow a
   server but never widen it. `mcpServers` is rejected in a project
-  `.pons.json`.
+  `.pons.json`. A server may add at most 128 tools to a run; past that it
+  is unavailable until a filter narrows it, and `pons mcp tools` says so.
 - **Approval.** `allow` runs every tool; `writes` runs tools the server
   annotates as read-only and asks for the rest; `ask` asks for every call.
   The annotation comes from the server, so use `writes` only with a server you
@@ -604,7 +605,8 @@ Restart the server after changing configuration, a secret, or a grant.
   `plugin_max_result_bytes` fails.
 - **Failures.** A server that cannot be reached when a run starts does not
   fail the run: its tools are absent and a notice says why. An expired
-  session is reopened. pons offers servers no sampling, roots, or
+  session is reopened; a call is repeated only when the server provably did
+  not run it, so a call caught by an expiry can fail and need retrying. pons offers servers no sampling, roots, or
   elicitation.
 
 Adding a server means trusting it with its token and with whatever the agent

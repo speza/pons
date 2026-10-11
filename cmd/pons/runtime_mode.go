@@ -341,20 +341,14 @@ func defaultAgent(opts serverOptions, agents *agentdir.Store) (ponsruntime.Agent
 		PluginPaths:     slices.Clone(opts.PluginPaths),
 		WorkspacePolicy: policy,
 	}
-	for server, grant := range settings.MCPServers {
+	for server := range settings.MCPServers {
 		if !opts.MCP.Configured(server) {
 			return ponsruntime.AgentDefinition{}, fmt.Errorf(
 				"agent %s: mcpServers grants %q, which is not in the host configuration's mcpServers",
 				filepath.Join(agents.Dir(ponsruntime.DefaultAgentID), agentdir.SettingsFile), server)
 		}
-		if agent.MCPServers == nil {
-			agent.MCPServers = make(map[string]ponsruntime.MCPGrant, len(settings.MCPServers))
-		}
-		agent.MCPServers[server] = ponsruntime.MCPGrant{
-			EnabledTools:  slices.Clone(grant.EnabledTools),
-			DisabledTools: slices.Clone(grant.DisabledTools),
-		}
 	}
+	agent.MCPServers = settings.MCPServers
 	if err := agents.Record(agent); err != nil {
 		return ponsruntime.AgentDefinition{}, err
 	}

@@ -53,6 +53,8 @@ type Server struct {
 	sessions        map[string]bool
 	nextSession     int
 	requireSampling bool
+	rejectInit      string
+	lostStatus      int
 	redirect        string
 	status          int
 }
@@ -94,6 +96,22 @@ func (s *Server) RequireSampling() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.requireSampling = true
+}
+
+// RejectInitialize makes initialize fail with the given error message.
+func (s *Server) RejectInitialize(message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rejectInit = message
+}
+
+// AnswerLostSessionsWith makes a request for an unknown session answer with
+// this HTTP status and a JSON-RPC error body, as some servers do instead of
+// the bare 404 the specification describes.
+func (s *Server) AnswerLostSessionsWith(status int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lostStatus = status
 }
 
 // RedirectTo makes every request answer with a redirect to target.
@@ -183,8 +201,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	known := s.sessions[r.Header.Get("Mcp-Session-Id")]
-	tools, handler := s.tools, s.handler
+	tools, handler, lostStatus := s.tools, s.handler, s.lostStatus
 	s.mu.Unlock()
+	if !known && lostStatus != 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(lostStatus)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0", "id": request.ID, "error": map[string]any{"code": -32001, "message": "Session not found"},
+		})
+		return
+	}
 	if !known {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
@@ -227,6 +253,12 @@ func (s *Server) initialize(w http.ResponseWriter, request message) {
 	_ = json.Unmarshal(request.Params, &params)
 
 	s.mu.Lock()
+	if s.rejectInit != "" {
+		message := s.rejectInit
+		s.mu.Unlock()
+		respondError(w, request.ID, -32600, message)
+		return
+	}
 	if _, offered := params.Capabilities["sampling"]; s.requireSampling && !offered {
 		s.mu.Unlock()
 		respondError(w, request.ID, -32600, "this server requires the sampling capability")

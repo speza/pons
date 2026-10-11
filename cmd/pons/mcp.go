@@ -60,16 +60,16 @@ func runMCP(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	}
 
 	if args[0] == "set-secret" {
-		return setMCPSecret(args[1], stdin, stdout, stderr, home)
+		return setMCPSecret(ctx, args[1], stdin, stdout, stderr, home)
 	}
 	return listMCPTools(ctx, args[1], stdout, home)
 }
 
-func setMCPSecret(name string, stdin io.Reader, stdout, stderr io.Writer, home string) error {
+func setMCPSecret(ctx context.Context, name string, stdin io.Reader, stdout, stderr io.Writer, home string) error {
 	if !mcp.ValidSecretName(name) {
 		return fmt.Errorf("secret name %q must be 1 to 64 letters, digits, underscores, or hyphens", name)
 	}
-	value, err := readSecret(name, stdin, stderr)
+	value, err := readSecret(ctx, name, stdin, stderr)
 	if err != nil {
 		return err
 	}
@@ -82,15 +82,9 @@ func setMCPSecret(name string, stdin io.Reader, stdout, stderr io.Writer, home s
 
 // readSecret reads a value without echo from a terminal, or one line from
 // any other input so a password manager can pipe it in.
-func readSecret(name string, stdin io.Reader, stderr io.Writer) (string, error) {
+func readSecret(ctx context.Context, name string, stdin io.Reader, stderr io.Writer) (string, error) {
 	if file, ok := stdin.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
-		fmt.Fprintf(stderr, "Value for %s: ", name)
-		value, err := term.ReadPassword(int(file.Fd()))
-		fmt.Fprintln(stderr)
-		if err != nil {
-			return "", fmt.Errorf("read secret: %w", err)
-		}
-		return string(value), nil
+		return promptSecret(ctx, name, int(file.Fd()), stderr)
 	}
 
 	line, err := bufio.NewReader(stdin).ReadString('\n')
@@ -98,6 +92,39 @@ func readSecret(name string, stdin io.Reader, stderr io.Writer) (string, error) 
 		return "", fmt.Errorf("read secret: %w", err)
 	}
 	return strings.TrimRight(line, "\r\n"), nil
+}
+
+// promptSecret reads a value from a terminal without echo. The read cannot
+// be interrupted, so an interrupt signal restores the terminal and returns
+// while the read is abandoned with the process.
+func promptSecret(ctx context.Context, name string, fd int, stderr io.Writer) (string, error) {
+	state, err := term.GetState(fd)
+	if err != nil {
+		return "", fmt.Errorf("read secret: %w", err)
+	}
+	fmt.Fprintf(stderr, "Value for %s: ", name)
+
+	type answer struct {
+		value []byte
+		err   error
+	}
+	read := make(chan answer, 1)
+	go func() {
+		value, err := term.ReadPassword(fd)
+		read <- answer{value, err}
+	}()
+	select {
+	case got := <-read:
+		fmt.Fprintln(stderr)
+		if got.err != nil {
+			return "", fmt.Errorf("read secret: %w", got.err)
+		}
+		return string(got.value), nil
+	case <-ctx.Done():
+		_ = term.Restore(fd, state)
+		fmt.Fprintln(stderr)
+		return "", ctx.Err()
+	}
 }
 
 func listMCPTools(ctx context.Context, name string, stdout io.Writer, home string) error {
@@ -112,7 +139,12 @@ func listMCPTools(ctx context.Context, name string, stdout io.Writer, home strin
 	// A disabled server is still worth checking before it is enabled.
 	config.Enabled = nil
 
-	manager, err := newMCPManager(home, map[string]mcp.ServerConfig{name: config}, 0)
+	// The same result limit as the server, so both see the same listing.
+	maxResultBytes := 0
+	if cfg.PluginMaxResultBytes != nil {
+		maxResultBytes = *cfg.PluginMaxResultBytes
+	}
+	manager, err := newMCPManager(home, map[string]mcp.ServerConfig{name: config}, maxResultBytes)
 	if err != nil {
 		return err
 	}
@@ -124,12 +156,23 @@ func listMCPTools(ctx context.Context, name string, stdout io.Writer, home strin
 
 	writer := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(writer, "TOOL\tREAD-ONLY\tSTATUS")
+	available := 0
 	for _, tool := range tools {
 		readOnly := "no"
 		if tool.ReadOnly {
 			readOnly = "yes"
 		}
+		if tool.Status == mcp.StatusAvailable {
+			available++
+		}
 		fmt.Fprintf(writer, "%s\t%s\t%s\n", tool.Name, readOnly, tool.Status)
 	}
-	return writer.Flush()
+	if err := writer.Flush(); err != nil {
+		return err
+	}
+	if available > mcp.MaxToolsPerServer {
+		return fmt.Errorf("MCP server %q offers %d tools, more than the limit of %d, so a run would get none; narrow enabledTools in its configuration or in the agent's grant",
+			name, available, mcp.MaxToolsPerServer)
+	}
+	return nil
 }

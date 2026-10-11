@@ -127,11 +127,15 @@ func TestToolRulesWithoutClassifier(t *testing.T) {
 		ToolRule(pons.PermissionAllow, "rule_allow", "*"),
 		ToolRule(pons.PermissionAsk, "shell_review", "bash"),
 		ToolRule(pons.PermissionDeny, "no_deletes", "mcp__github__delete_*"),
+		ToolRule(pons.PermissionDeny, "no_literal", "tool[1]"),
 	}}
 	for kind, want := range map[protocol.ActionKind]pons.Permission{
 		"bash": pons.PermissionAsk, "read": pons.PermissionAllow,
 		"mcp__github__delete_repo": pons.PermissionDeny, "mcp__github__get_issue": pons.PermissionAllow,
 		"mcp__gitlab__delete_repo": pons.PermissionAllow,
+		// "*" matches every kind and a name always matches itself, whatever
+		// characters they contain.
+		"acme/deploy": pons.PermissionAllow, "tool[1]": pons.PermissionDeny,
 	} {
 		decision, err := policy.decide(context.Background(), pons.ToolCallStartInput{Action: protocol.Action{Kind: kind}})
 		if err != nil || decision.Permission != want {

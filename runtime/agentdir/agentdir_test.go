@@ -62,7 +62,7 @@ func TestLoadCreatesDefaultsOnceAndNeverOverwrites(t *testing.T) {
 	}
 
 	write(t, filepath.Join(dir, SettingsFile), `{"mcpServers":{"github":{"enabledTools":["get_*"],"disabledTools":["get_secret"]},"linear":{}}}`)
-	want := map[string]MCPGrant{
+	want := map[string]ponsruntime.MCPGrant{
 		"github": {EnabledTools: []string{"get_*"}, DisabledTools: []string{"get_secret"}},
 		"linear": {},
 	}
