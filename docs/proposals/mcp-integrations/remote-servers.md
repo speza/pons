@@ -343,9 +343,13 @@ lost without the 404 the specification describes.
 
 MCP results are data, never instructions:
 
-- `ToolSpec.Source` is `{PluginName: "mcp", External: true}`. Hooks and
-  classifiers already receive the tool's source with every call, and the
-  server name is in the tool name.
+- `ToolSpec.Source` is `{PluginName: "mcp", External: true, Remote: true}`.
+  Hooks and classifiers receive the tool's source with every call, and the
+  server name is in the tool name. `Remote` says the tool proxies a remote
+  service: Core describes its calls as running on the host with network
+  access, whatever the sandbox allows, and a classifier is sent the tool's
+  description cut to 512 bytes and labeled `untrusted_description`, without
+  its schema.
 - In the classifier's recent context, an MCP result keeps the source
   `tool_result` and the kind `mcp__<server>__<tool>`, in a live run and
   after hydration from stored history. It is never a `user` item.
@@ -358,27 +362,31 @@ The plugin's `OnToolCallStart` hook answers only for its own tools:
 
 | `approvalMode` | Tool | Hook answer |
 | --- | --- | --- |
-| `auto` | any, with an action policy set up | no objection |
-| `auto` | any, with no action policy | `ask`, reason `mcp_no_action_policy` |
+| `auto` | any | fallback `ask`, reason `mcp_no_decision` |
 | `allow` | any | no objection |
 | `writes` | annotated `readOnlyHint: true` | no objection |
 | `writes` | anything else | `ask`, reason `mcp_write_approval` |
 | `ask` | any | `ask`, reason `mcp_approval` |
 
 The core merges this with every other start hook and keeps the strictest
-answer. So action policy can tighten a server (deny `mcp__github__delete_*`
-under `allow`) but cannot loosen one; to loosen, change the mode.
+answer. So action policy can tighten a server in any mode (deny
+`mcp__github__delete_*` under `allow`) but cannot loosen `ask` or `writes`;
+to loosen those, change the mode.
 Annotations come from the server, so `writes` is a convenience for a trusted
 server, not a boundary.
 
-`auto` is the default. It leaves the decision to the built-in action policy:
-rules first, then the classifier, which allows a call it finds safe and asks
-for the rest. A call that no hook objects to is allowed, so `auto` must not
-stay silent when nothing will decide. `actionpolicy.Policy` registers the
-capability `action_policy` at setup, and the hook looks for it when a call is
-checked, because host plugins are set up after this one. Without it, `auto`
-asks. An external hook plugin is not detected, so `allow` is the mode that
-lets one decide alone.
+`auto` is the default. A call that no hook objects to is allowed, so `auto`
+cannot simply stay silent. It answers with a fallback (ADR-0014): the core
+uses it only when no start hook gives a permission of its own. The action
+policy always gives one, from a rule or from its classifier, and so can an
+external hook plugin. When nothing does, the call asks.
+
+Two rules keep a decision about an MCP tool deliberate. An allow rule's bare
+`"*"` does not match a remote tool, so a policy written before a server was
+added does not approve its tools; a pattern that names them, such as
+`mcp__github__get_*`, does. And the classifier is sent a remote tool's
+description as untrusted text, because under `auto` the classifier is the
+gate and the description is the server's own claim about its tool.
 
 Two small changes outside the plugin make this work as ADR-0025 describes:
 
@@ -396,12 +404,14 @@ Two small changes outside the plugin make this work as ADR-0025 describes:
 
 **Consequence.** The runtime has no approval UI, so today every run is one
 with no one to ask, and every `ask` is a denial. Under `auto`, a call runs
-when the classifier finds it safe and is denied otherwise; with no action
-policy configured, every call is denied. The server logs a warning at
-startup for each granted server left on `ask`, or on `auto` without a
-policy. The default was `ask` at first, which made a new server unusable
-until its mode was changed. Defaulting to `writes` was considered and
-rejected: a new server should not act on the server's own word.
+when the classifier finds it safe or an allow rule names it, and is denied
+otherwise. The server logs a warning at startup for each granted server left
+on `ask`, and for one on `auto` when there is no action policy or the policy
+has no classifier. The approval handler logs the reason each call needed
+approval, since the denial the model sees is always `approval_unavailable`.
+The default was `ask` at first, which made a new server unusable until its
+mode was changed. Defaulting to `writes` was considered and rejected: a new
+server should not act on the server's own word.
 
 ### Runner and startup
 
@@ -500,7 +510,7 @@ Settled in review on 2026-10-11:
   refresh but not MCP's server discovery or client registration, which a
   minimal client would have to add by hand in step 2.
 - **Default approval mode:** `auto`, decided by the action policy's
-  classifier, with the startup warning when no policy is configured. It
+  classifier, with the startup warning when nothing is configured to decide. It
   replaced `ask` once it was clear that manual approval would come later
   than classifier approval.
 - **Config key:** `approvalMode`.

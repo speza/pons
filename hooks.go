@@ -63,11 +63,15 @@ type AssistantResponseInput struct {
 type AssistantResponseOutput struct{ HookOutput }
 
 // ToolCallStartOutput is a hook's permission decision. An empty Permission
-// means no objection. UpdatedInput replaces the call's arguments; every start
-// hook then runs again on the changed call before it can proceed.
+// means no objection. Fallback, read only when Permission is empty, is the
+// answer to use when no hook gives a Permission: a hook that wants a call
+// decided by some other hook, and not allowed by default, sets it to ask or
+// deny. UpdatedInput replaces the call's arguments; every start hook then
+// runs again on the changed call before it can proceed.
 type ToolCallStartOutput struct {
 	HookOutput
 	Permission   Permission        `json:"permission,omitempty"`
+	Fallback     Permission        `json:"fallback,omitempty"`
 	Reason       string            `json:"reason,omitempty"`
 	Assessment   *ActionAssessment `json:"assessment,omitempty"`
 	UpdatedInput json.RawMessage   `json:"updated_input,omitempty"`

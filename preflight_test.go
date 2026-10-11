@@ -780,3 +780,100 @@ func TestRepeatedDenialCountsTheProposedCall(t *testing.T) {
 		t.Fatalf("checks = %d, result = %+v", checks, result.History[repeatedDenialLimit].Results[0])
 	}
 }
+
+func TestFallbackAppliesOnlyWhenNoHookDecides(t *testing.T) {
+	answer := func(out ToolCallStartOutput) Hooks {
+		return Hooks{OnToolCallStart: func(context.Context, ToolCallStartInput) (ToolCallStartOutput, error) {
+			return out, nil
+		}}
+	}
+	fallback := answer(ToolCallStartOutput{Fallback: PermissionAsk, Reason: "needs_a_decider"})
+	tests := []struct {
+		name   string
+		hooks  []Hooks
+		want   Permission
+		reason string
+	}{
+		{name: "alone", hooks: []Hooks{fallback}, want: PermissionAsk, reason: "needs_a_decider"},
+		{name: "with a hook that has no objection",
+			hooks: []Hooks{fallback, answer(ToolCallStartOutput{})}, want: PermissionAsk, reason: "needs_a_decider"},
+		{name: "overridden by an allow",
+			hooks: []Hooks{fallback, answer(ToolCallStartOutput{Permission: PermissionAllow, Reason: "judged_safe"})},
+			want:  PermissionAllow, reason: "judged_safe"},
+		{name: "overridden by an allow set up first",
+			hooks: []Hooks{answer(ToolCallStartOutput{Permission: PermissionAllow, Reason: "judged_safe"}), fallback},
+			want:  PermissionAllow, reason: "judged_safe"},
+		{name: "replaced by a stricter decision",
+			hooks: []Hooks{fallback, answer(ToolCallStartOutput{Permission: PermissionDeny, Reason: "blocked"})},
+			want:  PermissionDeny, reason: "blocked"},
+		{name: "stricter fallback wins",
+			hooks: []Hooks{fallback, answer(ToolCallStartOutput{Fallback: PermissionDeny, Reason: "never"})},
+			want:  PermissionDeny, reason: "never"},
+		{name: "ignored beside the hook's own permission",
+			hooks: []Hooks{answer(ToolCallStartOutput{Permission: PermissionAllow, Fallback: PermissionDeny})},
+			want:  PermissionAllow},
+		{name: "an allow fallback still asks",
+			hooks: []Hooks{answer(ToolCallStartOutput{Fallback: PermissionAllow, Reason: "odd"})},
+			want:  PermissionAsk, reason: "odd"},
+		{name: "a failed hook decides",
+			hooks: []Hooks{fallback, {OnToolCallStart: func(context.Context, ToolCallStartInput) (ToolCallStartOutput, error) {
+				return ToolCallStartOutput{}, errors.New("down")
+			}}},
+			want: PermissionAsk, reason: "tool_call_start_unavailable"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			c := New()
+			for _, hooks := range test.hooks {
+				if err := c.AddHooks(hooks); err != nil {
+					t.Fatal(err)
+				}
+			}
+			check, err := c.CheckToolCall(context.Background(), ToolCallStartInput{Action: protocol.Action{ID: "a", Kind: "run"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if check.Decision.Permission != test.want || check.Decision.Reason != test.reason {
+				t.Fatalf("decision = %+v, want %s %q", check.Decision, test.want, test.reason)
+			}
+		})
+	}
+}
+
+func TestRemoteToolCallsAreDescribedAsRunningOnTheHost(t *testing.T) {
+	c := New()
+	c.ActionEnvironment = ActionEnvironment{Provider: "seatbelt", Network: "disabled"}
+	setBrain(t, c, &continueBrain{fakeBrain{turns: [][]protocol.Action{
+		{{ID: "a", Kind: "local"}, {ID: "b", Kind: "remote"}}, {Finish("done")},
+	}}})
+	handler := func(context.Context, protocol.Action) (protocol.ToolResult, error) {
+		return protocol.ToolResult{OK: true}, nil
+	}
+	if err := c.AddTool("local", ToolDef{Handler: handler}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AddTool("remote", ToolDef{Handler: handler, Source: ToolSource{Remote: true}}); err != nil {
+		t.Fatal(err)
+	}
+	// Calls in one turn are checked concurrently.
+	var mu sync.Mutex
+	seen := map[protocol.ActionKind]ActionEnvironment{}
+	if err := c.AddHooks(Hooks{OnToolCallStart: func(_ context.Context, in ToolCallStartInput) (ToolCallStartOutput, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		seen[in.Action.Kind] = in.Environment
+		return ToolCallStartOutput{}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.Run(context.Background(), "goal"); err != nil {
+		t.Fatal(err)
+	}
+	if seen["local"] != c.ActionEnvironment {
+		t.Fatalf("local tool environment = %+v", seen["local"])
+	}
+	if want := (ActionEnvironment{Provider: "host", Network: "enabled"}); seen["remote"] != want {
+		t.Fatalf("remote tool environment = %+v, want %+v", seen["remote"], want)
+	}
+}

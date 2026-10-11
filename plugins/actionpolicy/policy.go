@@ -37,17 +37,21 @@ func (f ClassifierFunc) Assess(ctx context.Context, req pons.ToolCallStartInput)
 // ToolRule matches calls to tool kinds by name or glob pattern, such as
 // "mcp__github__*"; "*" matches every tool. A malformed pattern matches
 // nothing: check patterns with toolpattern.Valid.
+//
+// An allow rule's bare "*" does not match a remote tool. Its name is the
+// remote service's choice, so allowing it takes a pattern that says which
+// tools are meant.
 func ToolRule(action pons.Permission, reasonCode string, kinds ...string) Rule {
 	return Rule{Action: action, ReasonCode: reasonCode, Match: func(req pons.ToolCallStartInput) bool {
+		remote := req.Tool != nil && req.Tool.Source.Remote
 		return slices.ContainsFunc(kinds, func(kind string) bool {
+			if action == pons.PermissionAllow && kind == "*" && remote {
+				return false
+			}
 			return toolpattern.Match(kind, string(req.Action.Kind))
 		})
 	}}
 }
-
-// Capability is registered by a Policy, so another plugin can tell that an
-// action policy decides tool calls in this Core before deferring to it.
-const Capability = "action_policy"
 
 // Policy applies Deny, Ask, then Allow rules, independent of declaration
 // order. Unmatched requests pass through classifiers in order. A valid "safe"
@@ -95,11 +99,6 @@ func (p Policy) Setup(c *pons.Core) error {
 	}
 	if p.MinSafeConfidence < 0 || p.MinSafeConfidence > 1 || math.IsNaN(p.MinSafeConfidence) {
 		return errors.New("actionpolicy: MinSafeConfidence must be between 0 and 1")
-	}
-	if _, registered := c.Capability(Capability); !registered {
-		if err := c.RegisterCapability(Capability, struct{}{}); err != nil {
-			return err
-		}
 	}
 	return c.AddHooks(pons.Hooks{OnToolCallStart: p.onToolCallStart})
 }

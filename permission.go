@@ -104,6 +104,15 @@ func hookDecision(out ToolCallStartOutput) PermissionDecision {
 	}
 }
 
+// fallbackDecision normalizes a hook's fallback answer. Allow is what a call
+// gets anyway, so anything but deny asks.
+func fallbackDecision(out ToolCallStartOutput) PermissionDecision {
+	if out.Fallback == PermissionDeny {
+		return PermissionDecision{Permission: PermissionDeny, Reason: out.Reason}
+	}
+	return PermissionDecision{Permission: PermissionAsk, Reason: out.Reason}
+}
+
 // mergeDecision keeps the stricter of two decisions: Deny over Ask over
 // Allow. Between equally strict decisions the first explained one wins.
 func mergeDecision(current, candidate PermissionDecision) PermissionDecision {

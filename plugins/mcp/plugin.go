@@ -11,7 +11,6 @@ import (
 	"sync"
 
 	"github.com/samperrin/pons"
-	"github.com/samperrin/pons/plugins/actionpolicy"
 	"github.com/samperrin/pons/protocol"
 )
 
@@ -94,7 +93,7 @@ func (p *runPlugin) Setup(core *pons.Core) error {
 			if err := core.AddTool(protocol.ActionKind(selectedTool.Kind), pons.ToolDef{
 				Description: selectedTool.Description,
 				InputSchema: selectedTool.InputSchema,
-				Source:      pons.ToolSource{PluginName: "mcp", External: true},
+				Source:      pons.ToolSource{PluginName: "mcp", External: true, Remote: true},
 				Handler:     p.handler(entry, selectedTool.Name),
 			}); err != nil {
 				return fmt.Errorf("mcp server %q: %w", entry.name, err)
@@ -107,13 +106,7 @@ func (p *runPlugin) Setup(core *pons.Core) error {
 		p.logger.Debug("mcp server ready", "server", entry.name, "tools", len(selected))
 	}
 
-	// Host plugins are set up after this one, so the policy is looked for
-	// when a call is checked, not now.
-	hasPolicy := func() bool {
-		_, ok := core.Capability(actionpolicy.Capability)
-		return ok
-	}
-	hooks := pons.Hooks{OnToolCallStart: approvalHook(registered, hasPolicy)}
+	hooks := pons.Hooks{OnToolCallStart: approvalHook(registered)}
 	if len(reasons) > 0 {
 		notice := strings.Join(reasons, "\n")
 		p.logger.Warn("mcp servers unavailable", "detail", notice)
@@ -170,24 +163,19 @@ func (p *runPlugin) handler(entry *server, toolName string) pons.ToolHandler {
 }
 
 // approvalHook applies each server's approval mode to its own tools. Other
-// tools get no answer. The auto mode leaves the decision to the action
-// policy and its classifier, and asks when there is no policy to decide,
-// because a call nothing objects to is allowed. Read-only annotations come
-// from the server, so the writes mode is a convenience for a trusted server,
-// not a boundary.
-func approvalHook(
-	tools map[protocol.ActionKind]registeredTool,
-	hasPolicy func() bool,
-) func(context.Context, pons.ToolCallStartInput) (pons.ToolCallStartOutput, error) {
+// tools get no answer. The auto mode leaves the decision to whichever hook
+// gives one, such as the action policy and its classifier, and asks only
+// when none does, because a call nothing objects to is allowed. Read-only
+// annotations come from the server, so the writes mode is a convenience for
+// a trusted server, not a boundary.
+func approvalHook(tools map[protocol.ActionKind]registeredTool) func(context.Context, pons.ToolCallStartInput) (pons.ToolCallStartOutput, error) {
 	return func(_ context.Context, in pons.ToolCallStartInput) (pons.ToolCallStartOutput, error) {
 		registered, ok := tools[in.Action.Kind]
 		switch {
 		case !ok, registered.approvalMode == ApprovalAllow:
 			return pons.ToolCallStartOutput{}, nil
-		case registered.approvalMode == ApprovalAuto && hasPolicy():
-			return pons.ToolCallStartOutput{}, nil
 		case registered.approvalMode == ApprovalAuto:
-			return pons.ToolCallStartOutput{Permission: pons.PermissionAsk, Reason: "mcp_no_action_policy"}, nil
+			return pons.ToolCallStartOutput{Fallback: pons.PermissionAsk, Reason: "mcp_no_decision"}, nil
 		case registered.approvalMode == ApprovalWrites && registered.readOnly:
 			return pons.ToolCallStartOutput{}, nil
 		case registered.approvalMode == ApprovalWrites:

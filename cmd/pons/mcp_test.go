@@ -159,6 +159,15 @@ func mcpRun(
 	t *testing.T, server *mcptest.Server, approvalMode, grant string, hostPlugins ...pons.Plugin,
 ) (offered []string, toolResult string) {
 	t.Helper()
+	offered, toolResult, _ = mcpRunLogged(t, server, approvalMode, grant, hostPlugins...)
+	return offered, toolResult
+}
+
+// mcpRunLogged is mcpRun that also returns the server's log.
+func mcpRunLogged(
+	t *testing.T, server *mcptest.Server, approvalMode, grant string, hostPlugins ...pons.Plugin,
+) (offered []string, toolResult, logs string) {
+	t.Helper()
 	config := mcp.ServerConfig{
 		Type: "http", URL: server.URL, ApprovalMode: approvalMode,
 		Headers: map[string]string{"Authorization": "Bearer ${secret:github_token}"},
@@ -192,7 +201,8 @@ func mcpRun(
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	err = runBundled(ctx, newServerLogger(io.Discard, false), testServerOptions(serverOptions{
+	var logged bytes.Buffer
+	err = runBundled(ctx, newServerLogger(&logged, false), testServerOptions(serverOptions{
 		StateDir: stateDir, WorkspaceRoot: os.TempDir(), MaxTurns: 4, MaxConcurrent: 1, MCP: manager,
 		HostSources: hostSources,
 		Brain:       llm.Config{Provider: "openai", Model: "test", APIKey: "test", BaseURL: provider.URL + "/v1"},
@@ -203,7 +213,7 @@ func mcpRun(
 	if len(requests()) != 2 {
 		t.Fatalf("provider saw %d requests, want the tool call and its result", len(requests()))
 	}
-	return offered, toolResult
+	return offered, toolResult, logged.String()
 }
 
 func TestGrantedAgentCallsAnMCPTool(t *testing.T) {
@@ -245,15 +255,19 @@ func TestAutoLeavesMCPCallsToTheActionPolicy(t *testing.T) {
 			},
 		)}}
 	}
+	// The model is told only that no one could approve, so the reason the
+	// call needed approval is read from the server's log.
 	tests := []struct {
 		name    string
 		plugins []pons.Plugin
 		want    string
+		reason  string
 		calls   int
 	}{
 		{name: "safe call runs", plugins: []pons.Plugin{classifier("safe")}, want: "get_issue", calls: 1},
-		{name: "reviewed call is denied", plugins: []pons.Plugin{classifier("review")}, want: "approval_unavailable"},
-		{name: "no policy denies", want: "approval_unavailable"},
+		{name: "reviewed call is denied", plugins: []pons.Plugin{classifier("review")},
+			want: "approval_unavailable", reason: "classifier_review"},
+		{name: "no policy denies", want: "approval_unavailable", reason: "mcp_no_decision"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -264,15 +278,38 @@ func TestAutoLeavesMCPCallsToTheActionPolicy(t *testing.T) {
 			})
 
 			// No approvalMode is set, so the server is in the default mode.
-			_, result := mcpRun(t, server, "", `{}`, test.plugins...)
+			_, result, logs := mcpRunLogged(t, server, "", `{}`, test.plugins...)
 
 			if !strings.Contains(result, test.want) {
 				t.Fatalf("model saw %q, want %q", result, test.want)
+			}
+			if asked := strings.Contains(logs, `"reason_code":"`+test.reason+`"`); test.reason != "" && !asked {
+				t.Fatalf("log does not give the reason %q:\n%s", test.reason, logs)
 			}
 			if calls := server.Calls("tools/call"); calls != test.calls {
 				t.Fatalf("server received %d tool calls, want %d", calls, test.calls)
 			}
 		})
+	}
+}
+
+func TestMCPDeciderOf(t *testing.T) {
+	judged := actionpolicy.Policy{ClassifierID: "classifier/typesafe-jev"}
+	rulesOnly := actionpolicy.Policy{Rules: []actionpolicy.Rule{actionpolicy.ToolRule(pons.PermissionAsk, "", "bash")}}
+	for _, test := range []struct {
+		name    string
+		sources []hostPluginSource
+		want    mcpDecider
+	}{
+		{"nothing", nil, mcpDeciderNone},
+		{"a classifier alone", []hostPluginSource{{Plugin: actionpolicy.ClassifierPlugin{ID: "classifier/typesafe-jev"}}}, mcpDeciderNone},
+		{"rules only", []hostPluginSource{{Plugin: rulesOnly}}, mcpDeciderRules},
+		{"policy with a classifier", []hostPluginSource{{Plugin: rulesOnly}, {Plugin: judged}}, mcpDeciderJudged},
+		{"external hook plugin", []hostPluginSource{{Manifest: "/plugins/policy.json"}}, mcpDeciderJudged},
+	} {
+		if got := mcpDeciderOf(test.sources); got != test.want {
+			t.Errorf("%s: decider = %d, want %d", test.name, got, test.want)
+		}
 	}
 }
 

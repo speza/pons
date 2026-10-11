@@ -166,8 +166,9 @@ routine reads and edits, multi-step work, ambiguous destinations, an exact
 approval follow-up, changed or revoked approval, secret access, destructive
 commands, and instructions planted in tool results. The
 [MCP cases](plugins/actionpolicy/evals/mcp_cases.json) cover requested and
-unrequested calls to MCP tools, and instructions or data carried over from an
-MCP result. Run them against your configured policy, or against one
+unrequested calls to MCP tools, instructions or data carried over from an
+MCP result, and tool descriptions that claim approval or hide what the tool
+does. Run them against your configured policy, or against one
 classifier:
 
 ```sh
@@ -494,7 +495,9 @@ registers its tools, hooks, or named capabilities.
 `action_policy`'s `config.classifier` names one enabled classifier; unknown
 or disabled references fail startup. `config.rules` matches tool kinds by
 name or glob pattern (`"mcp__github__*"`; `"*"` matches all) with `deny`,
-`ask`, or `allow`, applied in that order before any classifier. A rules-only policy is allowed; calls no rule settles
+`ask`, or `allow`, applied in that order before any classifier. An `allow`
+rule's bare `"*"` does not match a remote tool such as an MCP tool, whose
+name is the remote service's choice. A rules-only policy is allowed; calls no rule settles
 then ask. `allow_generated_confidence: true` lets a `safe` OpenAI or Codex
 assessment allow a call without approval. Set `enabled: false` to retain a
 plugin's settings without activating it. The `external` plugin accepts absolute
@@ -594,19 +597,23 @@ Restart the server after changing configuration, a secret, or a grant.
   server but never widen it. `mcpServers` is rejected in a project
   `.pons.json`. A server may add at most 128 tools to a run; past that it
   is unavailable until a filter narrows it, and `pons mcp tools` says so.
-- **Approval.** `auto`, the default, leaves each call to the
-  [action policy](#action-policy): its rules decide first, then its
-  classifier, and a call the classifier finds safe runs. `allow` runs every
-  tool unless a rule or hook objects; `writes` runs tools the server
-  annotates as read-only and asks for the rest; `ask` asks for every call.
-  The annotation comes from the server, so use `writes` only with a server
-  you trust. Nothing can answer an ask yet, so an asked call is denied with
-  `approval_unavailable`. That makes `ask` unusable today, and `auto`
-  unusable until an action policy is configured; the server logs a warning
-  at startup in both cases. `auto` looks for the built-in action policy
-  only, so to let an external hook plugin decide alone, use `allow`. Action
-  policy rules can tighten any mode, for example denying
-  `mcp__github__delete_*`, but cannot loosen `ask` or `writes`.
+- **Approval.** `auto`, the default, leaves each call to whichever hook
+  decides it, normally the [action policy](#action-policy): its rules decide
+  first, then its classifier, and a call the classifier finds safe runs. If
+  nothing decides, the call needs approval. `allow` runs every tool unless a
+  rule or hook objects; `writes` runs tools the server annotates as
+  read-only and asks for the rest; `ask` asks for every call. The annotation
+  comes from the server, so use `writes` only with a server you trust.
+  Nothing can answer a request for approval yet, so such a call is denied
+  with `approval_unavailable`, and the server's log gives the reason it
+  needed approval. That makes `ask` unusable today. Under `auto`, a call
+  runs only when a classifier finds it safe or an allow rule names it; the
+  server warns at startup when there is no action policy, or one without a
+  classifier. With the OpenAI or Codex classifier, `auto` also needs
+  `allow_generated_confidence`. A rule that allows `"*"` does not cover MCP
+  tools, so allow them by name, for example `"mcp__github__get_*"`. Rules
+  can tighten any mode, for example denying `mcp__github__delete_*`, but
+  cannot loosen `ask` or `writes`.
 - **Results are untrusted data.** They are labeled as tool results from
   their server and can never act as your instructions. Text is passed to the
   agent; images and other content are named but omitted. A result over
