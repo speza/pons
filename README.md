@@ -164,8 +164,11 @@ disabled entry can be evaluated before you enable it. Cases are data in the
 The [classifier cases](plugins/actionpolicy/evals/classifier_cases.json) cover
 routine reads and edits, multi-step work, ambiguous destinations, an exact
 approval follow-up, changed or revoked approval, secret access, destructive
-commands, and instructions planted in tool results. Run them against your
-configured policy, or against one classifier:
+commands, and instructions planted in tool results. The
+[MCP cases](plugins/actionpolicy/evals/mcp_cases.json) cover requested and
+unrequested calls to MCP tools, and instructions or data carried over from an
+MCP result. Run them against your configured policy, or against one
+classifier:
 
 ```sh
 pons eval -cases plugins/actionpolicy/evals action_policy
@@ -575,7 +578,7 @@ Restart the server after changing configuration, a secret, or a grant.
 | `url` | HTTPS endpoint, or HTTP on `localhost` or a loopback address; put keys in `headers`, not here | required |
 | `headers` | Sent on every request; values may contain `${secret:<name>}` | none |
 | `enabled` | `false` keeps the entry without using it | `true` |
-| `approvalMode` | `ask`, `writes`, or `allow` | `ask` |
+| `approvalMode` | `auto`, `ask`, `writes`, or `allow` | `auto` |
 | `enabledTools`, `disabledTools` | Glob patterns over the server's tool names | all tools |
 | `startupTimeoutSec` | Deadline to connect and list tools | 10 |
 | `toolTimeoutSec` | Deadline for one tool call | 60 |
@@ -591,14 +594,19 @@ Restart the server after changing configuration, a secret, or a grant.
   server but never widen it. `mcpServers` is rejected in a project
   `.pons.json`. A server may add at most 128 tools to a run; past that it
   is unavailable until a filter narrows it, and `pons mcp tools` says so.
-- **Approval.** `allow` runs every tool; `writes` runs tools the server
+- **Approval.** `auto`, the default, leaves each call to the
+  [action policy](#action-policy): its rules decide first, then its
+  classifier, and a call the classifier finds safe runs. `allow` runs every
+  tool unless a rule or hook objects; `writes` runs tools the server
   annotates as read-only and asks for the rest; `ask` asks for every call.
-  The annotation comes from the server, so use `writes` only with a server you
-  trust. Nothing can answer an ask yet, so an asked call is denied with
-  `approval_unavailable`: a server left on the default `ask` is unusable
-  until you choose `writes` or `allow`, and the server logs a warning about
-  it at startup. Action policy rules can tighten a server further, for
-  example denying `mcp__github__delete_*`, but cannot loosen its mode.
+  The annotation comes from the server, so use `writes` only with a server
+  you trust. Nothing can answer an ask yet, so an asked call is denied with
+  `approval_unavailable`. That makes `ask` unusable today, and `auto`
+  unusable until an action policy is configured; the server logs a warning
+  at startup in both cases. `auto` looks for the built-in action policy
+  only, so to let an external hook plugin decide alone, use `allow`. Action
+  policy rules can tighten any mode, for example denying
+  `mcp__github__delete_*`, but cannot loosen `ask` or `writes`.
 - **Results are untrusted data.** They are labeled as tool results from
   their server and can never act as your instructions. Text is passed to the
   agent; images and other content are named but omitted. A result over

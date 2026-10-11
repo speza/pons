@@ -22,6 +22,7 @@ import (
 	"github.com/samperrin/pons/environment"
 	"github.com/samperrin/pons/environment/e2b"
 	"github.com/samperrin/pons/environment/gitworkspace"
+	"github.com/samperrin/pons/plugins/actionpolicy"
 	"github.com/samperrin/pons/plugins/brain/llm"
 	"github.com/samperrin/pons/plugins/external"
 	"github.com/samperrin/pons/plugins/mcp"
@@ -157,7 +158,11 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 			logger.Debug("mcp shutdown failed", "error", err)
 		}
 	}()
-	logMCPServers(logger, opts.MCP, agent)
+	hasPolicy := slices.ContainsFunc(opts.HostSources, func(source hostPluginSource) bool {
+		_, ok := source.Plugin.(actionpolicy.Policy)
+		return ok
+	})
+	logMCPServers(logger, opts.MCP, agent, hasPolicy)
 
 	environmentOptions := []string{opts.Sandbox}
 	network := opts.EnvironmentSpec.Network
@@ -357,13 +362,20 @@ func defaultAgent(opts serverOptions, agents *agentdir.Store) (ponsruntime.Agent
 
 // logMCPServers records each configured server without its headers, and
 // warns about a granted server whose every call will be denied.
-func logMCPServers(logger *slog.Logger, manager *mcp.Manager, agent ponsruntime.AgentDefinition) {
+func logMCPServers(logger *slog.Logger, manager *mcp.Manager, agent ponsruntime.AgentDefinition, hasPolicy bool) {
 	for _, server := range manager.Servers() {
 		_, granted := agent.MCPServers[server.Name]
 		logger.Info("mcp server configured", "server", server.Name, "host", server.Host,
 			"approval_mode", server.ApprovalMode, "enabled", server.Enabled, "granted", granted)
-		if granted && server.Enabled && server.ApprovalMode == mcp.ApprovalAsk {
-			logger.Warn(`mcp server asks for approval on every call, and nothing can answer yet, so its calls are denied; set its approvalMode to "writes" or "allow"`,
+		if !granted || !server.Enabled {
+			continue
+		}
+		switch {
+		case server.ApprovalMode == mcp.ApprovalAuto && !hasPolicy:
+			logger.Warn(`mcp server leaves approval to the action policy, and none is configured, so its calls are denied; configure an action policy with a classifier, or set its approvalMode to "writes" or "allow"`,
+				"server", server.Name)
+		case server.ApprovalMode == mcp.ApprovalAsk:
+			logger.Warn(`mcp server asks for approval on every call, and nothing can answer yet, so its calls are denied; set its approvalMode to "auto", "writes", or "allow"`,
 				"server", server.Name)
 		}
 	}

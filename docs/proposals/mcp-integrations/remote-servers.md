@@ -142,7 +142,7 @@ in.
 | `url` | Streamable HTTP endpoint | required |
 | `headers` | Sent on every request; values may contain `${secret:<name>}` | none |
 | `enabled` | `false` keeps the entry without connecting | `true` |
-| `approvalMode` | `ask`, `writes`, or `allow` | `ask` |
+| `approvalMode` | `auto`, `ask`, `writes`, or `allow` | `auto` |
 | `enabledTools`, `disabledTools` | Glob patterns over the server's tool names | all tools |
 | `startupTimeoutSec` | Deadline to connect and list tools | 10 |
 | `toolTimeoutSec` | Deadline for one tool call | 60 |
@@ -358,6 +358,8 @@ The plugin's `OnToolCallStart` hook answers only for its own tools:
 
 | `approvalMode` | Tool | Hook answer |
 | --- | --- | --- |
+| `auto` | any, with an action policy set up | no objection |
+| `auto` | any, with no action policy | `ask`, reason `mcp_no_action_policy` |
 | `allow` | any | no objection |
 | `writes` | annotated `readOnlyHint: true` | no objection |
 | `writes` | anything else | `ask`, reason `mcp_write_approval` |
@@ -368,6 +370,15 @@ answer. So action policy can tighten a server (deny `mcp__github__delete_*`
 under `allow`) but cannot loosen one; to loosen, change the mode.
 Annotations come from the server, so `writes` is a convenience for a trusted
 server, not a boundary.
+
+`auto` is the default. It leaves the decision to the built-in action policy:
+rules first, then the classifier, which allows a call it finds safe and asks
+for the rest. A call that no hook objects to is allowed, so `auto` must not
+stay silent when nothing will decide. `actionpolicy.Policy` registers the
+capability `action_policy` at setup, and the hook looks for it when a call is
+checked, because host plugins are set up after this one. Without it, `auto`
+asks. An external hook plugin is not detected, so `allow` is the mode that
+lets one decide alone.
 
 Two small changes outside the plugin make this work as ADR-0025 describes:
 
@@ -383,12 +394,14 @@ Two small changes outside the plugin make this work as ADR-0025 describes:
    approvals will fill. `OnPermissionRequest` hooks still run first and can
    allow the call.
 
-**Consequence.** The runtime has no approval UI, so today every
-run is one with no one to ask. Under the default mode `ask`, every call to a
-new server is denied until the owner sets `approvalMode` to `writes` or
-`allow`. This spec keeps `ask` as the default, as the ADR says, and has the
-server log a warning at startup for each granted server left on `ask`. Defaulting to `writes` until approvals exist was considered and rejected: a
-new server should not act without the owner choosing that.
+**Consequence.** The runtime has no approval UI, so today every run is one
+with no one to ask, and every `ask` is a denial. Under `auto`, a call runs
+when the classifier finds it safe and is denied otherwise; with no action
+policy configured, every call is denied. The server logs a warning at
+startup for each granted server left on `ask`, or on `auto` without a
+policy. The default was `ask` at first, which made a new server unusable
+until its mode was changed. Defaulting to `writes` was considered and
+rejected: a new server should not act on the server's own word.
 
 ### Runner and startup
 
@@ -486,7 +499,10 @@ Settled in review on 2026-10-11:
   standard library. `golang.org/x/oauth2` covers the token exchange and
   refresh but not MCP's server discovery or client registration, which a
   minimal client would have to add by hand in step 2.
-- **Default approval mode:** `ask`, with the startup warning.
+- **Default approval mode:** `auto`, decided by the action policy's
+  classifier, with the startup warning when no policy is configured. It
+  replaced `ask` once it was clear that manual approval would come later
+  than classifier approval.
 - **Config key:** `approvalMode`.
 - **Secret store:** a new `~/.pons/secrets.json`. Restructuring `auth.json`
   would change the Codex login and refresh path for no gain.

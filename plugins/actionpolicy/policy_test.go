@@ -149,3 +149,18 @@ func TestToolRulesWithoutClassifier(t *testing.T) {
 		t.Fatalf("unmatched decision=%+v error=%v", decision, err)
 	}
 }
+
+func TestPolicyAnnouncesItselfOnce(t *testing.T) {
+	core := pons.New()
+	if _, ok := core.Capability(Capability); ok {
+		t.Fatal("capability registered before any policy")
+	}
+
+	rule := ToolRule(pons.PermissionAsk, "review", "bash")
+	if err := core.Use(Policy{Rules: []Rule{rule}}, Policy{Rules: []Rule{rule}}); err != nil {
+		t.Fatalf("two policies: %v", err)
+	}
+	if _, ok := core.Capability(Capability); !ok {
+		t.Fatal("capability not registered by a policy")
+	}
+}

@@ -4,17 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/samperrin/pons"
+	"github.com/samperrin/pons/plugins/actionpolicy"
 	"github.com/samperrin/pons/plugins/brain/scripted"
 	"github.com/samperrin/pons/plugins/mcp"
 	"github.com/samperrin/pons/plugins/mcp/mcptest"
@@ -373,7 +376,8 @@ func TestApprovalModes(t *testing.T) {
 		{mode: mcp.ApprovalWrites, tool: "get_issue", want: pons.PermissionAllow},
 		{mode: mcp.ApprovalWrites, tool: "create_issue", want: pons.PermissionAsk, reason: "mcp_write_approval"},
 		{mode: mcp.ApprovalAsk, tool: "get_issue", want: pons.PermissionAsk, reason: "mcp_approval"},
-		{mode: "", tool: "get_issue", want: pons.PermissionAsk, reason: "mcp_approval"},
+		{mode: mcp.ApprovalAuto, tool: "get_issue", want: pons.PermissionAsk, reason: "mcp_no_action_policy"},
+		{mode: "", tool: "get_issue", want: pons.PermissionAsk, reason: "mcp_no_action_policy"},
 	}
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%s/%s", test.mode, test.tool), func(t *testing.T) {
@@ -384,6 +388,66 @@ func TestApprovalModes(t *testing.T) {
 
 			check, err := core.CheckToolCall(t.Context(), pons.ToolCallStartInput{
 				Action: protocol.Action{ID: "1", Kind: protocol.ActionKind("mcp__github__" + test.tool)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if check.Decision.Permission != test.want || check.Decision.Reason != test.reason {
+				t.Fatalf("decision = %+v, want %s %q", check.Decision, test.want, test.reason)
+			}
+		})
+	}
+
+	// With an action policy, the auto mode leaves the decision to it.
+	classifier := func(risk string) actionpolicy.Policy {
+		return actionpolicy.Policy{Classifiers: []actionpolicy.Classifier{actionpolicy.ClassifierFunc(
+			func(_ context.Context, in pons.ToolCallStartInput) (pons.ActionAssessment, error) {
+				if in.Tool == nil || !in.Tool.Source.External {
+					return pons.ActionAssessment{}, errors.New("classifier was not told the tool is external")
+				}
+				return pons.ActionAssessment{Risk: risk, Confidence: 0.99, ProbabilityConfidence: true}, nil
+			},
+		)}}
+	}
+	policies := []struct {
+		name, mode string
+		policy     actionpolicy.Policy
+		want       pons.Permission
+		reason     string
+	}{
+		{name: "auto runs a call the classifier finds safe", mode: mcp.ApprovalAuto,
+			policy: classifier("safe"), want: pons.PermissionAllow, reason: "classifier_safe"},
+		{name: "auto holds a call the classifier wants reviewed", mode: mcp.ApprovalAuto,
+			policy: classifier("review"), want: pons.PermissionAsk, reason: "classifier_review"},
+		{name: "auto follows a rule", mode: mcp.ApprovalAuto,
+			policy: actionpolicy.Policy{Rules: []actionpolicy.Rule{
+				actionpolicy.ToolRule(pons.PermissionDeny, "no_github", "mcp__github__*"),
+			}}, want: pons.PermissionDeny, reason: "no_github"},
+		{name: "auto asks when the policy settles nothing", mode: mcp.ApprovalAuto,
+			policy: actionpolicy.Policy{Rules: []actionpolicy.Rule{
+				actionpolicy.ToolRule(pons.PermissionAllow, "shell", "bash"),
+			}}, want: pons.PermissionAsk, reason: "no_matching_rule"},
+		{name: "ask is not overridden by a safe verdict", mode: mcp.ApprovalAsk,
+			policy: classifier("safe"), want: pons.PermissionAsk, reason: "mcp_approval"},
+	}
+	for _, test := range policies {
+		t.Run(test.name, func(t *testing.T) {
+			config := httpServer(server.URL)
+			config.ApprovalMode = test.mode
+			manager := newManager(t, mcp.Options{Servers: map[string]mcp.ServerConfig{"github": config}})
+			// The policy is set up after the MCP plugin, as in a run.
+			core := newCore(t, manager, map[string]mcp.Filter{"github": {}})
+			if err := core.Use(test.policy); err != nil {
+				t.Fatal(err)
+			}
+
+			// A run gives hooks the called tool's spec.
+			specs := core.ToolSpecs()
+			called := slices.IndexFunc(specs, func(spec pons.ToolSpec) bool {
+				return spec.Kind == "mcp__github__create_issue"
+			})
+			check, err := core.CheckToolCall(t.Context(), pons.ToolCallStartInput{
+				Action: protocol.Action{ID: "1", Kind: specs[called].Kind}, Tool: &specs[called],
 			})
 			if err != nil {
 				t.Fatal(err)

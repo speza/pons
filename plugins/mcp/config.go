@@ -23,6 +23,7 @@ import (
 
 // Approval modes are a server's default answer for its tools.
 const (
+	ApprovalAuto   = "auto"
 	ApprovalAsk    = "ask"
 	ApprovalWrites = "writes"
 	ApprovalAllow  = "allow"
@@ -94,7 +95,7 @@ func (c ServerConfig) filter() Filter {
 
 func (c ServerConfig) approvalMode() string {
 	if c.ApprovalMode == "" {
-		return ApprovalAsk
+		return ApprovalAuto
 	}
 	return c.ApprovalMode
 }
@@ -152,10 +153,10 @@ func validateServer(name string, config ServerConfig) error {
 		}
 	}
 	switch config.ApprovalMode {
-	case "", ApprovalAsk, ApprovalWrites, ApprovalAllow:
+	case "", ApprovalAuto, ApprovalAsk, ApprovalWrites, ApprovalAllow:
 	default:
-		return fmt.Errorf("approvalMode must be %q, %q, or %q, not %q",
-			ApprovalAsk, ApprovalWrites, ApprovalAllow, config.ApprovalMode)
+		return fmt.Errorf("approvalMode must be %q, %q, %q, or %q, not %q",
+			ApprovalAuto, ApprovalAsk, ApprovalWrites, ApprovalAllow, config.ApprovalMode)
 	}
 	if err := config.filter().Validate(); err != nil {
 		return err
