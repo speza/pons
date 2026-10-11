@@ -24,6 +24,7 @@ import (
 	"github.com/samperrin/pons/environment/gitworkspace"
 	"github.com/samperrin/pons/plugins/brain/llm"
 	"github.com/samperrin/pons/plugins/external"
+	"github.com/samperrin/pons/plugins/mcp"
 	"github.com/samperrin/pons/protocol"
 	ponsruntime "github.com/samperrin/pons/runtime"
 	"github.com/samperrin/pons/runtime/agentdir"
@@ -65,6 +66,8 @@ type serverOptions struct {
 	EnvironmentDebug        func(string)
 	Environment             environment.Provider
 	EnvironmentSpec         environment.Spec
+	// MCP holds the configured MCP servers; nil when there are none.
+	MCP *mcp.Manager
 }
 
 func newServerLogger(output io.Writer, debug bool) *slog.Logger {
@@ -149,6 +152,12 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 	logger.Info("agent ready", "agent_id", agent.ID, "agent_name", agent.Name,
 		"agent_revision", agent.Revision(), "agent_dir", agents.Dir(agent.ID),
 		"workspace_policy", agent.WorkspacePolicy)
+	defer func() {
+		if err := opts.MCP.Close(); err != nil {
+			logger.Debug("mcp shutdown failed", "error", err)
+		}
+	}()
+	logMCPServers(logger, opts.MCP, agent)
 
 	environmentOptions := []string{opts.Sandbox}
 	network := opts.EnvironmentSpec.Network
@@ -332,10 +341,45 @@ func defaultAgent(opts serverOptions, agents *agentdir.Store) (ponsruntime.Agent
 		PluginPaths:     slices.Clone(opts.PluginPaths),
 		WorkspacePolicy: policy,
 	}
+	for server := range settings.MCPServers {
+		if !opts.MCP.Configured(server) {
+			return ponsruntime.AgentDefinition{}, fmt.Errorf(
+				"agent %s: mcpServers grants %q, which is not in the host configuration's mcpServers",
+				filepath.Join(agents.Dir(ponsruntime.DefaultAgentID), agentdir.SettingsFile), server)
+		}
+	}
+	agent.MCPServers = settings.Grants()
 	if err := agents.Record(agent); err != nil {
 		return ponsruntime.AgentDefinition{}, err
 	}
 	return agent, nil
+}
+
+// logMCPServers records each configured server without its headers, and
+// warns about a granted server whose every call will be denied.
+func logMCPServers(logger *slog.Logger, manager *mcp.Manager, agent ponsruntime.AgentDefinition) {
+	for _, server := range manager.Servers() {
+		_, granted := agent.MCPServers[server.Name]
+		logger.Info("mcp server configured", "server", server.Name, "host", server.Host,
+			"approval_mode", server.ApprovalMode, "enabled", server.Enabled, "granted", granted)
+		if granted && server.Enabled && server.ApprovalMode == mcp.ApprovalAsk {
+			logger.Warn(`mcp server asks for approval on every call, and nothing can answer yet, so its calls are denied; set its approvalMode to "writes" or "allow"`,
+				"server", server.Name)
+		}
+	}
+}
+
+// errNoApprover is the answer to every approval request until the runtime
+// has a way to ask the owner.
+var errNoApprover = errors.New("no one is available to approve tool calls")
+
+// mcpGrants converts an agent revision's grants to the plugin's filters.
+func mcpGrants(agent ponsruntime.AgentDefinition) map[string]mcp.Filter {
+	grants := make(map[string]mcp.Filter, len(agent.MCPServers))
+	for server, grant := range agent.MCPServers {
+		grants[server] = mcp.Filter{Enabled: grant.EnabledTools, Disabled: grant.DisabledTools}
+	}
+	return grants
 }
 
 // seedsAgentWorkspace reports whether a provider keeps the agent workspace
@@ -608,6 +652,13 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	if !slices.Equal(agent.PluginPaths, r.opts.PluginPaths) {
 		return result, errors.New("agent revision's hands plugin configuration changed; restore its plugin list or submit new work")
 	}
+	// Server settings are current configuration, not part of the revision, so
+	// a grant recorded before a server was removed can no longer be honored.
+	for server := range agent.MCPServers {
+		if !r.opts.MCP.Configured(server) {
+			return result, fmt.Errorf("agent revision grants MCP server %q, which is no longer configured; restore it or submit new work", server)
+		}
+	}
 	// The conversation's workspace, fixed at creation, decides where it
 	// runs; the revision's current policy never moves it.
 	workspacePath := request.Workspace
@@ -799,6 +850,9 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}
 	plugins := make([]pons.Plugin, 0, 2+len(r.opts.HostSources))
 	plugins = append(plugins, environment.Proxy(session))
+	if len(agent.MCPServers) > 0 {
+		plugins = append(plugins, r.opts.MCP.Plugin(ctx, mcpGrants(agent), runLog))
+	}
 	for _, source := range r.opts.HostSources {
 		if source.Plugin != nil {
 			plugins = append(plugins, source.Plugin)
@@ -814,6 +868,13 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}
 	plugins = append(plugins, brain)
 	if err := core.Use(plugins...); err != nil {
+		return result, err
+	}
+	// Nothing can ask the owner yet, so an ask no permission hook settles is
+	// denied as approval_unavailable. Durable approvals will answer here.
+	if err := core.SetApprovalHandler(func(context.Context, pons.PermissionRequestInput) (pons.Permission, error) {
+		return "", errNoApprover
+	}); err != nil {
 		return result, err
 	}
 

@@ -1,7 +1,7 @@
 // Package agentdir keeps owner-authored agent definitions as files under the
 // runtime state directory:
 //
-//	agents/<id>/agent.json         settings: name, provider slot, model, limits
+//	agents/<id>/agent.json         settings: name, provider slot, model, limits, MCP grants
 //	agents/<id>/PERSONA.md         free-form persona instructions
 //	agents/<id>/revisions/<sha>.json  immutable snapshots of resolved definitions
 //	agents/<id>/memory/            the agent's own notes: MEMORY.md and topic files
@@ -24,9 +24,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/samperrin/pons/internal/toolpattern"
 	ponsruntime "github.com/samperrin/pons/runtime"
 )
 
@@ -51,6 +53,31 @@ type Settings struct {
 	MaxTurns int    `json:"max_turns"`
 	// Workspace is the workspace policy, or empty for the server's default.
 	Workspace string `json:"workspace"`
+	// MCPServers names the MCP servers the agent may use, in the mcpServers
+	// shape of the host configuration. It is nil when no server is granted.
+	MCPServers map[string]MCPGrant `json:"mcpServers"`
+}
+
+// MCPGrant is one mcpServers entry of agent.json, with the key spelling of
+// the host configuration.
+type MCPGrant struct {
+	EnabledTools  []string `json:"enabledTools,omitempty"`
+	DisabledTools []string `json:"disabledTools,omitempty"`
+}
+
+// Grants returns the settings' MCP grants in the agent definition's shape.
+func (s Settings) Grants() map[string]ponsruntime.MCPGrant {
+	if len(s.MCPServers) == 0 {
+		return nil
+	}
+	grants := make(map[string]ponsruntime.MCPGrant, len(s.MCPServers))
+	for server, grant := range s.MCPServers {
+		grants[server] = ponsruntime.MCPGrant{
+			EnabledTools:  grant.EnabledTools,
+			DisabledTools: grant.DisabledTools,
+		}
+	}
+	return grants
 }
 
 // Store reads agent directories and records their revisions.
@@ -87,7 +114,7 @@ func (s *Store) Load(agentID string) (Settings, string, error) {
 		return Settings{}, "", fmt.Errorf("agents: create %s: %w", dir, err)
 	}
 
-	defaults, err := json.MarshalIndent(Settings{}, "", "  ")
+	defaults, err := json.MarshalIndent(Settings{MCPServers: map[string]MCPGrant{}}, "", "  ")
 	if err != nil {
 		return Settings{}, "", err
 	}
@@ -272,6 +299,16 @@ func readSettings(path string) (Settings, error) {
 	default:
 		return Settings{}, fmt.Errorf("agents: %s: workspace must be %q or %q, not %q",
 			path, ponsruntime.WorkspaceAgent, ponsruntime.WorkspacePerConversation, settings.Workspace)
+	}
+	for server, grant := range settings.MCPServers {
+		for _, pattern := range slices.Concat(grant.EnabledTools, grant.DisabledTools) {
+			if !toolpattern.Valid(pattern) {
+				return Settings{}, fmt.Errorf("agents: %s: mcpServers.%s: tool pattern %q is malformed", path, server, pattern)
+			}
+		}
+	}
+	if len(settings.MCPServers) == 0 {
+		settings.MCPServers = nil
 	}
 	return settings, nil
 }

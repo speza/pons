@@ -49,6 +49,16 @@ type AgentDefinition struct {
 	// applies when a conversation is created; the conversation then keeps
 	// the workspace it was given.
 	WorkspacePolicy string `json:"workspace_policy"`
+	// MCPServers grants MCP servers by name. It is omitted when empty, so nil
+	// and empty grants have the same revision.
+	MCPServers map[string]MCPGrant `json:"mcp_servers,omitempty"`
+}
+
+// MCPGrant narrows the tools of one granted MCP server by glob pattern. An
+// empty grant takes every tool the host configuration allows.
+type MCPGrant struct {
+	EnabledTools  []string `json:"enabled_tools,omitempty"`
+	DisabledTools []string `json:"disabled_tools,omitempty"`
 }
 
 // AgentSummary is the read-only agent identity shown to clients.

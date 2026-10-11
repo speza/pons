@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/samperrin/pons"
+	"github.com/samperrin/pons/internal/toolpattern"
 	"github.com/samperrin/pons/plugins/actionpolicy"
 )
 
@@ -46,8 +47,8 @@ func decodeActionPolicyPlugin(id string, enabled bool, raw json.RawMessage) (Con
 		if len(rule.Tools) == 0 {
 			return nil, fmt.Errorf("config plugins.%s.rules[%d].tools must not be empty", id, i)
 		}
-		if slices.Contains(rule.Tools, "") {
-			return nil, fmt.Errorf("config plugins.%s.rules[%d].tools must not contain empty names", id, i)
+		if slices.ContainsFunc(rule.Tools, func(tool string) bool { return !toolpattern.Valid(tool) }) {
+			return nil, fmt.Errorf("config plugins.%s.rules[%d].tools must be tool names or patterns", id, i)
 		}
 	}
 	config.id = id

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -21,7 +22,7 @@ func TestLoadCreatesDefaultsOnceAndNeverOverwrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings != (Settings{}) || persona != "" {
+	if !reflect.DeepEqual(settings, Settings{}) || persona != "" {
 		t.Fatalf("defaults = %+v, %q", settings, persona)
 	}
 
@@ -39,7 +40,7 @@ func TestLoadCreatesDefaultsOnceAndNeverOverwrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{`"name"`, `"provider"`, `"model"`, `"max_turns"`, `"workspace"`} {
+	for _, field := range []string{`"name"`, `"provider"`, `"model"`, `"max_turns"`, `"workspace"`, `"mcpServers": {}`} {
 		if !strings.Contains(string(data), field) {
 			t.Fatalf("default agent.json lacks %s:\n%s", field, data)
 		}
@@ -51,13 +52,29 @@ func TestLoadCreatesDefaultsOnceAndNeverOverwrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings != (Settings{Name: "Ada", Model: "m", MaxTurns: 5}) || persona != "# Not a name\n\nBe brief." {
+	if !reflect.DeepEqual(settings, Settings{Name: "Ada", Model: "m", MaxTurns: 5}) || persona != "# Not a name\n\nBe brief." {
 		t.Fatalf("edited agent = %+v, %q", settings, persona)
 	}
 
 	write(t, filepath.Join(dir, SettingsFile), `{"workspace":"per_conversation"}`)
 	if settings, _, err = store.Load(ponsruntime.DefaultAgentID); err != nil || settings.Workspace != ponsruntime.WorkspacePerConversation {
 		t.Fatalf("per_conversation settings = %+v, %v", settings, err)
+	}
+
+	write(t, filepath.Join(dir, SettingsFile), `{"mcpServers":{"github":{"enabledTools":["get_*"],"disabledTools":["get_secret"]},"linear":{}}}`)
+	want := map[string]MCPGrant{
+		"github": {EnabledTools: []string{"get_*"}, DisabledTools: []string{"get_secret"}},
+		"linear": {},
+	}
+	if settings, _, err = store.Load(ponsruntime.DefaultAgentID); err != nil || !reflect.DeepEqual(settings.MCPServers, want) {
+		t.Fatalf("mcpServers = %+v, %v", settings.MCPServers, err)
+	}
+
+	// The agent definition records the same grants in its own key spelling.
+	definition, err := json.Marshal(ponsruntime.AgentDefinition{MCPServers: settings.Grants()})
+	if err != nil || !strings.Contains(string(definition),
+		`"mcp_servers":{"github":{"enabled_tools":["get_*"],"disabled_tools":["get_secret"]},"linear":{}}`) {
+		t.Fatalf("definition = %s, %v", definition, err)
 	}
 }
 
@@ -115,6 +132,8 @@ func TestLoadRejectsMalformedSettings(t *testing.T) {
 		"padded name":     `{"name":" Ada"}`,
 		"negative turns":  `{"max_turns":-1}`,
 		"unknown policy":  `{"workspace":"shared"}`,
+		"grant pattern":   `{"mcpServers":{"github":{"enabledTools":["get_["]}}}`,
+		"grant field":     `{"mcpServers":{"github":{"approvalMode":"allow"}}}`,
 		"not JSON":        `name: Ada`,
 	} {
 		t.Run(name, func(t *testing.T) {

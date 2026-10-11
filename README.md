@@ -44,6 +44,7 @@ environments are explicit plugins or injected infrastructure.
 | `plugins/fs`, `edit`, `bash`, `shell` | Built-in hands-side tools |
 | `plugins/actionpolicy` | Host-side policy rules and classifier composition |
 | `plugins/external` | Persistent external tool providers and Go/TypeScript SDKs |
+| `plugins/mcp` | MCP client: remote servers' tools, granted per agent |
 | `runtime/` | Durable SQLite runtime and HTTP/SSE transport |
 | `environment/` | Provider/session contracts and durable environment state |
 | `environment/seatbelt`, `environment/e2b` | Local and remote execution providers |
@@ -140,8 +141,9 @@ workspace, platform, bounded recent messages and actions with source labels,
 and host-supplied sandbox and network context. Rules and classifiers are
 installed by trusted host code or the global CLI configuration. The hosted
 adapters require API keys and send the projected request and recent context to
-their provider. The CLI has no interactive approval handler yet: an `ask`
-decision is denied, and the agent can retry after a new user message.
+their provider. The runtime cannot ask the owner yet: an `ask` no permission
+hook settles is denied with `approval_unavailable`, and the agent can retry
+after a new user message.
 With `--debug`, the server logs each tool preflight and its decision. A valid
 classifier assessment includes its model, risk, confidence, and reason code;
 action arguments, conversation text, and credentials are omitted.
@@ -487,9 +489,9 @@ needs. The loader preserves list order except where dependencies require a
 provider to come first, then calls `Core.Use`. A plugin's `Setup` method
 registers its tools, hooks, or named capabilities.
 `action_policy`'s `config.classifier` names one enabled classifier; unknown
-or disabled references fail startup. `config.rules` matches tool kinds
-(`"*"` matches all) with `deny`, `ask`, or `allow`, applied in that order
-before any classifier. A rules-only policy is allowed; calls no rule settles
+or disabled references fail startup. `config.rules` matches tool kinds by
+name or glob pattern (`"mcp__github__*"`; `"*"` matches all) with `deny`,
+`ask`, or `allow`, applied in that order before any classifier. A rules-only policy is allowed; calls no rule settles
 then ask. `allow_generated_confidence: true` lets a `safe` OpenAI or Codex
 assessment allow a call without approval. Set `enabled: false` to retain a
 plugin's settings without activating it. The `external` plugin accepts absolute
@@ -521,7 +523,7 @@ or credentials:
 The default confidence threshold is 0.9. A `safe` assessment at or above it
 allows the call. OpenAI and Codex confidence is model-generated rather than a
 calibrated probability; `review`, low-confidence, and unavailable assessments
-still ask for approval. With no CLI approval handler, those asks are denied. A
+still ask for approval. With no one to ask yet, those asks are denied. A
 later user message is included in a fresh assessment when the agent retries
 the action. Changes take effect when the server restarts. Project `.pons.json`
 cannot set `plugins`.
@@ -530,6 +532,85 @@ The [Git workspace guide](docs/design/git-workspaces.md) has the complete E2B an
 GitHub App config example. Keep credentials in the global file, not in a
 repository's `.pons.json`. Client commands select the repository and revision
 per conversation.
+
+### MCP servers
+
+An integration is an MCP server. pons connects to remote servers over
+Streamable HTTP and offers their tools to the agent as
+`mcp__<server>__<tool>`. Add servers to `mcpServers` in `~/.pons/config.json`,
+in the shape other MCP clients use:
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {"Authorization": "Bearer ${secret:github_token}"},
+      "approvalMode": "writes",
+      "disabledTools": ["delete_*"]
+    }
+  }
+}
+```
+
+Then store the token, check the connection, and grant the server to the
+agent:
+
+```sh
+pons mcp set-secret github_token   # read from the terminal, or one line of stdin
+pons mcp tools github              # lists the server's tools and what the filters keep
+```
+
+```json
+{"mcpServers": {"github": {"enabledTools": ["search_*", "get_*", "list_*"]}}}
+```
+
+The last snippet goes in the agent's `agent.json` (see [Agent](#agent)).
+Restart the server after changing configuration, a secret, or a grant.
+
+| Field | Meaning | Default |
+| --- | --- | --- |
+| `type` | `http`; `stdio` servers are not supported yet | required |
+| `url` | HTTPS endpoint, or HTTP on `localhost` or a loopback address; put keys in `headers`, not here | required |
+| `headers` | Sent on every request; values may contain `${secret:<name>}` | none |
+| `enabled` | `false` keeps the entry without using it | `true` |
+| `approvalMode` | `ask`, `writes`, or `allow` | `ask` |
+| `enabledTools`, `disabledTools` | Glob patterns over the server's tool names | all tools |
+| `startupTimeoutSec` | Deadline to connect and list tools | 10 |
+| `toolTimeoutSec` | Deadline for one tool call | 60 |
+
+- **Secrets** live in `~/.pons/secrets.json`, readable only by you. A value
+  is never a command argument, and `${VAR}` environment expansion is not
+  supported. A secret is sent only to its own server: redirects are refused,
+  and a value a server echoes back is replaced with `[secret]` before the
+  agent, events, or logs see it. A missing secret stops the server from
+  starting. OAuth login is not supported yet, so a server needs a token.
+- **Grants.** An agent sees only the servers its `agent.json` names. A tool
+  must pass the host's filters and the grant's, so a grant can narrow a
+  server but never widen it. `mcpServers` is rejected in a project
+  `.pons.json`. A server may add at most 128 tools to a run; past that it
+  is unavailable until a filter narrows it, and `pons mcp tools` says so.
+- **Approval.** `allow` runs every tool; `writes` runs tools the server
+  annotates as read-only and asks for the rest; `ask` asks for every call.
+  The annotation comes from the server, so use `writes` only with a server you
+  trust. Nothing can answer an ask yet, so an asked call is denied with
+  `approval_unavailable`: a server left on the default `ask` is unusable
+  until you choose `writes` or `allow`, and the server logs a warning about
+  it at startup. Action policy rules can tighten a server further, for
+  example denying `mcp__github__delete_*`, but cannot loosen its mode.
+- **Results are untrusted data.** They are labeled as tool results from
+  their server and can never act as your instructions. Text is passed to the
+  agent; images and other content are named but omitted. A result over
+  `plugin_max_result_bytes` fails.
+- **Failures.** A server that cannot be reached when a run starts does not
+  fail the run: its tools are absent and a notice says why. An expired
+  session is reopened; a call is repeated only when the server provably did
+  not run it, so a call caught by an expiry can fail and need retrying. pons offers servers no sampling, roots, or
+  elicitation.
+
+Adding a server means trusting it with its token and with whatever the agent
+sends it.
 
 ### Agent
 
@@ -547,7 +628,8 @@ restart the server to change the agent.
     "provider": "",
     "model": "",
     "max_turns": 0,
-    "workspace": ""
+    "workspace": "",
+    "mcpServers": {}
   }
   ```
 
@@ -560,8 +642,10 @@ restart the server to change the agent.
   `agent`, the client
   rejects `-workspace` and Git options rather than ignoring them. A conversation keeps the
   workspace it was created with when the policy changes. Conversations sharing
-  the agent workspace run one at a time. A malformed file stops the server
-  from starting.
+  the agent workspace run one at a time. `mcpServers` grants
+  [MCP servers](#mcp-servers) by name, each with optional `enabledTools` and
+  `disabledTools` patterns; naming a server that is not configured stops the
+  server from starting. A malformed file stops the server from starting.
 - `PERSONA.md` holds free-form instructions, used verbatim.
 - `workspace/` holds the agent's own files under the `agent` policy on
   Seatbelt, created on first use. They persist across conversations and server restarts.
@@ -591,14 +675,16 @@ CLI, and the web UI. Provider settings and credentials stay in
 by its `id`.
 
 Each start records an agent revision: a SHA-256 fingerprint of the name,
-persona, provider slot ID, model, maximum turns, and plugin paths, never
-credentials. The server writes it once to `revisions/<revision>.json` in the
+persona, provider slot ID, model, maximum turns, plugin paths, and MCP
+grants, never credentials. The server writes it once to `revisions/<revision>.json` in the
 agent directory. Every submission and run records the revision it was
 accepted under, so work queued before an edit still runs under the old
 revision. Work whose revision snapshot is missing or altered fails rather
 than running under the current one. If the server's hands plugin list has
 changed, queued work also fails before starting its sandbox; restore the
 recorded plugin list or submit new work under the current configuration.
+Queued work also fails if its revision grants an MCP server that is no longer
+configured.
 Revisions record plugin paths, not copies of plugin files. Credentials and
 host-side policy use the current server configuration.
 
@@ -629,8 +715,9 @@ including the [runtime design](docs/design/runtime.md) and the
 
 ## Dependencies
 
-The project uses the official Anthropic and OpenAI Go SDKs, a pure-Go SQLite
-driver, and the standard-library HTTP stack.
+The project uses the official Anthropic, OpenAI, and MCP Go SDKs, a pure-Go
+SQLite driver, `golang.org/x/term` for reading secrets, and the
+standard-library HTTP stack.
 
 ## Roadmap
 

@@ -350,7 +350,7 @@ tool-call-start hook is for preflight decisions and approval.
   their `evals/` directory. When every classifier fails, `action_policy`
   still asks but reports the outage as a hook error, which fails an eval case
   and logs a warning in a run.
-- Configured rules match tool kinds (`"*"` for all) with deny, ask, or allow,
+- Configured rules match tool kinds by name or glob pattern (`"*"` for all) with deny, ask, or allow,
   applied before classifiers. A policy may be rules-only; a call that no rule
   settles and no classifier assesses requests approval.
 - CLI configuration selects one enabled classifier by registered plugin ID,

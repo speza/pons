@@ -51,6 +51,12 @@ func TestAgentRevisionIsDeterministicAndTracksPersona(t *testing.T) {
 		t.Fatalf("revision %q is not a hex SHA-256", base.Revision())
 	}
 
+	noGrants := base
+	noGrants.MCPServers = map[string]ponsruntime.MCPGrant{}
+	if base.Revision() != noGrants.Revision() {
+		t.Fatal("nil and empty grants have different revisions")
+	}
+
 	noPlugins, emptyPlugins := base, base
 	noPlugins.PluginPaths, emptyPlugins.PluginPaths = nil, []string{}
 	if noPlugins.Revision() != emptyPlugins.Revision() {
@@ -67,6 +73,12 @@ func TestAgentRevisionIsDeterministicAndTracksPersona(t *testing.T) {
 		"identity": func(d *ponsruntime.AgentDefinition) { d.ID = "other" },
 		"workspace": func(d *ponsruntime.AgentDefinition) {
 			d.WorkspacePolicy = ponsruntime.WorkspacePerConversation
+		},
+		"mcp grant": func(d *ponsruntime.AgentDefinition) {
+			d.MCPServers = map[string]ponsruntime.MCPGrant{"github": {}}
+		},
+		"mcp grant filter": func(d *ponsruntime.AgentDefinition) {
+			d.MCPServers = map[string]ponsruntime.MCPGrant{"github": {EnabledTools: []string{"get_*"}}}
 		},
 	} {
 		changed := base

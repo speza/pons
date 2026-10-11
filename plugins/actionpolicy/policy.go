@@ -10,6 +10,7 @@ import (
 	"slices"
 
 	"github.com/samperrin/pons"
+	"github.com/samperrin/pons/internal/toolpattern"
 )
 
 // Rule matches an exact pending request. Rules must come from trusted host
@@ -33,11 +34,13 @@ func (f ClassifierFunc) Assess(ctx context.Context, req pons.ToolCallStartInput)
 	return f(ctx, req)
 }
 
-// ToolRule matches calls to the named tool kinds; "*" matches every tool.
+// ToolRule matches calls to tool kinds by name or glob pattern, such as
+// "mcp__github__*"; "*" matches every tool. A malformed pattern matches
+// nothing: check patterns with toolpattern.Valid.
 func ToolRule(action pons.Permission, reasonCode string, kinds ...string) Rule {
 	return Rule{Action: action, ReasonCode: reasonCode, Match: func(req pons.ToolCallStartInput) bool {
 		return slices.ContainsFunc(kinds, func(kind string) bool {
-			return kind == "*" || kind == string(req.Action.Kind)
+			return toolpattern.Match(kind, string(req.Action.Kind))
 		})
 	}}
 }
