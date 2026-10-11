@@ -93,7 +93,7 @@ func (p *runPlugin) Setup(core *pons.Core) error {
 			if err := core.AddTool(protocol.ActionKind(selectedTool.Kind), pons.ToolDef{
 				Description: selectedTool.Description,
 				InputSchema: selectedTool.InputSchema,
-				Source:      pons.ToolSource{PluginName: "mcp", External: true, Server: entry.name},
+				Source:      pons.ToolSource{PluginName: "mcp", External: true},
 				Handler:     p.handler(entry, selectedTool.Name),
 			}); err != nil {
 				return fmt.Errorf("mcp server %q: %w", entry.name, err)

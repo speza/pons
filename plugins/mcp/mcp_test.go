@@ -228,10 +228,10 @@ func TestAgentSeesOnlyGrantedServersAndToolsPassingBothFilters(t *testing.T) {
 		})
 	}
 
-	t.Run("tools are labeled with their server", func(t *testing.T) {
+	t.Run("tools are labeled as external", func(t *testing.T) {
 		spec := newCore(t, manager, map[string]mcp.Filter{"linear": {}}).ToolSpecs()[0]
-		if spec.Source.Server != "linear" || !spec.Source.External || spec.Source.PluginName != "mcp" {
-			t.Fatalf("source = %+v, want the external mcp server linear", spec.Source)
+		if !spec.Source.External || spec.Source.PluginName != "mcp" {
+			t.Fatalf("source = %+v, want the external mcp plugin", spec.Source)
 		}
 	})
 

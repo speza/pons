@@ -248,8 +248,8 @@ filter passes a tool when `enabledTools` is empty or matches it, and
 can narrow but never widen.
 
 The grant becomes `AgentDefinition.MCPServers` (JSON `mcp_servers`, with the
-grant's own keys spelled as in `agent.json`), so it is part of the revision. The field is omitted when empty, which keeps the
-fingerprint of every existing revision unchanged.
+grant's own keys spelled as in `agent.json`), so it is part of the revision. The field is omitted when empty, so no grants
+and an empty `mcpServers` object have the same revision.
 
 Host server settings (URL, host filters, approval mode) are not in the
 revision. Like credentials and host policy, a run uses the server's current
@@ -342,9 +342,9 @@ lost without the 404 the specification describes.
 
 MCP results are data, never instructions:
 
-- `ToolSpec.Source` is `{PluginName: "mcp", External: true, Server: "<name>"}`.
-  `Server` is a new field on `ToolSource`. Hooks and classifiers already
-  receive the tool's source with every call.
+- `ToolSpec.Source` is `{PluginName: "mcp", External: true}`. Hooks and
+  classifiers already receive the tool's source with every call, and the
+  server name is in the tool name.
 - In the classifier's recent context, an MCP result keeps the source
   `tool_result` and the kind `mcp__<server>__<tool>`, in a live run and
   after hydration from stored history. It is never a `user` item.

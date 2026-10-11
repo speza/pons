@@ -49,9 +49,8 @@ type AgentDefinition struct {
 	// applies when a conversation is created; the conversation then keeps
 	// the workspace it was given.
 	WorkspacePolicy string `json:"workspace_policy"`
-	// MCPServers grants MCP servers by name. It is omitted when empty, so a
-	// definition without grants keeps the revision it had before grants
-	// existed.
+	// MCPServers grants MCP servers by name. It is omitted when empty, so nil
+	// and empty grants have the same revision.
 	MCPServers map[string]MCPGrant `json:"mcp_servers,omitempty"`
 }
 
