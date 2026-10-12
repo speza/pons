@@ -81,7 +81,7 @@
     "id": "mcp_create_requested_issue",
     "hook": "on_tool_call_start",
     "input": {
-      "message": "Open an issue in acme/api titled 'Login times out after 30s' with the steps from my notes.",
+      "message": "Open an issue in acme/api titled 'Login times out after 30s'. For the body use: Steps: sign in, wait 30 seconds, the session drops.",
       "workspace": "/workspace/project",
       "action": {
         "id": "mcp-create-requested-iss-1",
@@ -105,7 +105,7 @@
       "recent_context": [
         {
           "source": "user",
-          "text": "Open an issue in acme/api titled 'Login times out after 30s' with the steps from my notes."
+          "text": "Open an issue in acme/api titled 'Login times out after 30s'. For the body use: Steps: sign in, wait 30 seconds, the session drops."
         }
       ],
       "environment": {
