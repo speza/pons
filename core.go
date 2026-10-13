@@ -133,6 +133,16 @@ func New() *Core {
 	}
 }
 
+// environmentOf is the execution context hooks are given for a tool's call.
+// A remote tool runs in the host process with the host's network, whatever
+// the execution environment allows.
+func (c *Core) environmentOf(spec *ToolSpec) ActionEnvironment {
+	if spec != nil && spec.Source.Remote {
+		return ActionEnvironment{Provider: "host", Network: "enabled"}
+	}
+	return c.ActionEnvironment
+}
+
 // RegisterCapability exposes a trusted plugin capability to other plugins.
 // Names are unique; registration never replaces an existing provider.
 func (c *Core) RegisterCapability(name string, value any) error {
@@ -206,6 +216,10 @@ type ToolSource struct {
 	CapabilityVersion int    `json:"capability_version,omitempty"`
 	Executable        string `json:"executable,omitempty"`
 	External          bool   `json:"external,omitempty"`
+	// Remote marks a tool that proxies a remote service. It runs in the host
+	// process over the network, outside the execution environment, and its
+	// name, description, and schema are the service's own words.
+	Remote bool `json:"remote,omitempty"`
 }
 
 // ToolDef is what a tool plugin registers: the executor plus its schema.
@@ -498,10 +512,11 @@ func (c *Core) Run(ctx context.Context, message string) (result RunResult, runEr
 
 		requests := make([]ToolCallStartInput, len(run))
 		for i, a := range run {
+			spec := c.toolSpec(a.Kind)
 			requests[i] = ToolCallStartInput{
 				Turn: turn, Message: obs.Message, Workspace: c.Workspace,
-				Platform: c.Platform, Environment: c.ActionEnvironment,
-				Action: a, Tool: c.toolSpec(a.Kind), RecentContext: recentContext,
+				Platform: c.Platform, Environment: c.environmentOf(spec),
+				Action: a, Tool: spec, RecentContext: recentContext,
 			}
 		}
 		calls, checked, err := c.decideCalls(ctx, requests, denials, &fx)

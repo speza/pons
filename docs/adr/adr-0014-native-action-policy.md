@@ -60,7 +60,7 @@ type Hooks struct {
 
 | Hook | Event-specific output |
 | --- | --- |
-| `OnToolCallStart` | `Permission` (allow, ask, deny; empty means no objection), `Reason`, `Assessment`, `UpdatedInput` |
+| `OnToolCallStart` | `Permission` (allow, ask, deny; empty means no objection), `Fallback` (ask or deny, used only when no hook gives a `Permission`), `Reason`, `Assessment`, `UpdatedInput` |
 | `OnPermissionRequest` | `Permission` (allow or deny; empty defers) |
 | `OnToolCallEnd` | `Result *protocol.ToolResult` (nil leaves the result unchanged) |
 | `OnAgentEnd` | `Continue`, `Reason`: keep a finished run going with the reason as context |
@@ -77,6 +77,7 @@ format, so a Go field rename cannot silently change the protocol.
 
 ```text
 OnToolCallStart (every hook, per call) → merge strictest: deny > ask > allow
+  no hook gave a Permission → strictest Fallback, if any hook set one
   UpdatedInput → validate object → every start hook runs again on the new call
 ask → OnPermissionRequest (every hook, in order; any deny wins)
     → unresolved → SetApprovalHandler → no handler or anything but allow → deny
@@ -351,7 +352,16 @@ tool-call-start hook is for preflight decisions and approval.
   still asks but reports the outage as a hook error, which fails an eval case
   and logs a warning in a run.
 - Configured rules match tool kinds by name or glob pattern (`"*"` for all) with deny, ask, or allow,
-  applied before classifiers. A policy may be rules-only; a call that no rule
+  applied before classifiers. An allow rule's bare `"*"` does not match a
+  remote tool (`ToolSource.Remote`), whose name a remote service chose.
+- A hook can leave a call to the other hooks without letting silence allow
+  it: `Fallback` is the answer when no start hook gives a `Permission`. The
+  MCP plugin's `auto` approval mode uses it, so the policy and its
+  classifier decide MCP calls and a run without a policy asks.
+- A remote tool's call is described to hooks as running on the host with
+  network access, not in the execution environment. A classifier is sent a
+  remote tool's description cut short and labeled `untrusted_description`,
+  without its schema. A policy may be rules-only; a call that no rule
   settles and no classifier assesses requests approval.
 - CLI configuration selects one enabled classifier by registered plugin ID,
   along with its model, key environment variable, timeout, and confidence

@@ -149,3 +149,28 @@ func TestToolRulesWithoutClassifier(t *testing.T) {
 		t.Fatalf("unmatched decision=%+v error=%v", decision, err)
 	}
 }
+
+func TestAllowEverythingDoesNotCoverRemoteTools(t *testing.T) {
+	remote := &pons.ToolSpec{Kind: "mcp__github__get_issue", Source: pons.ToolSource{Remote: true}}
+	request := pons.ToolCallStartInput{Action: protocol.Action{Kind: remote.Kind}, Tool: remote}
+	for _, tt := range []struct {
+		name  string
+		rule  Rule
+		match bool
+	}{
+		{"allow everything", ToolRule(pons.PermissionAllow, "", "*"), false},
+		{"allow the server", ToolRule(pons.PermissionAllow, "", "mcp__github__*"), true},
+		{"allow everything and the server", ToolRule(pons.PermissionAllow, "", "*", "mcp__github__*"), true},
+		{"ask for everything", ToolRule(pons.PermissionAsk, "", "*"), true},
+		{"deny everything", ToolRule(pons.PermissionDeny, "", "*"), true},
+	} {
+		if got := tt.rule.Match(request); got != tt.match {
+			t.Errorf("%s: match = %v, want %v", tt.name, got, tt.match)
+		}
+	}
+
+	local := pons.ToolCallStartInput{Action: protocol.Action{Kind: "bash"}, Tool: &pons.ToolSpec{Kind: "bash"}}
+	if !ToolRule(pons.PermissionAllow, "", "*").Match(local) {
+		t.Error("allow everything does not match a local tool")
+	}
+}

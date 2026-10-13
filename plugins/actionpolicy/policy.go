@@ -37,9 +37,17 @@ func (f ClassifierFunc) Assess(ctx context.Context, req pons.ToolCallStartInput)
 // ToolRule matches calls to tool kinds by name or glob pattern, such as
 // "mcp__github__*"; "*" matches every tool. A malformed pattern matches
 // nothing: check patterns with toolpattern.Valid.
+//
+// An allow rule's bare "*" does not match a remote tool. Its name is the
+// remote service's choice, so allowing it takes a pattern that says which
+// tools are meant.
 func ToolRule(action pons.Permission, reasonCode string, kinds ...string) Rule {
 	return Rule{Action: action, ReasonCode: reasonCode, Match: func(req pons.ToolCallStartInput) bool {
+		remote := req.Tool != nil && req.Tool.Source.Remote
 		return slices.ContainsFunc(kinds, func(kind string) bool {
+			if action == pons.PermissionAllow && kind == "*" && remote {
+				return false
+			}
 			return toolpattern.Match(kind, string(req.Action.Kind))
 		})
 	}}

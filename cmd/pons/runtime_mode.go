@@ -22,6 +22,7 @@ import (
 	"github.com/samperrin/pons/environment"
 	"github.com/samperrin/pons/environment/e2b"
 	"github.com/samperrin/pons/environment/gitworkspace"
+	"github.com/samperrin/pons/plugins/actionpolicy"
 	"github.com/samperrin/pons/plugins/brain/llm"
 	"github.com/samperrin/pons/plugins/external"
 	"github.com/samperrin/pons/plugins/mcp"
@@ -157,7 +158,7 @@ func runServerReady(ctx context.Context, logger *slog.Logger, opts serverOptions
 			logger.Debug("mcp shutdown failed", "error", err)
 		}
 	}()
-	logMCPServers(logger, opts.MCP, agent)
+	logMCPServers(logger, opts.MCP, agent, mcpDeciderOf(opts.HostSources))
 
 	environmentOptions := []string{opts.Sandbox}
 	network := opts.EnvironmentSpec.Network
@@ -357,16 +358,52 @@ func defaultAgent(opts serverOptions, agents *agentdir.Store) (ponsruntime.Agent
 
 // logMCPServers records each configured server without its headers, and
 // warns about a granted server whose every call will be denied.
-func logMCPServers(logger *slog.Logger, manager *mcp.Manager, agent ponsruntime.AgentDefinition) {
+func logMCPServers(logger *slog.Logger, manager *mcp.Manager, agent ponsruntime.AgentDefinition, decider mcpDecider) {
 	for _, server := range manager.Servers() {
 		_, granted := agent.MCPServers[server.Name]
 		logger.Info("mcp server configured", "server", server.Name, "host", server.Host,
 			"approval_mode", server.ApprovalMode, "enabled", server.Enabled, "granted", granted)
-		if granted && server.Enabled && server.ApprovalMode == mcp.ApprovalAsk {
-			logger.Warn(`mcp server asks for approval on every call, and nothing can answer yet, so its calls are denied; set its approvalMode to "writes" or "allow"`,
+		if !granted || !server.Enabled {
+			continue
+		}
+		switch {
+		case server.ApprovalMode == mcp.ApprovalAuto && decider == mcpDeciderNone:
+			logger.Warn(`mcp server leaves approval to the action policy, and none is configured, so its calls are denied; configure an action policy with a classifier, or set its approvalMode to "writes" or "allow"`,
+				"server", server.Name)
+		case server.ApprovalMode == mcp.ApprovalAuto && decider == mcpDeciderRules:
+			logger.Warn(`mcp server leaves approval to the action policy, which has no classifier, so only calls an allow rule names will run; add a classifier, or allow rules such as "mcp__<server>__get_*"`,
+				"server", server.Name)
+		case server.ApprovalMode == mcp.ApprovalAsk:
+			logger.Warn(`mcp server asks for approval on every call, and nothing can answer yet, so its calls are denied; set its approvalMode to "auto", "writes", or "allow"`,
 				"server", server.Name)
 		}
 	}
+}
+
+// mcpDecider is what will decide a call to an MCP server in the auto mode.
+type mcpDecider int
+
+const (
+	mcpDeciderNone mcpDecider = iota
+	// mcpDeciderRules is an action policy with rules and no classifier.
+	mcpDeciderRules
+	// mcpDeciderJudged is a classifier, or an external hook plugin, which
+	// may decide any call.
+	mcpDeciderJudged
+)
+
+func mcpDeciderOf(sources []hostPluginSource) mcpDecider {
+	decider := mcpDeciderNone
+	for _, source := range sources {
+		policy, isPolicy := source.Plugin.(actionpolicy.Policy)
+		switch {
+		case source.Plugin == nil, isPolicy && (policy.ClassifierID != "" || len(policy.Classifiers) > 0):
+			return mcpDeciderJudged
+		case isPolicy:
+			decider = mcpDeciderRules
+		}
+	}
+	return decider
 }
 
 // errNoApprover is the answer to every approval request until the runtime
@@ -872,7 +909,10 @@ func (r *agentRunner) Run(ctx context.Context, request ponsruntime.RunRequest) (
 	}
 	// Nothing can ask the owner yet, so an ask no permission hook settles is
 	// denied as approval_unavailable. Durable approvals will answer here.
-	if err := core.SetApprovalHandler(func(context.Context, pons.PermissionRequestInput) (pons.Permission, error) {
+	// The denial replaces the reason for asking, so that is logged here.
+	if err := core.SetApprovalHandler(func(_ context.Context, in pons.PermissionRequestInput) (pons.Permission, error) {
+		runLog.Info("tool call needed approval, and nothing can answer, so it is denied",
+			"turn", in.Turn, "action_id", in.Action.ID, "tool", in.Action.Kind, "reason_code", in.Decision.Reason)
 		return "", errNoApprover
 	}); err != nil {
 		return result, err

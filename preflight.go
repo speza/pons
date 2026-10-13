@@ -234,6 +234,8 @@ func (c *Core) decideToolCall(ctx context.Context, req ToolCallStartInput) callD
 		}
 
 		var updated json.RawMessage
+		var decided bool
+		var fallback *PermissionDecision
 		for i, registered := range c.hooks {
 			if registered.OnToolCallStart == nil {
 				continue
@@ -247,10 +249,21 @@ func (c *Core) decideToolCall(ctx context.Context, req ToolCallStartInput) callD
 					failed = PermissionDecision{Permission: PermissionDeny, Reason: out.Reason}
 				}
 				call.decision = mergeDecision(call.decision, failed)
+				decided = true
 				continue
 			}
 			call.fx.add(out.HookOutput)
 			call.decision = mergeDecision(call.decision, hookDecision(out))
+			switch {
+			case out.Permission != "":
+				decided = true
+			case out.Fallback != "":
+				wanted := fallbackDecision(out)
+				if fallback != nil {
+					wanted = mergeDecision(*fallback, wanted)
+				}
+				fallback = &wanted
+			}
 			if len(out.UpdatedInput) > 0 && out.Permission != PermissionDeny && !bytes.Equal(out.UpdatedInput, req.Action.Args) {
 				updated = out.UpdatedInput
 				break
@@ -266,6 +279,9 @@ func (c *Core) decideToolCall(ctx context.Context, req ToolCallStartInput) callD
 			}
 			req.Action.Args = slices.Clone(trimmed)
 			continue
+		}
+		if !decided && fallback != nil {
+			call.decision = *fallback
 		}
 		if req.ResourceError && call.decision.Permission != PermissionDeny {
 			call.decision = PermissionDecision{Permission: PermissionAsk, Reason: "resource_projection_failed"}

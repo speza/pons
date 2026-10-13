@@ -340,7 +340,7 @@ and at most these hook-specific fields:
 
 | Hook | Output fields |
 | --- | --- |
-| `on_tool_call_start` | `permission` (`allow`, `ask`, `deny`), `reason`, `assessment`, `updated_input` |
+| `on_tool_call_start` | `permission` (`allow`, `ask`, `deny`), `fallback` (`ask`, `deny`; used only when no hook gives a `permission`), `reason`, `assessment`, `updated_input` |
 | `on_permission_request` | `permission` (`allow`, `deny`) |
 | `on_tool_call_end` | `result` |
 | `on_agent_end` | `continue`, `reason` |

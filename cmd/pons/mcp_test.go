@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/samperrin/pons"
+	"github.com/samperrin/pons/plugins/actionpolicy"
 	"github.com/samperrin/pons/plugins/brain/llm"
 	"github.com/samperrin/pons/plugins/mcp"
 	"github.com/samperrin/pons/plugins/mcp/mcptest"
@@ -153,7 +155,18 @@ func TestMCPCommandFailures(t *testing.T) {
 
 // mcpRun runs one bundled conversation whose agent is granted the github
 // server, and returns what the model was offered and told.
-func mcpRun(t *testing.T, server *mcptest.Server, approvalMode, grant string) (offered []string, toolResult string) {
+func mcpRun(
+	t *testing.T, server *mcptest.Server, approvalMode, grant string, hostPlugins ...pons.Plugin,
+) (offered []string, toolResult string) {
+	t.Helper()
+	offered, toolResult, _ = mcpRunLogged(t, server, approvalMode, grant, hostPlugins...)
+	return offered, toolResult
+}
+
+// mcpRunLogged is mcpRun that also returns the server's log.
+func mcpRunLogged(
+	t *testing.T, server *mcptest.Server, approvalMode, grant string, hostPlugins ...pons.Plugin,
+) (offered []string, toolResult, logs string) {
 	t.Helper()
 	config := mcp.ServerConfig{
 		Type: "http", URL: server.URL, ApprovalMode: approvalMode,
@@ -168,6 +181,10 @@ func mcpRun(t *testing.T, server *mcptest.Server, approvalMode, grant string) (o
 	}
 	stateDir := t.TempDir()
 	write(t, filepath.Join(stateDir, "agents", "default", agentdir.SettingsFile), `{"mcpServers":{"github":`+grant+`}}`)
+	var hostSources []hostPluginSource
+	for _, plugin := range hostPlugins {
+		hostSources = append(hostSources, hostPluginSource{Plugin: plugin})
+	}
 
 	provider, requests := scriptedProvider(t, func(request providerRequest) providerReply {
 		if role, content := request.last(); role == "tool" {
@@ -184,9 +201,11 @@ func mcpRun(t *testing.T, server *mcptest.Server, approvalMode, grant string) (o
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	err = runBundled(ctx, newServerLogger(io.Discard, false), testServerOptions(serverOptions{
+	var logged bytes.Buffer
+	err = runBundled(ctx, newServerLogger(&logged, false), testServerOptions(serverOptions{
 		StateDir: stateDir, WorkspaceRoot: os.TempDir(), MaxTurns: 4, MaxConcurrent: 1, MCP: manager,
-		Brain: llm.Config{Provider: "openai", Model: "test", APIKey: "test", BaseURL: provider.URL + "/v1"},
+		HostSources: hostSources,
+		Brain:       llm.Config{Provider: "openai", Model: "test", APIKey: "test", BaseURL: provider.URL + "/v1"},
 	}), "", "", "look at issue 7", false)
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +213,7 @@ func mcpRun(t *testing.T, server *mcptest.Server, approvalMode, grant string) (o
 	if len(requests()) != 2 {
 		t.Fatalf("provider saw %d requests, want the tool call and its result", len(requests()))
 	}
-	return offered, toolResult
+	return offered, toolResult, logged.String()
 }
 
 func TestGrantedAgentCallsAnMCPTool(t *testing.T) {
@@ -225,6 +244,72 @@ func TestAskDeniesAsApprovalUnavailableWhenNoOneCanAnswer(t *testing.T) {
 	}
 	if calls := server.Calls("tools/call"); calls != 0 {
 		t.Fatalf("server received %d tool calls, want none for a denied call", calls)
+	}
+}
+
+func TestAutoLeavesMCPCallsToTheActionPolicy(t *testing.T) {
+	classifier := func(risk string) pons.Plugin {
+		return actionpolicy.Policy{Classifiers: []actionpolicy.Classifier{actionpolicy.ClassifierFunc(
+			func(context.Context, pons.ToolCallStartInput) (pons.ActionAssessment, error) {
+				return pons.ActionAssessment{Risk: risk, Confidence: 0.99, ProbabilityConfidence: true}, nil
+			},
+		)}}
+	}
+	// The model is told only that no one could approve, so the reason the
+	// call needed approval is read from the server's log.
+	tests := []struct {
+		name    string
+		plugins []pons.Plugin
+		want    string
+		reason  string
+		calls   int
+	}{
+		{name: "safe call runs", plugins: []pons.Plugin{classifier("safe")}, want: "get_issue", calls: 1},
+		{name: "reviewed call is denied", plugins: []pons.Plugin{classifier("review")},
+			want: "approval_unavailable", reason: "classifier_review"},
+		{name: "no policy denies", want: "approval_unavailable", reason: "mcp_no_decision"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := mcptest.New(t)
+			server.SetTools(mcptest.Tool{Name: "get_issue"})
+			server.Handle(func(_ context.Context, tool string, _ json.RawMessage) mcptest.Result {
+				return mcptest.Result{Text: tool}
+			})
+
+			// No approvalMode is set, so the server is in the default mode.
+			_, result, logs := mcpRunLogged(t, server, "", `{}`, test.plugins...)
+
+			if !strings.Contains(result, test.want) {
+				t.Fatalf("model saw %q, want %q", result, test.want)
+			}
+			if asked := strings.Contains(logs, `"reason_code":"`+test.reason+`"`); test.reason != "" && !asked {
+				t.Fatalf("log does not give the reason %q:\n%s", test.reason, logs)
+			}
+			if calls := server.Calls("tools/call"); calls != test.calls {
+				t.Fatalf("server received %d tool calls, want %d", calls, test.calls)
+			}
+		})
+	}
+}
+
+func TestMCPDeciderOf(t *testing.T) {
+	judged := actionpolicy.Policy{ClassifierID: "classifier/typesafe-jev"}
+	rulesOnly := actionpolicy.Policy{Rules: []actionpolicy.Rule{actionpolicy.ToolRule(pons.PermissionAsk, "", "bash")}}
+	for _, test := range []struct {
+		name    string
+		sources []hostPluginSource
+		want    mcpDecider
+	}{
+		{"nothing", nil, mcpDeciderNone},
+		{"a classifier alone", []hostPluginSource{{Plugin: actionpolicy.ClassifierPlugin{ID: "classifier/typesafe-jev"}}}, mcpDeciderNone},
+		{"rules only", []hostPluginSource{{Plugin: rulesOnly}}, mcpDeciderRules},
+		{"policy with a classifier", []hostPluginSource{{Plugin: rulesOnly}, {Plugin: judged}}, mcpDeciderJudged},
+		{"external hook plugin", []hostPluginSource{{Manifest: "/plugins/policy.json"}}, mcpDeciderJudged},
+	} {
+		if got := mcpDeciderOf(test.sources); got != test.want {
+			t.Errorf("%s: decider = %d, want %d", test.name, got, test.want)
+		}
 	}
 }
 

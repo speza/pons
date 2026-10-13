@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"github.com/samperrin/pons"
 )
@@ -90,6 +91,29 @@ func (c remoteClient) post(ctx context.Context, payload any, destination any) er
 	return nil
 }
 
+// maxUntrustedDescription bounds what a remote service can say about its own
+// tool to the classifier.
+const maxUntrustedDescription = 512
+
+// classifierTool is the tool as the classifier sees it. A remote tool's
+// description and schema are the remote service's own words, so the schema
+// is left out and the description is cut short and labeled as untrusted.
+func classifierTool(spec *pons.ToolSpec) any {
+	if spec == nil || !spec.Source.Remote {
+		return spec
+	}
+	description := spec.Description
+	if len(description) > maxUntrustedDescription {
+		description = description[:maxUntrustedDescription]
+		for !utf8.ValidString(description) {
+			description = description[:len(description)-1]
+		}
+	}
+	return map[string]any{
+		"kind": spec.Kind, "source": spec.Source, "untrusted_description": description,
+	}
+}
+
 // classifierState omits the brain's self-reported danger field. Source labels
 // keep user instructions distinguishable from tool output and repository text.
 func classifierState(req pons.ToolCallStartInput) map[string]any {
@@ -99,7 +123,7 @@ func classifierState(req pons.ToolCallStartInput) map[string]any {
 		"action": map[string]any{
 			"id": req.Action.ID, "kind": req.Action.Kind, "args": req.Action.Args,
 		},
-		"tool": req.Tool, "resources": req.Resources,
+		"tool": classifierTool(req.Tool), "resources": req.Resources,
 		"resource_error": req.ResourceError,
 		"workspace":      req.Workspace, "platform": req.Platform,
 		"environment": req.Environment,

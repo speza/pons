@@ -4,17 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/samperrin/pons"
+	"github.com/samperrin/pons/plugins/actionpolicy"
 	"github.com/samperrin/pons/plugins/brain/scripted"
 	"github.com/samperrin/pons/plugins/mcp"
 	"github.com/samperrin/pons/plugins/mcp/mcptest"
@@ -46,6 +49,11 @@ func newCore(t *testing.T, manager *mcp.Manager, grants map[string]mcp.Filter) *
 	}
 	return core
 }
+
+// hooksPlugin registers hooks as a plugin.
+type hooksPlugin pons.Hooks
+
+func (h hooksPlugin) Setup(core *pons.Core) error { return core.AddHooks(pons.Hooks(h)) }
 
 func toolKinds(core *pons.Core) []string {
 	var kinds []string
@@ -228,10 +236,10 @@ func TestAgentSeesOnlyGrantedServersAndToolsPassingBothFilters(t *testing.T) {
 		})
 	}
 
-	t.Run("tools are labeled as external", func(t *testing.T) {
+	t.Run("tools are labeled as external and remote", func(t *testing.T) {
 		spec := newCore(t, manager, map[string]mcp.Filter{"linear": {}}).ToolSpecs()[0]
-		if !spec.Source.External || spec.Source.PluginName != "mcp" {
-			t.Fatalf("source = %+v, want the external mcp plugin", spec.Source)
+		if !spec.Source.External || !spec.Source.Remote || spec.Source.PluginName != "mcp" {
+			t.Fatalf("source = %+v, want the external, remote mcp plugin", spec.Source)
 		}
 	})
 
@@ -373,7 +381,8 @@ func TestApprovalModes(t *testing.T) {
 		{mode: mcp.ApprovalWrites, tool: "get_issue", want: pons.PermissionAllow},
 		{mode: mcp.ApprovalWrites, tool: "create_issue", want: pons.PermissionAsk, reason: "mcp_write_approval"},
 		{mode: mcp.ApprovalAsk, tool: "get_issue", want: pons.PermissionAsk, reason: "mcp_approval"},
-		{mode: "", tool: "get_issue", want: pons.PermissionAsk, reason: "mcp_approval"},
+		{mode: mcp.ApprovalAuto, tool: "get_issue", want: pons.PermissionAsk, reason: "mcp_no_decision"},
+		{mode: "", tool: "get_issue", want: pons.PermissionAsk, reason: "mcp_no_decision"},
 	}
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%s/%s", test.mode, test.tool), func(t *testing.T) {
@@ -384,6 +393,81 @@ func TestApprovalModes(t *testing.T) {
 
 			check, err := core.CheckToolCall(t.Context(), pons.ToolCallStartInput{
 				Action: protocol.Action{ID: "1", Kind: protocol.ActionKind("mcp__github__" + test.tool)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if check.Decision.Permission != test.want || check.Decision.Reason != test.reason {
+				t.Fatalf("decision = %+v, want %s %q", check.Decision, test.want, test.reason)
+			}
+		})
+	}
+
+	// The auto mode leaves the decision to a hook that gives one.
+	classifier := func(risk string) actionpolicy.Policy {
+		return actionpolicy.Policy{Classifiers: []actionpolicy.Classifier{actionpolicy.ClassifierFunc(
+			func(_ context.Context, in pons.ToolCallStartInput) (pons.ActionAssessment, error) {
+				if in.Tool == nil || !in.Tool.Source.Remote {
+					return pons.ActionAssessment{}, errors.New("classifier was not told the tool is remote")
+				}
+				return pons.ActionAssessment{Risk: risk, Confidence: 0.99, ProbabilityConfidence: true}, nil
+			},
+		)}}
+	}
+	rules := func(action pons.Permission, reason string, kinds ...string) actionpolicy.Policy {
+		return actionpolicy.Policy{Rules: []actionpolicy.Rule{actionpolicy.ToolRule(action, reason, kinds...)}}
+	}
+	noObjection := pons.Hooks{OnToolCallStart: func(context.Context, pons.ToolCallStartInput) (pons.ToolCallStartOutput, error) {
+		return pons.ToolCallStartOutput{}, nil
+	}}
+	policies := []struct {
+		name, mode string
+		policy     pons.Plugin
+		want       pons.Permission
+		reason     string
+	}{
+		{name: "auto runs a call the classifier finds safe", mode: mcp.ApprovalAuto,
+			policy: classifier("safe"), want: pons.PermissionAllow, reason: "classifier_safe"},
+		{name: "auto holds a call the classifier wants reviewed", mode: mcp.ApprovalAuto,
+			policy: classifier("review"), want: pons.PermissionAsk, reason: "classifier_review"},
+		{name: "auto follows a deny rule", mode: mcp.ApprovalAuto,
+			policy: rules(pons.PermissionDeny, "no_github", "mcp__github__*"),
+			want:   pons.PermissionDeny, reason: "no_github"},
+		{name: "auto follows an allow rule that names the server", mode: mcp.ApprovalAuto,
+			policy: rules(pons.PermissionAllow, "github_ok", "mcp__github__*"),
+			want:   pons.PermissionAllow, reason: "github_ok"},
+		{name: "auto is not allowed by a rule for every tool", mode: mcp.ApprovalAuto,
+			policy: rules(pons.PermissionAllow, "anything", "*"),
+			want:   pons.PermissionAsk, reason: "no_matching_rule"},
+		{name: "auto asks when the policy settles nothing", mode: mcp.ApprovalAuto,
+			policy: rules(pons.PermissionAllow, "shell", "bash"),
+			want:   pons.PermissionAsk, reason: "no_matching_rule"},
+		{name: "auto asks when a hook only has no objection", mode: mcp.ApprovalAuto,
+			policy: hooksPlugin(noObjection), want: pons.PermissionAsk, reason: "mcp_no_decision"},
+		{name: "ask is not overridden by a safe verdict", mode: mcp.ApprovalAsk,
+			policy: classifier("safe"), want: pons.PermissionAsk, reason: "mcp_approval"},
+	}
+	for _, test := range policies {
+		t.Run(test.name, func(t *testing.T) {
+			config := httpServer(server.URL)
+			config.ApprovalMode = test.mode
+			manager := newManager(t, mcp.Options{Servers: map[string]mcp.ServerConfig{"github": config}})
+			// The policy is set up after the MCP plugin, as in a run.
+			core := newCore(t, manager, map[string]mcp.Filter{"github": {}})
+			if err := core.Use(test.policy); err != nil {
+				t.Fatal(err)
+			}
+
+			// A run gives hooks the called tool's spec.
+			specs := core.ToolSpecs()
+			called := slices.IndexFunc(specs, func(spec pons.ToolSpec) bool {
+				return spec.Kind == "mcp__github__create_issue"
+			})
+			if called < 0 {
+				t.Fatalf("create_issue is not registered: %v", toolKinds(core))
+			}
+			check, err := core.CheckToolCall(t.Context(), pons.ToolCallStartInput{
+				Action: protocol.Action{ID: "1", Kind: specs[called].Kind}, Tool: &specs[called],
 			})
 			if err != nil {
 				t.Fatal(err)
