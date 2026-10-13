@@ -256,8 +256,8 @@ demonstration. Beyond them:
 
 ## Open questions
 
-- Telegram is proposed as the first chat connector; confirm before the plan
-  reaches it.
+- Which channel comes first? The owner prefers the web client and an app
+  first; Telegram, the plan's original proposal, is not confirmed.
 - How much should automatic memory extraction save before review becomes
   necessary?
 - Is serialized handling acceptable for the agent's own conversations, or
@@ -267,7 +267,10 @@ demonstration. Beyond them:
   supports both.
 - **Integrations.** How does the owner connect apps such as email, GitHub, or
   Home Assistant once, and grant each agent a scoped subset (for example read
-  but not send)? This likely needs its own ADR before U11.
+  but not send)? Proposed in
+  [ADR-0025](../../adr/adr-0025-mcp-integrations.md): integrations are MCP
+  servers in the standard `mcpServers` shape, added through a built-in MCP
+  plugin and granted to agents by server and tool filter.
 - **Skills.** Should an agent save a repeatable workflow as a file in its
   workspace or memory and rerun it on a schedule, as Grok Bot does?
 - **Outbound checks.** Should ADR-0014's classifier check every outbound
