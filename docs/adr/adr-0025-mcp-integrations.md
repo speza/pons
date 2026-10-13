@@ -204,12 +204,26 @@ MCP tools are ordinary actions to ADR-0014's action policy and permission
 hooks. Rules match on the tool name, so `mcp__github__*` or
 `mcp__gmail__send_*` work as patterns.
 
-- Each server has a default approval mode, as in Codex: `ask` (the default),
-  `writes` (allow tools annotated `readOnlyHint`, ask for the rest), or
-  `allow`. Annotations come from the untrusted server, so `writes` is a
-  convenience for trusted servers, not a security boundary.
-- In a run with no one to ask, such as a scheduled run, `ask` denies with
-  `approval_unavailable` until ADR-0021's durable approvals exist.
+- Each server has an approval mode:
+  - `auto` (the default) leaves each call to the action policy. A rule or a
+    classifier that finds the call safe allows it. When nothing decides, the
+    call is asked, through the fallback answer ADR-0014 describes.
+  - `ask` asks for every call.
+  - `writes` allows tools annotated `readOnlyHint` and asks for the rest.
+    Annotations come from the untrusted server, so `writes` is a convenience
+    for trusted servers, not a security boundary.
+  - `allow` raises no objection.
+- The action policy can allow a call only under `auto`. It can tighten any
+  mode, and it cannot loosen `ask` or `writes`.
+- A tool's name, description, and input schema are the server's own words.
+  A classifier is sent the description cut short and labeled as untrusted,
+  and no schema. A blanket `*` allow rule does not cover MCP tools; they
+  must be named, as in `mcp__github__get_*`.
+- An MCP call runs on the host over the network, whatever the hands sandbox
+  allows, and the classifier is told so.
+- In a run with no one to ask, such as a scheduled run, an ask denies with
+  `approval_unavailable` until ADR-0021's durable approvals exist. `auto`
+  with no action policy therefore denies every call.
 - MCP results are untrusted data, labeled with their server as the source.
   An email body or issue comment cannot express user intent, grant a tool, or
   change policy.
@@ -246,15 +260,18 @@ credentials, prove:
 - secrets reach only their own server, in its headers or environment, never
   hands, events, logs, or the classifier;
 - a non-HTTPS, non-loopback `http` URL is rejected;
-- `ask` and `writes` behave as described, and `ask` denies with
+- `auto`, `ask`, and `writes` behave as described, and an ask denies with
   `approval_unavailable` when no one can answer;
+- under `auto`, a safe classifier verdict or a named allow rule runs the
+  call, and a `*` allow rule or no action policy does not;
 - an expired `http` session is reopened, a crashed `stdio` server restarts
   with backoff, and a hung call honors its deadline and cancellation;
 - OAuth tokens are refreshed before expiry, and a failed refresh makes the
   server's tools fail with a login-required error;
 - a server that requires sampling fails to initialize;
 - project config cannot add or enable a server;
-- MCP results are labeled untrusted in classifier context;
+- MCP results and tool descriptions are labeled untrusted in classifier
+  context;
 - a Registry `server.json` with a secret input produces a config with a
   `${secret:...}` reference and no secret value.
 
@@ -292,7 +309,7 @@ they need no local process or sandbox, and they suit an always-on agent.
 1. **Remote servers with token auth:** `plugins/mcp`, `http` servers in host
    `mcpServers`, `headers` with `${secret:...}` and `pons mcp set-secret`,
    `agent.json` grants, approval modes, and a test suite against an
-   in-process fake server.
+   in-process fake server. Built in #27 and #28.
 2. **OAuth:** `pons mcp login`, dynamic and pre-registered clients, token
    storage, and refresh. Google Workspace's Gmail, Calendar, and Drive
    servers are the target.
